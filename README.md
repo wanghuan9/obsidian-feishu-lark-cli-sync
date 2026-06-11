@@ -1,5 +1,7 @@
 # Feishu Lark CLI Sync
 
+[简体中文](./README.md) | [English](./README.en.md)
+
 通过本地 `lark-cli` 将 Obsidian Markdown 笔记一键发布和同步到飞书 / Lark 云文档的桌面端插件。
 
 > 中文用户可以直接理解为“Obsidian 飞书同步插件”。海外用户通常使用 Lark，因此 README 同时保留 Feishu / Lark 关键词。
@@ -129,7 +131,7 @@ which lark-cli
 VAULT="/path/to/your/vault" bash -c 'set -euo pipefail
 PLUGIN_DIR="$VAULT/.obsidian/plugins/feishu-lark-cli-sync"
 mkdir -p "$PLUGIN_DIR"
-for file in manifest.json main.js README.md; do
+for file in manifest.json main.js README.md README.en.md; do
   curl -fsSL "https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync/releases/latest/download/$file" -o "$PLUGIN_DIR/$file"
 done
 echo "Installed Feishu Lark CLI Sync to $PLUGIN_DIR"'
@@ -143,86 +145,3 @@ echo "Installed Feishu Lark CLI Sync to $PLUGIN_DIR"'
 npm install
 npm run build
 ```
-
----
-
-## English
-
-Feishu Lark CLI Sync is an Obsidian desktop plugin that publishes and syncs Markdown notes to Feishu/Lark Docs through the local `lark-cli`.
-
-### Features
-
-- Publish a single Markdown note as a Feishu/Lark Docx document
-- Overwrite-sync a single already published note
-- Publish an entire Markdown folder in one action
-- Sync an entire folder by updating bound documents and creating new remote documents for new local files
-- Preserve the selected folder hierarchy when publishing folders
-- Rewrite local internal links into Feishu/Lark document references
-- Chinese and English UI
-- No App ID, App Secret, access token, or OAuth setup inside the plugin; it reuses the local `lark-cli` login state
-
-### Requirements
-
-- Obsidian desktop
-- Installed and authenticated `lark-cli`
-- Permission to create documents in the target Wiki node, folder, or personal library
-
-### Install and Login to lark-cli
-
-This plugin does not handle Feishu/Lark API credentials itself. All API calls are delegated to the local `lark-cli`.
-
-`lark-cli` is the official CLI for the Lark/Feishu Open Platform:
-
-- GitHub: <https://github.com/larksuite/cli>
-- npm: <https://www.npmjs.com/package/@larksuite/cli>
-
-Install:
-
-```bash
-npm install -g @larksuite/cli
-```
-
-Login:
-
-```bash
-lark-cli auth login
-```
-
-Check:
-
-```bash
-lark-cli --version
-lark-cli auth status
-```
-
-If Obsidian cannot find `lark-cli`, set the absolute command path in the plugin settings. You can locate it with:
-
-```bash
-which lark-cli
-```
-
-### Folder Publishing
-
-Right-click a folder and choose `Publish folder to Feishu/Lark`.
-
-The plugin creates the remote hierarchy starting from the selected folder only. Publishing `ITC-78270` creates `ITC-78270/design/...`; publishing `design` directly creates `design/...` without including local parent folders.
-
-Running folder publish again works as folder sync: bound documents are overwritten, and new local Markdown files are created remotely.
-
-Local notes remain unchanged. Only the uploaded remote documents are rewritten with Feishu/Lark document references.
-
-### Manual Installation
-
-Before the plugin is available in the community plugin browser, install it with the following command. Replace `VAULT` with your Obsidian vault path:
-
-```bash
-VAULT="/path/to/your/vault" bash -c 'set -euo pipefail
-PLUGIN_DIR="$VAULT/.obsidian/plugins/feishu-lark-cli-sync"
-mkdir -p "$PLUGIN_DIR"
-for file in manifest.json main.js README.md; do
-  curl -fsSL "https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync/releases/latest/download/$file" -o "$PLUGIN_DIR/$file"
-done
-echo "Installed Feishu Lark CLI Sync to $PLUGIN_DIR"'
-```
-
-Then enable `Feishu Lark CLI Sync` in Obsidian settings.
