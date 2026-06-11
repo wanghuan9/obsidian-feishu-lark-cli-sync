@@ -120,7 +120,7 @@ const MESSAGES = {
 		noticeSyncFailed: "飞书同步失败：{message}",
 		noticeRemoteDeletedRecreate: "远端文档已删除，正在重新创建...",
 		errorNoDocumentToken: "lark-cli 没有返回文档 token 或 URL。",
-		settingsTitle: "Lark CLI Sync",
+		settingsTitle: "Feishu Lark CLI Sync",
 		settingLanguageName: "语言",
 		settingLanguageDesc: "切换插件设置、菜单和通知的显示语言。",
 		languageChinese: "中文",
@@ -139,24 +139,24 @@ const MESSAGES = {
 		settingOpenAfterSyncDesc: "发布或同步成功后，在浏览器中打开飞书文档。"
 	},
 	en: {
-		commandPublishCurrentNote: "Publish current note to Lark",
-		commandSyncCurrentNote: "Sync current note to Lark",
-		menuPublishToLark: "Publish to Lark",
-		menuSyncToLark: "Sync to Lark",
-		menuPublishFolderToLark: "Publish folder to Lark",
-		ribbonSyncCurrentNote: "Sync current note to Lark",
+		commandPublishCurrentNote: "Publish current note to Feishu/Lark",
+		commandSyncCurrentNote: "Sync current note to Feishu/Lark",
+		menuPublishToLark: "Publish to Feishu/Lark",
+		menuSyncToLark: "Sync to Feishu/Lark",
+		menuPublishFolderToLark: "Publish folder to Feishu/Lark",
+		ribbonSyncCurrentNote: "Sync current note to Feishu/Lark",
 		noticeNoActiveMarkdownNote: "No active Markdown note.",
 		noticePublishingToLark: "Publishing to Lark...",
 		noticeSyncingToLark: "Syncing to Lark...",
 		noticePublishingFolderToLark: "Publishing folder to Lark...",
 		noticeNoMarkdownFilesInFolder: "No Markdown files found in this folder.",
-		noticePublishedToLark: "Published to Lark",
-		noticeSyncedToLark: "Synced to Lark",
-		noticePublishedFolderToLark: "Published {count} notes to Lark.",
-		noticeSyncFailed: "Lark sync failed: {message}",
+		noticePublishedToLark: "Published to Feishu/Lark",
+		noticeSyncedToLark: "Synced to Feishu/Lark",
+		noticePublishedFolderToLark: "Published {count} notes to Feishu/Lark.",
+		noticeSyncFailed: "Feishu/Lark sync failed: {message}",
 		noticeRemoteDeletedRecreate: "Remote document was deleted. Creating a new document...",
 		errorNoDocumentToken: "lark-cli did not return a document token or URL.",
-		settingsTitle: "Lark CLI Sync",
+		settingsTitle: "Feishu Lark CLI Sync",
 		settingLanguageName: "Language",
 		settingLanguageDesc: "Switch the display language for settings, menus, and notices.",
 		languageChinese: "中文",
@@ -939,7 +939,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 		content: string,
 		callback: (file: { directory: string; fileName: string }) => Promise<T>
 	): Promise<T> {
-		const tempDir = await mkdtemp(join(tmpdir(), "obsidian-lark-sync-"));
+		const tempDir = await mkdtemp(join(tmpdir(), "feishu-lark-cli-sync-"));
 		const fileName = `${this.sanitizeFileName(baseName)}.md`;
 		const tempPath = join(tempDir, fileName);
 
@@ -1030,7 +1030,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			new Notice(this.t("noticeSyncFailed", { message: errorMessage }), 10000);
-			console.error("[Lark CLI Sync] operation failed", error);
+			console.error("[Feishu Lark CLI Sync] operation failed", error);
 		} finally {
 			notice.hide();
 		}

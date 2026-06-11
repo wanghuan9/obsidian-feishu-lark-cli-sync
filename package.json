@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-lark-cli-sync",
+	"name": "obsidian-feishu-lark-cli-sync",
 	"version": "0.1.0",
-	"description": "Obsidian plugin that publishes notes to Lark Docs through lark-cli.",
+	"description": "Obsidian plugin that publishes and syncs Markdown notes to Feishu/Lark Docs through lark-cli.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
@@ -13,7 +13,8 @@
 	"keywords": [
 		"obsidian",
 		"lark",
-		"feishu"
+		"feishu",
+		"lark-cli"
 	],
 	"author": "wanghuan",
 	"license": "MIT",
