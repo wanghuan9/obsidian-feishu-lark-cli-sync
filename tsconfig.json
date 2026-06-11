@@ -1,0 +1,31 @@
+{
+	"compilerOptions": {
+		"allowSyntheticDefaultImports": true,
+		"baseUrl": ".",
+		"declaration": false,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"inlineSources": true,
+		"lib": [
+			"DOM",
+			"ES2021"
+		],
+		"module": "ESNext",
+		"moduleResolution": "Node",
+		"noImplicitAny": true,
+		"noImplicitReturns": true,
+		"noImplicitThis": true,
+		"noUncheckedIndexedAccess": true,
+		"outDir": "dist",
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"strict": true,
+		"strictNullChecks": true,
+		"target": "ES2021"
+	},
+	"include": [
+		"main.ts",
+		"link-rewrite.ts",
+		"folder-path.ts"
+	]
+}

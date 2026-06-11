@@ -1,0 +1,10 @@
+{
+	"id": "lark-cli-sync",
+	"name": "Lark CLI Sync",
+	"version": "0.1.0",
+	"minAppVersion": "1.5.0",
+	"description": "Publish and sync Obsidian notes to Lark Docs through the local lark-cli.",
+	"author": "wanghuan",
+	"authorUrl": "",
+	"isDesktopOnly": true
+}

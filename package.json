@@ -1,0 +1,28 @@
+{
+	"name": "obsidian-lark-cli-sync",
+	"version": "0.1.0",
+	"description": "Obsidian plugin that publishes notes to Lark Docs through lark-cli.",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"build": "tsc --noEmit && node esbuild.config.mjs production",
+		"dev": "node esbuild.config.mjs",
+		"test": "tsc --noEmit && node test-link-rewrite.mjs && node test-folder-path.mjs",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"keywords": [
+		"obsidian",
+		"lark",
+		"feishu"
+	],
+	"author": "wanghuan",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^20.19.0",
+		"builtin-modules": "^5.0.0",
+		"esbuild": "^0.25.5",
+		"obsidian": "^1.8.7",
+		"tslib": "^2.8.1",
+		"typescript": "^5.8.3"
+	}
+}
