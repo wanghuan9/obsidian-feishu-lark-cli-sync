@@ -26,7 +26,15 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	updateFrontmatter: true
 };
 
-const FRONTMATTER_KEY = "lark_doc";
+const FRONTMATTER_URL_KEY = "lark_doc_url";
+const FRONTMATTER_TOKEN_KEY = "lark_doc_token";
+const FRONTMATTER_SYNCED_AT_KEY = "lark_doc_synced_at";
+const FRONTMATTER_BINDING_KEYS = [
+	"lark_doc",
+	FRONTMATTER_URL_KEY,
+	FRONTMATTER_TOKEN_KEY,
+	FRONTMATTER_SYNCED_AT_KEY
+];
 const MAX_STDERR_LENGTH = 1600;
 const LARK_CLI_COMMAND = "lark-cli";
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
@@ -134,7 +142,7 @@ const MESSAGES = {
 		titleSourceFirstHeading: "第一个标题",
 		titleSourceFileName: "文件名",
 		settingWriteBindingName: "写入 frontmatter 绑定信息",
-		settingWriteBindingDesc: "发布后把飞书文档 token 和 URL 保存到笔记 frontmatter。",
+		settingWriteBindingDesc: "发布后把飞书文档 URL、token 和同步时间保存到笔记 frontmatter。",
 		settingOpenAfterSyncName: "同步后打开文档",
 		settingOpenAfterSyncDesc: "发布或同步成功后，在浏览器中打开飞书文档。"
 	},
@@ -170,7 +178,7 @@ const MESSAGES = {
 		titleSourceFirstHeading: "First heading",
 		titleSourceFileName: "File name",
 		settingWriteBindingName: "Write binding to frontmatter",
-		settingWriteBindingDesc: "Store the Lark document token and URL in the note after publishing.",
+		settingWriteBindingDesc: "Store the Lark document URL, token, and sync time in note frontmatter.",
 		settingOpenAfterSyncName: "Open after sync",
 		settingOpenAfterSyncDesc: "Open the Lark document in your browser after publish or sync succeeds."
 	}
@@ -326,14 +334,8 @@ export default class LarkCliSyncPlugin extends Plugin {
 				const binding = this.getBinding(file);
 				const documentParentPath = this.getRemoteParentPath(folderPath, file, folderRoot);
 				const documentParent = await this.ensureRemoteFolderPath(rootParent, documentParentPath);
-				const reusableBinding = binding && this.isBindingInRemoteParent(
-					binding,
-					folderRoot,
-					documentParentPath,
-					documentParent
-				) ? binding : null;
-				const nextBinding = reusableBinding
-					? await this.syncOrRecreateDocument(file, reusableBinding, content, documentParent)
+				const nextBinding = binding
+					? await this.syncOrRecreateDocument(file, binding, content, documentParent)
 					: await this.createLarkDocument(file, content, documentParent);
 				const nextBindingWithParent = this.withRemoteParentMetadata(
 					nextBinding,
@@ -385,25 +387,27 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	private getBinding(file: TFile): BoundLarkDocument | null {
 		const cache = this.app.metadataCache.getFileCache(file);
-		const value = cache?.frontmatter?.[FRONTMATTER_KEY] as unknown;
-		if (!value || typeof value !== "object") {
+		const frontmatter = cache?.frontmatter;
+		if (!frontmatter) {
 			return null;
 		}
 
-		const candidate = value as Partial<BoundLarkDocument>;
-		if (!candidate.token && !candidate.url) {
+		const token = this.readFrontmatterString(frontmatter[FRONTMATTER_TOKEN_KEY]);
+		const url = this.readFrontmatterString(frontmatter[FRONTMATTER_URL_KEY]);
+		const lastSyncedAt = this.readFrontmatterString(frontmatter[FRONTMATTER_SYNCED_AT_KEY]);
+		if (!token && !url) {
 			return null;
 		}
 
 		return {
-			token: candidate.token || "",
-			url: candidate.url || "",
-			containerToken: candidate.containerToken,
-			containerKind: candidate.containerKind,
-			remoteRoot: candidate.remoteRoot,
-			remoteParentPath: candidate.remoteParentPath,
-			lastSyncedAt: candidate.lastSyncedAt
+			token,
+			url,
+			lastSyncedAt
 		};
+	}
+
+	private readFrontmatterString(value: unknown): string {
+		return typeof value === "string" ? value : "";
 	}
 
 	private async createLarkDocument(file: TFile, content: string, parent?: RemoteParent): Promise<BoundLarkDocument> {
@@ -661,18 +665,6 @@ export default class LarkCliSyncPlugin extends Plugin {
 			remoteRoot,
 			remoteParentPath
 		};
-	}
-
-	private isBindingInRemoteParent(
-		binding: BoundLarkDocument,
-		remoteRoot: string,
-		remoteParentPath: string,
-		parent: RemoteParent
-	): boolean {
-		return binding.remoteRoot === remoteRoot
-			&& binding.remoteParentPath === remoteParentPath
-			&& binding.containerToken === parent.token
-			&& binding.containerKind === parent.kind;
 	}
 
 	private getFolderBindingKey(rootParent: RemoteParent, folderPath: string): string {
@@ -942,16 +934,18 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	private async writeBinding(file: TFile, binding: BoundLarkDocument): Promise<void> {
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-			frontmatter[FRONTMATTER_KEY] = {
-				token: binding.token,
-				url: binding.url,
-				containerToken: binding.containerToken,
-				containerKind: binding.containerKind,
-				remoteRoot: binding.remoteRoot,
-				remoteParentPath: binding.remoteParentPath,
-				lastSyncedAt: binding.lastSyncedAt || new Date().toISOString()
-			};
+			delete frontmatter.lark_doc;
+			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
+			frontmatter[FRONTMATTER_TOKEN_KEY] = binding.token;
+			frontmatter[FRONTMATTER_SYNCED_AT_KEY] = this.formatSyncTime(binding.lastSyncedAt);
 		});
+	}
+
+	private formatSyncTime(value?: string): string {
+		const date = value ? new Date(value) : new Date();
+		const normalizedDate = Number.isNaN(date.getTime()) ? new Date() : date;
+		const offsetMs = normalizedDate.getTimezoneOffset() * 60 * 1000;
+		return new Date(normalizedDate.getTime() - offsetMs).toISOString().slice(0, 19).replace("T", " ");
 	}
 
 	private removeLarkBinding(content: string): string {
@@ -968,7 +962,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 		const frontmatterEnd = frontmatterStart + endMatch.index;
 		const frontmatter = content.slice(frontmatterStart, frontmatterEnd);
 		const body = content.slice(frontmatterEnd + endMatch[0].length);
-		const filteredLines = this.removeYamlObject(frontmatter.split(/\r?\n/), FRONTMATTER_KEY);
+		const filteredLines = this.removeYamlObjects(frontmatter.split(/\r?\n/), FRONTMATTER_BINDING_KEYS);
 
 		if (filteredLines.every((line) => line.trim() === "")) {
 			return body.replace(/^\s+/, "");
@@ -977,8 +971,9 @@ export default class LarkCliSyncPlugin extends Plugin {
 		return `---\n${filteredLines.join("\n").trim()}\n---\n${body}`;
 	}
 
-	private removeYamlObject(lines: string[], key: string): string[] {
+	private removeYamlObjects(lines: string[], keys: string[]): string[] {
 		const result: string[] = [];
+		const keySet = new Set(keys);
 		let skipping = false;
 		let skipIndent = 0;
 
@@ -992,7 +987,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 					skipping = false;
 				}
 
-				if (!skipping && name === key) {
+				if (!skipping && name && keySet.has(name)) {
 					skipping = true;
 					skipIndent = indent;
 					continue;

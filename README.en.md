@@ -18,10 +18,9 @@ An Obsidian desktop plugin that publishes and syncs Markdown notes to Feishu/Lar
 
 ```yaml
 ---
-lark_doc:
-  token: YTi3dFxPEodFKXxl8J3c2PWGn07
-  url: https://atrenew.feishu.cn/docx/YTi3dFxPEodFKXxl8J3c2PWGn07
-  lastSyncedAt: "2026-06-11T10:48:33.000Z"
+lark_doc_url: "https://atrenew.feishu.cn/docx/YTi3dFxPEodFKXxl8J3c2PWGn07"
+lark_doc_token: "YTi3dFxPEodFKXxl8J3c2PWGn07"
+lark_doc_synced_at: "2026-06-12 10:42:31"
 ---
 ```
 
@@ -71,7 +70,7 @@ which lark-cli
 - `lark-cli path`: command name or absolute path; keep `lark-cli` for automatic detection
 - `Default target`: Wiki URL, Wiki node token, folder token, or blank for personal library
 - `Title source`: first Markdown H1 or file name
-- `Write binding to frontmatter`: store Feishu/Lark document token and URL after publishing
+- `Write binding to frontmatter`: store the Feishu/Lark document URL, token, and sync time after publishing
 - `Open after sync`: open the remote document after publish or sync
 
 ## Single-Note Publish and Sync

@@ -20,10 +20,9 @@
 
 ```yaml
 ---
-lark_doc:
-  token: YTi3dFxPEodFKXxl8J3c2PWGn07
-  url: https://atrenew.feishu.cn/docx/YTi3dFxPEodFKXxl8J3c2PWGn07
-  lastSyncedAt: "2026-06-11T10:48:33.000Z"
+lark_doc_url: "https://atrenew.feishu.cn/docx/YTi3dFxPEodFKXxl8J3c2PWGn07"
+lark_doc_token: "YTi3dFxPEodFKXxl8J3c2PWGn07"
+lark_doc_synced_at: "2026-06-12 10:42:31"
 ---
 ```
 
@@ -73,7 +72,7 @@ which lark-cli
 - `lark-cli 路径`：可填写命令名或绝对路径；保持 `lark-cli` 时自动探测
 - `默认上传位置`：可填写 Wiki URL、Wiki 节点 token、文件夹 token；留空则发布到个人文档库
 - `标题来源`：使用第一个 Markdown 一级标题，或使用文件名
-- `写入 frontmatter 绑定信息`：发布后记录飞书文档 token 和 URL，后续可直接同步
+- `写入 frontmatter 绑定信息`：发布后记录飞书文档 URL、token 和同步时间，后续可直接同步
 - `同步后打开文档`：发布或同步成功后在浏览器中打开飞书文档
 
 ## 单文件发布和同步
