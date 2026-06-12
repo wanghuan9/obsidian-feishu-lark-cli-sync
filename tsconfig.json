@@ -27,6 +27,7 @@
 		"main.ts",
 		"link-rewrite.ts",
 		"folder-path.ts",
-		"note-content.ts"
+		"note-content.ts",
+		"lark-sync-core.ts"
 	]
 }

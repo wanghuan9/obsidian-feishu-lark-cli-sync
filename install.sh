@@ -31,7 +31,7 @@ fi
 PLUGIN_DIR="$VAULT_PATH/.obsidian/plugins/$PLUGIN_ID"
 mkdir -p "$PLUGIN_DIR"
 
-for file in manifest.json main.js README.md README.en.md; do
+for file in manifest.json main.js lark-sync-core.mjs README.md README.en.md sync-pre-push.mjs; do
   if [ ! -f "$SCRIPT_DIR/$file" ]; then
     echo "缺少 $file，请先运行 npm install && npm run build / Missing $file, run npm install && npm run build first." >&2
     exit 1
@@ -39,6 +39,8 @@ for file in manifest.json main.js README.md README.en.md; do
 
   cp "$SCRIPT_DIR/$file" "$PLUGIN_DIR/$file"
 done
+
+chmod +x "$PLUGIN_DIR/sync-pre-push.mjs"
 
 echo "已安装到 / Installed to: $PLUGIN_DIR"
 echo "请在 Obsidian 设置中启用 Feishu Lark CLI Sync。"

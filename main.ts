@@ -1,7 +1,7 @@
-import { Menu, Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
+import { FileSystemAdapter, Menu, Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
 import { execFile } from "child_process";
 import { constants } from "fs";
-import { access } from "fs/promises";
+import { access, chmod, copyFile, mkdir, readFile } from "fs/promises";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -12,7 +12,15 @@ import {
 	getSelectedFolderName as getSelectedRemoteRootName
 } from "./folder-path";
 import { LinkTarget, normalizeLinkPath, parentPath, resolveInternalLink, rewriteInternalLinks } from "./link-rewrite";
-import { prepareNoteContentForLark, TitleSource } from "./note-content";
+import {
+	buildUpdateDocumentArgs,
+	FRONTMATTER_TOKEN_KEY,
+	FRONTMATTER_URL_KEY,
+	LEGACY_FRONTMATTER_SYNCED_AT_KEY,
+	prepareNoteContentForLark,
+	removeLarkBinding,
+	TitleSource
+} from "./lark-sync-core";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,28 +31,24 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	folderBindings: {},
 	titleSource: "first-heading",
 	openAfterSync: true,
-	updateFrontmatter: true
+	updateFrontmatter: true,
+	autoSyncMode: "manual",
+	autoSyncDelaySeconds: 15
 };
 
-const FRONTMATTER_URL_KEY = "lark_doc_url";
-const FRONTMATTER_TOKEN_KEY = "lark_doc_token";
-const FRONTMATTER_SYNCED_AT_KEY = "lark_doc_synced_at";
 const FRONTMATTER_REMOTE_ROOT_KEY = "remoteRoot";
 const FRONTMATTER_REMOTE_PARENT_PATH_KEY = "remoteParentPath";
-const FRONTMATTER_BINDING_KEYS = [
-	"lark_doc",
-	FRONTMATTER_URL_KEY,
-	FRONTMATTER_TOKEN_KEY,
-	FRONTMATTER_SYNCED_AT_KEY,
-	FRONTMATTER_REMOTE_ROOT_KEY,
-	FRONTMATTER_REMOTE_PARENT_PATH_KEY
-];
 const MAX_STDERR_LENGTH = 1600;
 const LARK_CLI_COMMAND = "lark-cli";
+const PRE_PUSH_SCRIPT_NAME = "sync-pre-push.mjs";
+const PRE_PUSH_HOOK_MARKER = "Feishu Lark CLI Sync";
+const AUTO_SYNC_WRITE_IGNORE_MS = 5000;
+const DEFAULT_AUTO_SYNC_DELAY_SECONDS = 15;
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
 const FALLBACK_PATH_ENTRIES = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 type Language = "zh-CN" | "en";
+type AutoSyncMode = "manual" | "save" | "pre-push";
 type RemoteParentKind = "wiki" | "drive" | "my_library" | "unknown";
 
 interface LarkCliSyncSettings {
@@ -55,6 +59,8 @@ interface LarkCliSyncSettings {
 	titleSource: TitleSource;
 	openAfterSync: boolean;
 	updateFrontmatter: boolean;
+	autoSyncMode: AutoSyncMode;
+	autoSyncDelaySeconds: number;
 }
 
 interface BoundLarkDocument {
@@ -64,7 +70,6 @@ interface BoundLarkDocument {
 	containerKind?: RemoteParentKind;
 	remoteParentPath?: string;
 	remoteRoot?: string;
-	lastSyncedAt?: string;
 }
 
 interface LarkCommandResult {
@@ -113,6 +118,19 @@ interface RemoteParent {
 	kind: RemoteParentKind;
 }
 
+interface SyncFileOptions {
+	allowCreate: boolean;
+	openAfterSync: boolean;
+	showSuccess: boolean;
+	showRemoteDeletedNotice: boolean;
+	updateFrontmatter: boolean;
+}
+
+interface SyncOrRecreateOptions {
+	allowRecreate: boolean;
+	showRemoteDeletedNotice: boolean;
+}
+
 const MESSAGES = {
 	"zh-CN": {
 		commandPublishCurrentNote: "发布到飞书",
@@ -131,6 +149,12 @@ const MESSAGES = {
 		noticePublishedFolderToLark: "已发布 {count} 篇笔记到飞书。",
 		noticeSyncFailed: "飞书同步失败：{message}",
 		noticeRemoteDeletedRecreate: "远端文档已删除，正在重新创建...",
+		noticeGitHookInstalled: "已安装 pre-push hook。选择 pre-push 模式后，git push 前会同步已绑定文档。",
+		noticeGitHookInstallFailed: "安装 pre-push hook 失败：{message}",
+		noticeNoDesktopVaultPath: "当前环境无法获取本地仓库路径，不能安装 Git hook。",
+		noticeNoGitRepository: "当前 Obsidian 仓库不是 Git 仓库，未找到 .git 目录。",
+		noticeExistingGitHookBackedUp: "检测到已有 pre-push hook，已备份并在新 hook 中继续调用：{path}",
+		noticeAutoSyncFailed: "自动同步失败：{path}\n{message}",
 		errorNoDocumentToken: "lark-cli 没有返回文档 token 或 URL。",
 		settingsTitle: "Feishu Lark CLI Sync",
 		settingLanguageName: "语言",
@@ -148,7 +172,17 @@ const MESSAGES = {
 		settingWriteBindingName: "写入 frontmatter 绑定信息",
 		settingWriteBindingDesc: "发布后把飞书文档 URL 和同步时间保存到笔记 frontmatter。",
 		settingOpenAfterSyncName: "同步后打开文档",
-		settingOpenAfterSyncDesc: "发布或同步成功后，在浏览器中打开飞书文档。"
+		settingOpenAfterSyncDesc: "发布或同步成功后，在浏览器中打开飞书文档。",
+		settingAutoSyncModeName: "自动同步方式",
+		settingAutoSyncModeDesc: "自动同步只处理已绑定的 Markdown 文档。保存后同步依赖 Obsidian；pre-push hook 可脱离 Obsidian 独立运行。",
+		autoSyncModeManual: "关闭",
+		autoSyncModeSave: "保存后同步",
+		autoSyncModePrePush: "Git pre-push hook",
+		settingAutoSyncDelayName: "保存后同步延迟",
+		settingAutoSyncDelayDesc: "文件保存后等待多少秒再同步，用于合并连续编辑。",
+		settingInstallPrePushHookName: "安装 Git pre-push hook",
+		settingInstallPrePushHookDesc: "把 hook 安装到当前 Obsidian 仓库的 .git/hooks/pre-push。hook 会读取插件设置，只有选择 Git pre-push hook 时才同步。",
+		installPrePushHookButton: "安装 hook"
 	},
 	en: {
 		commandPublishCurrentNote: "Publish to Feishu/Lark",
@@ -167,6 +201,12 @@ const MESSAGES = {
 		noticePublishedFolderToLark: "Published {count} notes to Feishu/Lark.",
 		noticeSyncFailed: "Feishu/Lark sync failed: {message}",
 		noticeRemoteDeletedRecreate: "Remote document was deleted. Creating a new document...",
+		noticeGitHookInstalled: "Installed the pre-push hook. When pre-push mode is selected, bound notes sync before git push.",
+		noticeGitHookInstallFailed: "Failed to install pre-push hook: {message}",
+		noticeNoDesktopVaultPath: "Cannot resolve the local vault path in this environment, so Git hook cannot be installed.",
+		noticeNoGitRepository: "The current Obsidian vault is not a Git repository. No .git directory was found.",
+		noticeExistingGitHookBackedUp: "Existing pre-push hook detected. It was backed up and will still be called by the new hook: {path}",
+		noticeAutoSyncFailed: "Auto sync failed: {path}\n{message}",
 		errorNoDocumentToken: "lark-cli did not return a document token or URL.",
 		settingsTitle: "Feishu Lark CLI Sync",
 		settingLanguageName: "Language",
@@ -184,7 +224,17 @@ const MESSAGES = {
 		settingWriteBindingName: "Write binding to frontmatter",
 		settingWriteBindingDesc: "Store the Lark document URL and sync time in note frontmatter.",
 		settingOpenAfterSyncName: "Open after sync",
-		settingOpenAfterSyncDesc: "Open the Lark document in your browser after publish or sync succeeds."
+		settingOpenAfterSyncDesc: "Open the Lark document in your browser after publish or sync succeeds.",
+		settingAutoSyncModeName: "Auto sync mode",
+		settingAutoSyncModeDesc: "Auto sync only handles bound Markdown notes. Save sync depends on Obsidian; the pre-push hook can run without Obsidian.",
+		autoSyncModeManual: "Off",
+		autoSyncModeSave: "Sync after save",
+		autoSyncModePrePush: "Git pre-push hook",
+		settingAutoSyncDelayName: "Save sync delay",
+		settingAutoSyncDelayDesc: "Seconds to wait after a save before syncing, used to merge continuous edits.",
+		settingInstallPrePushHookName: "Install Git pre-push hook",
+		settingInstallPrePushHookDesc: "Install the hook into .git/hooks/pre-push of the current Obsidian vault. The hook reads plugin settings and syncs only when Git pre-push hook mode is selected.",
+		installPrePushHookButton: "Install hook"
 	}
 } as const;
 
@@ -192,9 +242,19 @@ type MessageKey = keyof typeof MESSAGES.en;
 
 export default class LarkCliSyncPlugin extends Plugin {
 	settings!: LarkCliSyncSettings;
+	private readonly autoSyncTimers = new Map<string, number>();
+	private readonly autoSyncRunningPaths = new Set<string>();
+	private readonly selfWrittenPaths = new Map<string, number>();
 
 	override async onload(): Promise<void> {
 		await this.loadSettings();
+		this.registerSaveAutoSync();
+		this.register(() => {
+			for (const timer of this.autoSyncTimers.values()) {
+				window.clearTimeout(timer);
+			}
+			this.autoSyncTimers.clear();
+		});
 
 		this.addCommand({
 			id: "publish-current-note-to-lark",
@@ -258,6 +318,20 @@ export default class LarkCliSyncPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
+	private registerSaveAutoSync(): void {
+		this.registerEvent(this.app.vault.on("modify", (file) => {
+			if (this.settings.autoSyncMode !== "save") {
+				return;
+			}
+
+			if (!(file instanceof TFile) || file.extension !== "md") {
+				return;
+			}
+
+			this.queueSaveAutoSync(file);
+		}));
+	}
+
 	private async publishCurrentNote(): Promise<void> {
 		const file = this.getActiveMarkdownFile();
 		if (!file) {
@@ -294,30 +368,204 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	private async syncFile(file: TFile): Promise<void> {
 		await this.runWithNotice(this.t("noticeSyncingToLark"), async () => {
-			const binding = this.getBinding(file);
-			if (!binding) {
-				const content = await this.readNoteForLark(file);
-				const result = await this.createLarkDocument(file, content);
+			await this.syncFileInternal(file, {
+				allowCreate: true,
+				openAfterSync: true,
+				showSuccess: true,
+				showRemoteDeletedNotice: true,
+				updateFrontmatter: this.settings.updateFrontmatter
+			});
+		});
+	}
 
-				if (this.settings.updateFrontmatter) {
-					await this.writeBinding(file, result);
-				}
-
-				this.showSuccess(this.t("noticePublishedToLark"), result.url);
-				this.openUrlIfNeeded(result.url);
-				return;
+	private async syncFileInternal(file: TFile, options: SyncFileOptions): Promise<BoundLarkDocument | null> {
+		const binding = this.getBinding(file);
+		if (!binding) {
+			if (!options.allowCreate) {
+				return null;
 			}
 
 			const content = await this.readNoteForLark(file);
-			const nextBinding = await this.syncOrRecreateDocument(file, binding, content);
+			const result = await this.createLarkDocument(file, content);
 
-			if (this.settings.updateFrontmatter) {
-				await this.writeBinding(file, nextBinding);
+			if (options.updateFrontmatter) {
+				await this.writeBinding(file, result);
 			}
 
-			this.showSuccess(this.t("noticeSyncedToLark"), nextBinding.url);
-			this.openUrlIfNeeded(nextBinding.url);
+			if (options.showSuccess) {
+				this.showSuccess(this.t("noticePublishedToLark"), result.url);
+			}
+
+			if (options.openAfterSync) {
+				this.openUrlIfNeeded(result.url);
+			}
+
+			return result;
+		}
+
+		const content = await this.readNoteForLark(file);
+		const nextBinding = await this.syncOrRecreateDocument(file, binding, content, undefined, {
+			allowRecreate: options.allowCreate,
+			showRemoteDeletedNotice: options.showRemoteDeletedNotice
 		});
+
+		if (options.updateFrontmatter) {
+			await this.writeBinding(file, nextBinding);
+		}
+
+		if (options.showSuccess) {
+			this.showSuccess(this.t("noticeSyncedToLark"), nextBinding.url);
+		}
+
+		if (options.openAfterSync) {
+			this.openUrlIfNeeded(nextBinding.url);
+		}
+
+		return nextBinding;
+	}
+
+	private queueSaveAutoSync(file: TFile): void {
+		if (!this.getBinding(file)) {
+			return;
+		}
+
+		const selfWrittenAt = this.selfWrittenPaths.get(file.path);
+		if (selfWrittenAt && Date.now() - selfWrittenAt < AUTO_SYNC_WRITE_IGNORE_MS) {
+			return;
+		}
+
+		const existingTimer = this.autoSyncTimers.get(file.path);
+		if (existingTimer) {
+			window.clearTimeout(existingTimer);
+		}
+
+		const delayMs = this.getAutoSyncDelayMs();
+		const timer = window.setTimeout(() => {
+			this.autoSyncTimers.delete(file.path);
+			void this.runSaveAutoSync(file);
+		}, delayMs);
+		this.autoSyncTimers.set(file.path, timer);
+	}
+
+	private async runSaveAutoSync(file: TFile): Promise<void> {
+		if (this.autoSyncRunningPaths.has(file.path)) {
+			this.queueSaveAutoSync(file);
+			return;
+		}
+
+		this.autoSyncRunningPaths.add(file.path);
+		try {
+			await this.syncFileInternal(file, {
+				allowCreate: false,
+				openAfterSync: false,
+				showSuccess: false,
+				showRemoteDeletedNotice: false,
+				updateFrontmatter: this.settings.updateFrontmatter
+			});
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			new Notice(this.t("noticeAutoSyncFailed", { path: file.path, message: errorMessage }), 10000);
+			console.error("[Feishu Lark CLI Sync] auto sync failed", error);
+		} finally {
+			this.autoSyncRunningPaths.delete(file.path);
+		}
+	}
+
+	private getAutoSyncDelayMs(): number {
+		const delaySeconds = Number.isFinite(this.settings.autoSyncDelaySeconds)
+			? this.settings.autoSyncDelaySeconds
+			: DEFAULT_AUTO_SYNC_DELAY_SECONDS;
+		return Math.max(1, delaySeconds) * 1000;
+	}
+
+	async installPrePushHook(): Promise<void> {
+		try {
+			const vaultPath = this.getVaultBasePath();
+			if (!vaultPath) {
+				new Notice(this.t("noticeNoDesktopVaultPath"), 10000);
+				return;
+			}
+
+			const gitDirectory = join(vaultPath, ".git");
+			if (!await this.pathExists(gitDirectory)) {
+				new Notice(this.t("noticeNoGitRepository"), 10000);
+				return;
+			}
+
+			const hooksDirectory = join(gitDirectory, "hooks");
+			const hookPath = join(hooksDirectory, "pre-push");
+			const sourceScript = join(this.getPluginDirectoryPath(), PRE_PUSH_SCRIPT_NAME);
+			const targetScript = join(hooksDirectory, PRE_PUSH_SCRIPT_NAME);
+			await mkdir(hooksDirectory, { recursive: true });
+			await copyFile(sourceScript, targetScript);
+			await chmod(targetScript, 0o755);
+			const backupHookPath = await this.backupExistingPrePushHook(hookPath);
+			await writeFile(hookPath, this.buildPrePushHookScript(targetScript, backupHookPath), { mode: 0o755 });
+			await chmod(hookPath, 0o755);
+			if (backupHookPath) {
+				new Notice(this.t("noticeExistingGitHookBackedUp", { path: backupHookPath }), 10000);
+			}
+			new Notice(this.t("noticeGitHookInstalled"), 10000);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			new Notice(this.t("noticeGitHookInstallFailed", { message }), 10000);
+			console.error("[Feishu Lark CLI Sync] install pre-push hook failed", error);
+		}
+	}
+
+	private getVaultBasePath(): string | null {
+		const adapter = this.app.vault.adapter;
+		if (adapter instanceof FileSystemAdapter) {
+			return adapter.getBasePath();
+		}
+
+		return null;
+	}
+
+	private getPluginDirectoryPath(): string {
+		const vaultPath = this.getVaultBasePath();
+		if (!vaultPath) {
+			throw new Error(this.t("noticeNoDesktopVaultPath"));
+		}
+
+		return join(vaultPath, ".obsidian", "plugins", this.manifest.id);
+	}
+
+	private async backupExistingPrePushHook(hookPath: string): Promise<string> {
+		if (!await this.pathExists(hookPath)) {
+			return "";
+		}
+
+		const content = await readFile(hookPath, "utf8");
+		if (content.includes(PRE_PUSH_HOOK_MARKER)) {
+			return "";
+		}
+
+		const backupHookPath = `${hookPath}.before-feishu-lark-cli-sync`;
+		await copyFile(hookPath, backupHookPath);
+		await chmod(backupHookPath, 0o755);
+		return backupHookPath;
+	}
+
+	private buildPrePushHookScript(scriptPath: string, backupHookPath: string): string {
+		const runBackupHook = backupHookPath
+			? `"${backupHookPath}" "$@"\n`
+			: "";
+		return `#!/usr/bin/env sh
+# ${PRE_PUSH_HOOK_MARKER}
+set -eu
+${runBackupHook}
+exec node "${scriptPath}" "$@"
+`;
+	}
+
+	private async pathExists(path: string): Promise<boolean> {
+		try {
+			await access(path, constants.F_OK);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	private async publishFolder(folderPath: string): Promise<void> {
@@ -385,7 +633,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	private async readNoteForLark(file: TFile): Promise<string> {
 		const rawContent = await this.app.vault.read(file);
-		const contentWithoutBinding = this.removeLarkBinding(rawContent);
+		const contentWithoutBinding = removeLarkBinding(rawContent);
 		return prepareNoteContentForLark(file, contentWithoutBinding, this.settings.titleSource);
 	}
 
@@ -398,15 +646,13 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 		const token = this.readFrontmatterString(frontmatter[FRONTMATTER_TOKEN_KEY]);
 		const url = this.readFrontmatterString(frontmatter[FRONTMATTER_URL_KEY]);
-		const lastSyncedAt = this.readFrontmatterString(frontmatter[FRONTMATTER_SYNCED_AT_KEY]);
 		if (!token && !url) {
 			return null;
 		}
 
 		return {
 			token,
-			url,
-			lastSyncedAt
+			url
 		};
 	}
 
@@ -437,24 +683,21 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 			return {
 				token,
-				url,
-				lastSyncedAt: new Date().toISOString()
+				url
 			};
 		});
 	}
 
 	private async updateLarkDocument(doc: string, content: string): Promise<Partial<BoundLarkDocument>> {
 		return await this.withTempMarkdown("sync", content, async (tempFile) => {
-			const result = await this.runLarkCli(["docs", "+update", "--api-version", "v2", "--as", "user", "--doc",
-				doc, "--command", "overwrite", "--doc-format", "markdown", "--content", `@${tempFile.fileName}`, "--json"], {
+			const result = await this.runLarkCli(buildUpdateDocumentArgs(doc, tempFile.fileName), {
 				cwd: tempFile.directory
 			});
 			const document = result.data?.document;
 
 			return {
 				token: document?.document_id,
-				url: document?.url,
-				lastSyncedAt: new Date().toISOString()
+				url: document?.url
 			};
 		});
 	}
@@ -463,22 +706,31 @@ export default class LarkCliSyncPlugin extends Plugin {
 		file: TFile,
 		binding: BoundLarkDocument,
 		content: string,
-		parent?: RemoteParent
+		parent?: RemoteParent,
+		options: SyncOrRecreateOptions = {
+			allowRecreate: true,
+			showRemoteDeletedNotice: true
+		}
 	): Promise<BoundLarkDocument> {
 		try {
 			const result = await this.updateLarkDocument(binding.token || binding.url, content);
 
 			return {
 				token: result.token || binding.token,
-				url: result.url || binding.url,
-				lastSyncedAt: new Date().toISOString()
+				url: result.url || binding.url
 			};
 		} catch (error) {
 			if (!this.isRemoteDocumentDeletedError(error)) {
 				throw error;
 			}
 
-			new Notice(this.t("noticeRemoteDeletedRecreate"), 5000);
+			if (!options.allowRecreate) {
+				throw error;
+			}
+
+			if (options.showRemoteDeletedNotice) {
+				new Notice(this.t("noticeRemoteDeletedRecreate"), 5000);
+			}
 			return await this.createLarkDocument(file, content, parent);
 		}
 	}
@@ -580,8 +832,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 				token,
 				url,
 				containerToken: parent.token,
-				containerKind: "drive",
-				lastSyncedAt: new Date().toISOString()
+				containerKind: "drive"
 			};
 		}
 
@@ -608,14 +859,13 @@ export default class LarkCliSyncPlugin extends Plugin {
 			throw new Error(this.t("errorNoDocumentToken"));
 		}
 
-		return {
-			token,
-			url,
-			containerToken: parent.token,
-			containerKind: parent.kind,
-			lastSyncedAt: new Date().toISOString()
-		};
-	}
+			return {
+				token,
+				url,
+				containerToken: parent.token,
+				containerKind: parent.kind
+			};
+		}
 
 	private async createLarkDocumentLikePage(name: string, parent: RemoteParent): Promise<BoundLarkDocument> {
 		const content = `# ${name}\n`;
@@ -642,8 +892,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 				token,
 				url,
 				containerToken: parent.token,
-				containerKind: parent.kind,
-				lastSyncedAt: new Date().toISOString()
+				containerKind: parent.kind
 			};
 		});
 	}
@@ -937,75 +1186,16 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	private async writeBinding(file: TFile, binding: BoundLarkDocument): Promise<void> {
+		this.selfWrittenPaths.set(file.path, Date.now());
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			delete frontmatter.lark_doc;
 			delete frontmatter[FRONTMATTER_TOKEN_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
+			delete frontmatter[LEGACY_FRONTMATTER_SYNCED_AT_KEY];
 			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
-			frontmatter[FRONTMATTER_SYNCED_AT_KEY] = this.formatSyncTime(binding.lastSyncedAt);
 		});
-	}
-
-	private formatSyncTime(value?: string): string {
-		const date = value ? new Date(value) : new Date();
-		const normalizedDate = Number.isNaN(date.getTime()) ? new Date() : date;
-		const offsetMs = normalizedDate.getTimezoneOffset() * 60 * 1000;
-		return new Date(normalizedDate.getTime() - offsetMs).toISOString().slice(0, 19).replace("T", " ");
-	}
-
-	private removeLarkBinding(content: string): string {
-		if (!content.startsWith("---")) {
-			return content;
-		}
-
-		const endMatch = content.slice(3).match(/\n---\r?\n/);
-		if (!endMatch || endMatch.index === undefined) {
-			return content;
-		}
-
-		const frontmatterStart = 3;
-		const frontmatterEnd = frontmatterStart + endMatch.index;
-		const frontmatter = content.slice(frontmatterStart, frontmatterEnd);
-		const body = content.slice(frontmatterEnd + endMatch[0].length);
-		const filteredLines = this.removeYamlObjects(frontmatter.split(/\r?\n/), FRONTMATTER_BINDING_KEYS);
-
-		if (filteredLines.every((line) => line.trim() === "")) {
-			return body.replace(/^\s+/, "");
-		}
-
-		return `---\n${filteredLines.join("\n").trim()}\n---\n${body}`;
-	}
-
-	private removeYamlObjects(lines: string[], keys: string[]): string[] {
-		const result: string[] = [];
-		const keySet = new Set(keys);
-		let skipping = false;
-		let skipIndent = 0;
-
-		for (const line of lines) {
-			const keyMatch = line.match(/^(\s*)([A-Za-z0-9_-]+):/);
-			if (keyMatch) {
-				const indent = keyMatch[1]?.length || 0;
-				const name = keyMatch[2];
-
-				if (skipping && indent <= skipIndent) {
-					skipping = false;
-				}
-
-				if (!skipping && name && keySet.has(name)) {
-					skipping = true;
-					skipIndent = indent;
-					continue;
-				}
-			}
-
-			if (!skipping) {
-				result.push(line);
-			}
-		}
-
-		return result;
+		this.selfWrittenPaths.set(file.path, Date.now());
 	}
 
 	private async runWithNotice(message: string, callback: () => Promise<void>): Promise<void> {
@@ -1120,6 +1310,42 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.openAfterSync).onChange(async (value) => {
 					this.plugin.settings.openAfterSync = value;
 					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName(this.plugin.t("settingAutoSyncModeName"))
+			.setDesc(this.plugin.t("settingAutoSyncModeDesc"))
+			.addDropdown((dropdown) => {
+				dropdown.addOption("manual", this.plugin.t("autoSyncModeManual"))
+					.addOption("save", this.plugin.t("autoSyncModeSave"))
+					.addOption("pre-push", this.plugin.t("autoSyncModePrePush"))
+					.setValue(this.plugin.settings.autoSyncMode).onChange(async (value) => {
+						this.plugin.settings.autoSyncMode = value as AutoSyncMode;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName(this.plugin.t("settingAutoSyncDelayName"))
+			.setDesc(this.plugin.t("settingAutoSyncDelayDesc"))
+			.addText((text) => {
+				text.setPlaceholder(String(DEFAULT_AUTO_SYNC_DELAY_SECONDS))
+					.setValue(String(this.plugin.settings.autoSyncDelaySeconds)).onChange(async (value) => {
+						const delay = Number.parseInt(value, 10);
+						this.plugin.settings.autoSyncDelaySeconds = Number.isFinite(delay)
+							? Math.max(1, delay)
+							: DEFAULT_SETTINGS.autoSyncDelaySeconds;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName(this.plugin.t("settingInstallPrePushHookName"))
+			.setDesc(this.plugin.t("settingInstallPrePushHookDesc"))
+			.addButton((button) => {
+				button.setButtonText(this.plugin.t("installPrePushHookButton")).onClick(() => {
+					void this.plugin.installPrePushHook();
 				});
 			});
 	}

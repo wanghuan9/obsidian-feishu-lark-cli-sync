@@ -10,6 +10,7 @@
 
 - 单文件发布：将当前 Markdown 笔记发布为飞书 / Lark Docx 文档
 - 单文件同步：对已发布笔记执行覆盖同步，保持 Obsidian 内容作为源
+- 自动同步：可选择保存后同步，或安装 Git `pre-push` hook 后在推送前同步
 - 整个目录发布：右键目录，一键发布该目录下所有 Markdown 文件
 - 整个目录同步：再次右键同一目录发布时，会同步已绑定文档，并为新增文件创建新文档
 - 目录结构保持：发布目录时保留“所选目录”及其子目录结构
@@ -21,7 +22,6 @@
 ```yaml
 ---
 lark_doc_url: "https://atrenew.feishu.cn/docx/YTi3dFxPEodFKXxl8J3c2PWGn07"
-lark_doc_synced_at: "2026-06-12 10:42:31"
 ---
 ```
 
@@ -73,6 +73,8 @@ which lark-cli
 - `标题来源`：使用第一个 Markdown 一级标题，或使用文件名
 - `写入 frontmatter 绑定信息`：发布后记录飞书文档 URL 和同步时间，后续可直接同步
 - `同步后打开文档`：发布或同步成功后在浏览器中打开飞书文档
+- `自动同步方式`：可选择关闭、保存后同步、Git `pre-push` hook。自动同步只处理已绑定 Markdown 文档，不会自动发布未绑定文档。
+- `保存后同步延迟`：保存后等待一段时间再同步，用于合并连续编辑。
 
 ## 单文件发布和同步
 
@@ -82,6 +84,17 @@ which lark-cli
 - `同步到飞书` / `Sync to Feishu/Lark`：如果已有绑定，则覆盖同步到对应远端文档；如果没有绑定，则先发布为新文档
 
 同步是从 Obsidian 到飞书 / Lark 的覆盖同步。本地 Markdown 是源内容，远端文档会被更新为本地内容。
+
+## 自动同步
+
+插件支持两种互斥的自动同步方式：
+
+- `保存后同步`：Obsidian 中已绑定的 Markdown 文件保存后，延迟同步到对应飞书文档。该模式依赖 Obsidian 正在运行。
+- `Git pre-push hook`：在插件设置中点击 `安装 hook` 后，会把 hook 安装到当前仓库的 `.git/hooks/pre-push`。之后即使 Obsidian 未打开，只要在该仓库执行 `git push`，hook 也会同步已绑定 Markdown 文档。
+
+选择 `保存后同步` 或 `关闭` 时，已安装的 hook 会读取插件设置并直接退出，不会执行同步。Git hook 是按仓库安装的，换一个 Obsidian 仓库需要重新安装。
+
+插件不会写入同步时间，避免自动同步或 Git hook 在本地笔记中制造额外变更。
 
 ## 目录发布
 

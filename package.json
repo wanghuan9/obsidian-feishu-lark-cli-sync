@@ -7,7 +7,7 @@
 	"scripts": {
 		"build": "tsc --noEmit && node esbuild.config.mjs production",
 		"dev": "node esbuild.config.mjs",
-		"test": "tsc --noEmit && node test-link-rewrite.mjs && node test-folder-path.mjs && node test-note-content.mjs",
+		"test": "tsc --noEmit && node test-link-rewrite.mjs && node test-folder-path.mjs && node test-note-content.mjs && node test-lark-sync-core.mjs",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
 	"keywords": [

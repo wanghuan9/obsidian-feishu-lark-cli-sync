@@ -8,6 +8,7 @@ An Obsidian desktop plugin that publishes and syncs Markdown notes to Feishu/Lar
 
 - Single-note publish: publish the current Markdown note as a Feishu/Lark Docx document
 - Single-note sync: overwrite-sync an already published note, using Obsidian as the source
+- Auto sync: choose sync-after-save, or install a Git `pre-push` hook to sync before push
 - Folder publish: right-click a folder and publish all Markdown files in one action
 - Folder sync: publishing the same folder again updates bound documents and creates remote documents for new local Markdown files
 - Folder hierarchy: preserve the selected folder and its subfolders
@@ -19,7 +20,6 @@ An Obsidian desktop plugin that publishes and syncs Markdown notes to Feishu/Lar
 ```yaml
 ---
 lark_doc_url: "https://atrenew.feishu.cn/docx/YTi3dFxPEodFKXxl8J3c2PWGn07"
-lark_doc_synced_at: "2026-06-12 10:42:31"
 ---
 ```
 
@@ -71,6 +71,8 @@ which lark-cli
 - `Title source`: first Markdown H1 or file name
 - `Write binding to frontmatter`: store the Feishu/Lark document URL and sync time after publishing
 - `Open after sync`: open the remote document after publish or sync
+- `Auto sync mode`: choose off, sync after save, or Git `pre-push` hook. Auto sync only handles bound Markdown notes and never auto-publishes unbound notes.
+- `Save sync delay`: wait a few seconds after save before syncing, used to merge continuous edits.
 
 ## Single-Note Publish and Sync
 
@@ -80,6 +82,17 @@ Right-click a Markdown file, or open the command palette while a note is active:
 - `Sync to Feishu/Lark`: overwrite-sync the bound remote document; if no binding exists, publish a new document first
 
 Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source, and the remote document is updated to match it.
+
+## Auto Sync
+
+The plugin supports two mutually exclusive auto sync modes:
+
+- `Sync after save`: when a bound Markdown file is saved in Obsidian, the plugin syncs it to the bound remote document after a short delay. This mode requires Obsidian to be running.
+- `Git pre-push hook`: click `Install hook` in plugin settings to install a hook into `.git/hooks/pre-push` of the current vault. After that, even when Obsidian is closed, `git push` from that repository syncs bound Markdown notes first.
+
+When `Sync after save` or `Off` is selected, an installed hook reads the plugin settings and exits without syncing. Git hooks are installed per repository, so another Obsidian vault needs its own hook installation.
+
+The plugin does not write sync timestamps, so auto sync and Git hooks do not create extra local note changes.
 
 ## Folder Publishing
 
