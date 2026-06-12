@@ -15,7 +15,7 @@ import { LinkTarget, normalizeLinkPath, parentPath, resolveInternalLink, rewrite
 import {
 	buildSyncPlan,
 	buildUpdateCommandArgs,
-	createDocumentSyncState,
+	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
 	formatSyncFailureMessage,
@@ -969,10 +969,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		return await this.withTempMarkdown("sync", content, async (tempFile) => {
 			let latestDocument: Partial<BoundLarkDocument> = {};
-			for (const command of plan.commands) {
+			for (const [index, command] of plan.commands.entries()) {
+				const contentFileName = "content" in command && command.content
+					? await this.writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
+					: tempFile.fileName;
 				const commandArgs = buildUpdateCommandArgs(
 					"contentFileName" in command
-						? { ...command, doc, contentFileName: tempFile.fileName }
+						? { ...command, doc, contentFileName }
 						: { ...command, doc }
 				);
 				const result = await this.runLarkCli(commandArgs, {
@@ -1019,17 +1022,37 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async saveCreatedDocumentState(binding: BoundLarkDocument, content: string): Promise<void> {
-		const contentHash = await buildSyncPlan({
-			doc: binding.token || binding.url,
-			markdown: content,
-			contentFileName: "sync.md",
-			strategy: "overwrite"
-		}).then((plan) => plan.contentHash);
+		const doc = binding.token || binding.url;
+		const fetched = await this.fetchLarkDocumentWithIds(doc);
+		const state = await createDocumentSyncStateFromRemote(doc, content, fetched.content, fetched.revisionId);
 		const documentKeys = this.uniquePathEntries([binding.token, binding.url]);
-		for (const doc of documentKeys) {
-			this.syncState.documents[doc] = createDocumentSyncState(doc, contentHash);
+		for (const key of documentKeys) {
+			this.syncState.documents[key] = {
+				...state,
+				doc: key
+			};
 		}
 		await this.saveLarkSyncState();
+	}
+
+	private async fetchLarkDocumentWithIds(doc: string): Promise<{ content: string; revisionId?: number }> {
+		const result = await this.runLarkCli([
+			"docs",
+			"+fetch",
+			"--api-version",
+			"v2",
+			"--as",
+			"user",
+			"--doc",
+			doc,
+			"--detail",
+			"with-ids",
+			"--json"
+		]);
+		return {
+			content: result.data?.document?.content || "",
+			revisionId: result.data?.document?.revision_id
+		};
 	}
 
 	private formatSyncFailure(mode: SyncMode, path: string, reason: SyncFailureReason): string {
@@ -1578,6 +1601,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		} finally {
 			await rm(tempDir, { force: true, recursive: true });
 		}
+	}
+
+	private async writeTempMarkdown(directory: string, baseName: string, content: string): Promise<string> {
+		const fileName = `${this.sanitizeFileName(baseName)}.md`;
+		await writeFile(join(directory, fileName), content, "utf8");
+		return fileName;
 	}
 
 	private sanitizeFileName(name: string): string {

@@ -14,6 +14,7 @@ const {
 	buildSyncPlan,
 	buildUpdateCommandArgs,
 	buildUpdateDocumentArgs,
+	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
 	formatSyncFailureMessage,
@@ -119,6 +120,33 @@ assert.equal(overwritePlan.nextState.contentHash, contentHash);
 assert.deepEqual(overwritePlan.nextState.units, []);
 assert.ok(Date.parse(overwritePlan.nextState.updatedAt));
 
+const remoteXml = "<title id=\"doc-token\">Note</title><p id=\"blk-1\">Body</p><h2 id=\"blk-2\">Next</h2>";
+const mappedState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\nBody\n\n## Next", remoteXml, 7);
+assert.equal(mappedState.revisionId, 7);
+assert.equal(mappedState.units.length, 2);
+assert.deepEqual(mappedState.units.map((unit) => unit.blockId), ["blk-1", "blk-2"]);
+assert.deepEqual(mappedState.units.map((unit) => unit.kind), ["paragraph", "heading"]);
+
+const replacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nChanged\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: mappedState
+});
+assert.equal(replacePlan.mode, "precise");
+assert.equal(replacePlan.commands.length, 1);
+assert.deepEqual(replacePlan.commands[0], {
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "markdown",
+	blockId: "blk-1",
+	contentFileName: "sync.md",
+	content: "Changed"
+});
+assert.equal(replacePlan.nextState.units[0].blockId, "blk-1");
+assert.notEqual(replacePlan.nextState.units[0].hash, mappedState.units[0].hash);
+
 const state = {
 	doc: "doc-token",
 	contentHash,
@@ -164,10 +192,10 @@ assert.equal(missingMappingPlan.reason, "block-mapping-missing");
 
 const complexPlan = await buildSyncPlan({
 	doc: "doc-token",
-	markdown: "# Note\n\nChanged",
+	markdown: "# Note\n\nBody\n\nInserted\n\n## Next",
 	contentFileName: "sync.md",
 	strategy: "precise",
-	state
+	state: mappedState
 });
 assert.equal(complexPlan.mode, "blocked");
 assert.equal(complexPlan.reason, "diff-too-complex");

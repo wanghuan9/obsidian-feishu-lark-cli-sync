@@ -59,6 +59,7 @@ export interface LarkBlockReplaceCommand {
 	docFormat: "markdown" | "xml";
 	blockId: string;
 	contentFileName: string;
+	content?: string;
 }
 
 export interface LarkBlockInsertAfterCommand {
@@ -67,6 +68,7 @@ export interface LarkBlockInsertAfterCommand {
 	docFormat: "markdown" | "xml";
 	blockId: string;
 	contentFileName: string;
+	content?: string;
 }
 
 export interface LarkBlockDeleteCommand {
@@ -247,6 +249,7 @@ export function buildUpdateCommandArgs(command: LarkUpdateCommand): string[] {
 
 export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan> {
 	const contentHash = await createContentHash(input.markdown);
+	const units = await createMarkdownSyncUnits(input.markdown);
 	if (input.strategy === "overwrite") {
 		return {
 			mode: "overwrite",
@@ -290,11 +293,56 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		};
 	}
 
+	const precisePlan = await buildPreciseReplacePlan(input, contentHash, units);
+	if (precisePlan) {
+		return precisePlan;
+	}
+
 	return {
 		mode: "blocked",
 		commands: [],
 		contentHash,
 		reason: "diff-too-complex"
+	};
+}
+
+export async function createDocumentSyncStateFromRemote(
+	doc: string,
+	markdown: string,
+	remoteXml: string,
+	revisionId?: number
+): Promise<DocumentSyncState> {
+	const contentHash = await createContentHash(markdown);
+	const markdownUnits = await createMarkdownSyncUnits(markdown);
+	const remoteUnits = readRemoteTopLevelUnits(remoteXml);
+	if (markdownUnits.length !== remoteUnits.length) {
+		return createDocumentSyncState(doc, contentHash, revisionId);
+	}
+
+	const units = markdownUnits.map((unit, index) => {
+		const remoteUnit = remoteUnits[index];
+		if (!remoteUnit || remoteUnit.kind !== unit.kind) {
+			return null;
+		}
+
+		return {
+			stableId: unit.stableId,
+			kind: unit.kind,
+			hash: unit.hash,
+			blockId: remoteUnit.blockId
+		};
+	});
+
+	if (units.some((unit) => !unit)) {
+		return createDocumentSyncState(doc, contentHash, revisionId);
+	}
+
+	return {
+		doc,
+		revisionId,
+		contentHash,
+		units: units as SyncUnitState[],
+		updatedAt: new Date().toISOString()
 	};
 }
 
@@ -305,9 +353,10 @@ export function createEmptySyncStateFile(): LarkSyncStateFile {
 	};
 }
 
-export function createDocumentSyncState(doc: string, contentHash: string): DocumentSyncState {
+export function createDocumentSyncState(doc: string, contentHash: string, revisionId?: number): DocumentSyncState {
 	return {
 		doc,
+		revisionId,
 		contentHash,
 		units: [],
 		updatedAt: new Date().toISOString()
@@ -388,6 +437,268 @@ function withMarkdownTitle(content: string, title: string): string {
 	}
 
 	return `# ${title}\n\n${content}`;
+}
+
+interface MarkdownSyncUnit {
+	stableId: string;
+	kind: string;
+	hash: string;
+	content: string;
+}
+
+interface RemoteSyncUnit {
+	kind: string;
+	blockId: string;
+}
+
+async function buildPreciseReplacePlan(
+	input: BuildSyncPlanInput,
+	contentHash: string,
+	units: MarkdownSyncUnit[]
+): Promise<SyncPlan | null> {
+	if (!input.state || input.state.units.length !== units.length) {
+		return null;
+	}
+
+	const commands: LarkUpdateCommand[] = [];
+	const nextUnits: SyncUnitState[] = [];
+	for (let index = 0; index < units.length; index += 1) {
+		const previousUnit = input.state.units[index];
+		const nextUnit = units[index];
+		if (!previousUnit || !nextUnit || previousUnit.kind !== nextUnit.kind || previousUnit.stableId !== nextUnit.stableId) {
+			return null;
+		}
+
+		nextUnits.push({
+			stableId: previousUnit.stableId,
+			kind: previousUnit.kind,
+			hash: nextUnit.hash,
+			blockId: previousUnit.blockId
+		});
+		if (previousUnit.hash !== nextUnit.hash) {
+			commands.push({
+				doc: input.doc,
+				command: "block_replace",
+				docFormat: "markdown",
+				blockId: previousUnit.blockId,
+				contentFileName: input.contentFileName,
+				content: nextUnit.content
+			});
+		}
+	}
+
+	if (commands.length === 0) {
+		return {
+			mode: "skipped",
+			commands: [],
+			contentHash,
+			nextState: input.state
+		};
+	}
+
+	return {
+		mode: "precise",
+		commands,
+		contentHash,
+		nextState: {
+			doc: input.doc,
+			revisionId: input.state.revisionId,
+			contentHash,
+			units: nextUnits,
+			updatedAt: new Date().toISOString()
+		}
+	};
+}
+
+async function createMarkdownSyncUnits(markdown: string): Promise<MarkdownSyncUnit[]> {
+	const blocks = splitMarkdownTopLevelBlocks(stripMarkdownTitle(markdown));
+	const units: MarkdownSyncUnit[] = [];
+	for (const [index, block] of blocks.entries()) {
+		units.push({
+			stableId: `${index}:${block.kind}`,
+			kind: block.kind,
+			hash: await createContentHash(block.content),
+			content: block.content
+		});
+	}
+
+	return units;
+}
+
+function stripMarkdownTitle(markdown: string): string {
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	let index = 0;
+	while (index < lines.length && (lines[index] || "").trim() === "") {
+		index += 1;
+	}
+
+	if (/^#\s+/.test(lines[index] || "")) {
+		index += 1;
+		while (index < lines.length && (lines[index] || "").trim() === "") {
+			index += 1;
+		}
+		return lines.slice(index).join("\n");
+	}
+
+	return lines.join("\n");
+}
+
+function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; content: string }> {
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	const blocks: Array<{ kind: string; content: string }> = [];
+	let index = 0;
+	while (index < lines.length) {
+		const line = lines[index] || "";
+		if (line.trim() === "") {
+			index += 1;
+			continue;
+		}
+
+		const start = index;
+		const kind = readMarkdownBlockKind(line);
+		if (kind === "heading" || kind === "hr") {
+			index += 1;
+		} else if (kind === "code") {
+			index += 1;
+			while (index < lines.length && !/^```/.test(lines[index] || "")) {
+				index += 1;
+			}
+			if (index < lines.length) {
+				index += 1;
+			}
+		} else if (kind === "list") {
+			index += 1;
+			while (index < lines.length
+				&& (lines[index] || "").trim() !== ""
+				&& readMarkdownBlockKind(lines[index] || "") === "paragraph"
+				&& /^\s+/.test(lines[index] || "")) {
+				index += 1;
+			}
+		} else if (kind === "blockquote" || kind === "table") {
+			index += 1;
+			while (index < lines.length && readMarkdownBlockKind(lines[index] || "") === kind) {
+				index += 1;
+			}
+		} else {
+			index += 1;
+			while (index < lines.length
+				&& (lines[index] || "").trim() !== ""
+				&& !isMarkdownBlockBoundary(lines[index] || "")) {
+				index += 1;
+			}
+		}
+
+		blocks.push({
+			kind,
+			content: lines.slice(start, index).join("\n").trim()
+		});
+	}
+
+	return blocks;
+}
+
+function isMarkdownBlockBoundary(line: string): boolean {
+	const kind = readMarkdownBlockKind(line);
+	return kind !== "paragraph";
+}
+
+function readMarkdownBlockKind(line: string): string {
+	if (/^#{2,6}\s+/.test(line)) {
+		return "heading";
+	}
+
+	if (/^```/.test(line)) {
+		return "code";
+	}
+
+	if (/^\s*>/.test(line)) {
+		return "blockquote";
+	}
+
+	if (/^\s*(?:[-+*]|\d+\.)\s+/.test(line)) {
+		return "list";
+	}
+
+	if (/^\s*\|/.test(line)) {
+		return "table";
+	}
+
+	if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+		return "hr";
+	}
+
+	return "paragraph";
+}
+
+function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
+	const units: RemoteSyncUnit[] = [];
+	const tagPattern = /<\/?([A-Za-z][A-Za-z0-9-]*)([^>]*)>/g;
+	let depth = 0;
+	const stack: string[] = [];
+	let match: RegExpExecArray | null;
+	while ((match = tagPattern.exec(xml))) {
+		const rawTag = match[0] || "";
+		const tagName = match[1] || "";
+		const attributes = match[2] || "";
+		const isClosing = rawTag.startsWith("</");
+		const isSelfClosing = rawTag.endsWith("/>");
+		if (isClosing) {
+			depth = Math.max(0, depth - 1);
+			stack.pop();
+			continue;
+		}
+
+		if (depth === 0 && tagName !== "title") {
+			const blockId = readXmlAttribute(attributes, "id");
+			if (blockId && tagName !== "ul" && tagName !== "ol") {
+				units.push({
+					kind: normalizeRemoteBlockKind(tagName),
+					blockId
+				});
+			}
+		} else if (depth === 1 && tagName === "li" && (stack[0] === "ul" || stack[0] === "ol")) {
+			const blockId = readXmlAttribute(attributes, "id");
+			if (blockId) {
+				units.push({
+					kind: "list",
+					blockId
+				});
+			}
+		}
+
+		if (!isSelfClosing) {
+			stack.push(tagName);
+			depth += 1;
+		}
+	}
+
+	return units;
+}
+
+function normalizeRemoteBlockKind(tagName: string): string {
+	if (/^h[1-9]$/.test(tagName)) {
+		return "heading";
+	}
+
+	if (tagName === "p") {
+		return "paragraph";
+	}
+
+	if (tagName === "ul" || tagName === "ol") {
+		return "list";
+	}
+
+	if (tagName === "pre") {
+		return "code";
+	}
+
+	return tagName;
+}
+
+function readXmlAttribute(attributes: string, name: string): string {
+	const pattern = new RegExp(`\\s${escapeRegExp(name)}=["']([^"']+)["']`);
+	const match = attributes.match(pattern);
+	return match?.[1] || "";
 }
 
 function readFrontmatter(content: string): string {

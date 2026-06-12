@@ -202,10 +202,14 @@ async function syncMarkdownTask(task, settings, syncState) {
 		}
 
 		await withTempMarkdown(basename(task.filePath, ".md"), contentForLark, async (tempFile) => {
-			for (const command of plan.commands) {
+			for (let index = 0; index < plan.commands.length; index += 1) {
+				const command = plan.commands[index];
+				const contentFileName = "content" in command && command.content
+					? await writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
+					: tempFile.fileName;
 				const args = buildUpdateCommandArgs(
 					"contentFileName" in command
-						? { ...command, contentFileName: tempFile.fileName }
+						? { ...command, contentFileName }
 						: command
 				);
 				await runLarkCli(settings, args, tempFile.directory);
@@ -311,6 +315,12 @@ async function withTempMarkdown(baseName, content, callback) {
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
 	}
+}
+
+async function writeTempMarkdown(directory, baseName, content) {
+	const fileName = `${sanitizeFileName(baseName)}.md`;
+	await writeFile(join(directory, fileName), content, "utf8");
+	return fileName;
 }
 
 function sanitizeFileName(name) {
