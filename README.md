@@ -99,8 +99,8 @@ which lark-cli
 
 路径规则只从“你右键点击的目录”开始：
 
-- 发布 `ITC-78270`：远端创建 `ITC-78270/design/...`
-- 直接发布 `design`：远端只创建 `design/...`，不会带上本地上级目录 `ITC-78270`
+- 发布 `Project-Alpha`：远端创建 `Project-Alpha/docs/...`
+- 直接发布 `docs`：远端只创建 `docs/...`，不会带上本地上级目录 `Project-Alpha`
 
 支持的内部引用形式：
 

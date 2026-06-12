@@ -97,8 +97,8 @@ Running folder publish again works as folder sync: bound documents are overwritt
 
 The remote hierarchy starts from the selected folder only:
 
-- Publishing `ITC-78270` creates `ITC-78270/design/...`
-- Publishing `design` directly creates `design/...` and does not include its local parent folder `ITC-78270`
+- Publishing `Project-Alpha` creates `Project-Alpha/docs/...`
+- Publishing `docs` directly creates `docs/...` and does not include its local parent folder `Project-Alpha`
 
 Supported internal link forms:
 
