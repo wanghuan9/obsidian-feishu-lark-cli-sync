@@ -3,9 +3,9 @@ import esbuild from "esbuild";
 
 await esbuild.build({
 	bundle: true,
-	entryPoints: ["note-content.ts"],
+	entryPoints: ["src/note-content.ts"],
 	format: "esm",
-	outfile: ".tmp-note-content-test.mjs",
+	outfile: "test/.tmp-note-content-test.mjs",
 	platform: "node",
 	target: "node20"
 });

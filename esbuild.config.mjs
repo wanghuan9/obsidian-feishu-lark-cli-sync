@@ -15,7 +15,7 @@ const context = await esbuild.context({
 		js: banner
 	},
 	bundle: true,
-	entryPoints: ["main.ts"],
+	entryPoints: ["src/main.ts"],
 	external: [
 		"obsidian",
 		"electron",
@@ -45,7 +45,7 @@ if (prod) {
 	await context.rebuild();
 	await esbuild.build({
 		bundle: true,
-		entryPoints: ["lark-sync-core.ts"],
+		entryPoints: ["src/lark-sync-core.ts"],
 		format: "esm",
 		logLevel: "info",
 		minify: prod,

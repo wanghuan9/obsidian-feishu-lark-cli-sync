@@ -4,7 +4,7 @@ import { chmod, cp, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { createContentHash } from "./lark-sync-core.mjs";
+import { createContentHash } from "../lark-sync-core.mjs";
 
 const execFileAsync = promisify(execFile);
 

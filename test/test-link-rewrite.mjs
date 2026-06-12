@@ -3,9 +3,9 @@ import esbuild from "esbuild";
 
 await esbuild.build({
 	bundle: true,
-	entryPoints: ["link-rewrite.ts"],
+	entryPoints: ["src/link-rewrite.ts"],
 	format: "esm",
-	outfile: ".tmp-link-test.mjs",
+	outfile: "test/.tmp-link-test.mjs",
 	platform: "node",
 	target: "node20"
 });

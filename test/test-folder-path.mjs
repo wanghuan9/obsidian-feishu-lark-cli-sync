@@ -3,9 +3,9 @@ import esbuild from "esbuild";
 
 await esbuild.build({
 	bundle: true,
-	entryPoints: ["folder-path.ts"],
+	entryPoints: ["src/folder-path.ts"],
 	format: "esm",
-	outfile: ".tmp-folder-path-test.mjs",
+	outfile: "test/.tmp-folder-path-test.mjs",
 	platform: "node",
 	target: "node20"
 });

@@ -3,9 +3,9 @@ import esbuild from "esbuild";
 
 await esbuild.build({
 	bundle: true,
-	entryPoints: ["lark-sync-core.ts"],
+	entryPoints: ["src/lark-sync-core.ts"],
 	format: "esm",
-	outfile: ".tmp-lark-sync-core-test.mjs",
+	outfile: "test/.tmp-lark-sync-core-test.mjs",
 	platform: "node",
 	target: "node20"
 });
