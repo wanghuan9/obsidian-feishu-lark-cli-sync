@@ -12,6 +12,7 @@ import {
 	getSelectedFolderName as getSelectedRemoteRootName
 } from "./folder-path";
 import { LinkTarget, normalizeLinkPath, parentPath, resolveInternalLink, rewriteInternalLinks } from "./link-rewrite";
+import { prepareNoteContentForLark, TitleSource } from "./note-content";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,7 +33,6 @@ const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
 const FALLBACK_PATH_ENTRIES = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 type Language = "zh-CN" | "en";
-type TitleSource = "first-heading" | "file-name";
 type RemoteParentKind = "wiki" | "drive" | "my_library" | "unknown";
 
 interface LarkCliSyncSettings {
@@ -380,22 +380,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private async readNoteForLark(file: TFile): Promise<string> {
 		const rawContent = await this.app.vault.read(file);
 		const contentWithoutBinding = this.removeLarkBinding(rawContent);
-		const title = this.extractTitle(file, contentWithoutBinding);
-
-		if (/^\s*#\s+/m.test(contentWithoutBinding)) {
-			return contentWithoutBinding;
-		}
-
-		return `# ${title}\n\n${contentWithoutBinding}`;
-	}
-
-	private extractTitle(file: TFile, content: string): string {
-		if (this.settings.titleSource === "file-name") {
-			return file.basename;
-		}
-
-		const heading = content.match(/^\s*#\s+(.+?)\s*#*\s*$/m);
-		return heading?.[1]?.trim() || file.basename;
+		return prepareNoteContentForLark(file, contentWithoutBinding, this.settings.titleSource);
 	}
 
 	private getBinding(file: TFile): BoundLarkDocument | null {

@@ -26,6 +26,7 @@
 	"include": [
 		"main.ts",
 		"link-rewrite.ts",
-		"folder-path.ts"
+		"folder-path.ts",
+		"note-content.ts"
 	]
 }
