@@ -103,12 +103,12 @@ interface RemoteParent {
 
 const MESSAGES = {
 	"zh-CN": {
-		commandPublishCurrentNote: "发布当前笔记到飞书",
-		commandSyncCurrentNote: "同步当前笔记到飞书",
+		commandPublishCurrentNote: "发布到飞书",
+		commandSyncCurrentNote: "同步到飞书",
 		menuPublishToLark: "发布到飞书",
 		menuSyncToLark: "同步到飞书",
 		menuPublishFolderToLark: "发布整个目录到飞书",
-		ribbonSyncCurrentNote: "同步当前笔记到飞书",
+		ribbonSyncCurrentNote: "同步到飞书",
 		noticeNoActiveMarkdownNote: "当前没有打开 Markdown 笔记。",
 		noticePublishingToLark: "正在发布到飞书...",
 		noticeSyncingToLark: "正在同步到飞书...",
@@ -139,12 +139,12 @@ const MESSAGES = {
 		settingOpenAfterSyncDesc: "发布或同步成功后，在浏览器中打开飞书文档。"
 	},
 	en: {
-		commandPublishCurrentNote: "Publish current note to Feishu/Lark",
-		commandSyncCurrentNote: "Sync current note to Feishu/Lark",
+		commandPublishCurrentNote: "Publish to Feishu/Lark",
+		commandSyncCurrentNote: "Sync to Feishu/Lark",
 		menuPublishToLark: "Publish to Feishu/Lark",
 		menuSyncToLark: "Sync to Feishu/Lark",
 		menuPublishFolderToLark: "Publish folder to Feishu/Lark",
-		ribbonSyncCurrentNote: "Sync current note to Feishu/Lark",
+		ribbonSyncCurrentNote: "Sync to Feishu/Lark",
 		noticeNoActiveMarkdownNote: "No active Markdown note.",
 		noticePublishingToLark: "Publishing to Lark...",
 		noticeSyncingToLark: "Syncing to Lark...",

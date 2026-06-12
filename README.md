@@ -80,8 +80,8 @@ which lark-cli
 
 在 Markdown 文件上右键，或打开当前笔记后使用命令面板：
 
-- `发布当前笔记到飞书` / `Publish current note to Feishu/Lark`：创建一个新的飞书 / Lark Docx 文档，并写入绑定信息
-- `同步当前笔记到飞书` / `Sync current note to Feishu/Lark`：如果已有绑定，则覆盖同步到对应远端文档；如果没有绑定，则先发布为新文档
+- `发布到飞书` / `Publish to Feishu/Lark`：创建一个新的飞书 / Lark Docx 文档，并写入绑定信息
+- `同步到飞书` / `Sync to Feishu/Lark`：如果已有绑定，则覆盖同步到对应远端文档；如果没有绑定，则先发布为新文档
 
 同步是从 Obsidian 到飞书 / Lark 的覆盖同步。本地 Markdown 是源内容，远端文档会被更新为本地内容。
 

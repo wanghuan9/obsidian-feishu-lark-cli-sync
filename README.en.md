@@ -78,8 +78,8 @@ which lark-cli
 
 Right-click a Markdown file, or open the command palette while a note is active:
 
-- `Publish current note to Feishu/Lark`: create a new Feishu/Lark Docx document and write binding metadata
-- `Sync current note to Feishu/Lark`: overwrite-sync the bound remote document; if no binding exists, publish a new document first
+- `Publish to Feishu/Lark`: create a new Feishu/Lark Docx document and write binding metadata
+- `Sync to Feishu/Lark`: overwrite-sync the bound remote document; if no binding exists, publish a new document first
 
 Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source, and the remote document is updated to match it.
 
