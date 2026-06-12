@@ -123,17 +123,13 @@ The plugin also reconstructs `PATH` for the child process so `lark-cli` can find
 
 ## Manual Installation
 
-Before the plugin is available in the community plugin browser, install it with the following command. Replace `VAULT` with your Obsidian vault path:
+Before the plugin is available in the community plugin browser, download this project and run the install script. Replace `/path/to/your/vault` with your Obsidian vault path:
 
 ```bash
-VAULT="/path/to/your/vault" bash -c 'set -euo pipefail
-PLUGIN_DIR="$VAULT/.obsidian/plugins/feishu-lark-cli-sync"
-mkdir -p "$PLUGIN_DIR"
-for file in manifest.json main.js README.md README.en.md; do
-  curl -fsSL "https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync/releases/latest/download/$file" -o "$PLUGIN_DIR/$file"
-done
-echo "Installed Feishu Lark CLI Sync to $PLUGIN_DIR"'
+./install.sh "/path/to/your/vault"
 ```
+
+If no path is provided, the script will prompt for your Obsidian vault path.
 
 Then enable `Feishu Lark CLI Sync` in Obsidian settings.
 

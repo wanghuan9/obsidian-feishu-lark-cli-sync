@@ -125,17 +125,13 @@ which lark-cli
 
 ## 手动安装
 
-社区插件市场上架前，可以用下面的命令直接安装。把 `VAULT` 改成你的 Obsidian 仓库路径：
+社区插件市场上架前，可以下载本项目后执行安装脚本。把 `/path/to/your/vault` 改成你的 Obsidian 仓库路径：
 
 ```bash
-VAULT="/path/to/your/vault" bash -c 'set -euo pipefail
-PLUGIN_DIR="$VAULT/.obsidian/plugins/feishu-lark-cli-sync"
-mkdir -p "$PLUGIN_DIR"
-for file in manifest.json main.js README.md README.en.md; do
-  curl -fsSL "https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync/releases/latest/download/$file" -o "$PLUGIN_DIR/$file"
-done
-echo "Installed Feishu Lark CLI Sync to $PLUGIN_DIR"'
+./install.sh "/path/to/your/vault"
 ```
+
+不传路径时，脚本会提示你输入 Obsidian 仓库路径。
 
 然后在 Obsidian 设置中启用 `Feishu Lark CLI Sync`。
 
