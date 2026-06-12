@@ -1,7 +1,7 @@
 import { FileSystemAdapter, Menu, Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
 import { execFile } from "child_process";
 import { constants } from "fs";
-import { access, chmod, copyFile, mkdir, readFile } from "fs/promises";
+import { access, chmod, copyFile, mkdir, readFile, rename } from "fs/promises";
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -13,12 +13,22 @@ import {
 } from "./folder-path";
 import { LinkTarget, normalizeLinkPath, parentPath, resolveInternalLink, rewriteInternalLinks } from "./link-rewrite";
 import {
-	buildUpdateDocumentArgs,
+	buildSyncPlan,
+	buildUpdateCommandArgs,
+	createDocumentSyncState,
+	createContentHash,
+	createEmptySyncStateFile,
+	formatSyncFailureMessage,
 	FRONTMATTER_TOKEN_KEY,
 	FRONTMATTER_URL_KEY,
 	LEGACY_FRONTMATTER_SYNCED_AT_KEY,
+	LarkSyncStateFile,
 	prepareNoteContentForLark,
 	removeLarkBinding,
+	SyncFailureReason,
+	SyncMode,
+	SyncPlan,
+	SyncStrategy,
 	TitleSource
 } from "./lark-sync-core";
 
@@ -33,7 +43,8 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	openAfterSync: true,
 	updateFrontmatter: true,
 	autoSyncMode: "manual",
-	autoSyncDelaySeconds: 15
+	autoSyncDelaySeconds: 15,
+	syncStrategy: "precise"
 };
 
 const FRONTMATTER_REMOTE_ROOT_KEY = "remoteRoot";
@@ -43,6 +54,7 @@ const LARK_CLI_COMMAND = "lark-cli";
 const NODE_COMMAND = "node";
 const PRE_PUSH_SCRIPT_NAME = "sync-pre-push.mjs";
 const PRE_PUSH_CORE_SCRIPT_NAME = "lark-sync-core.mjs";
+const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const PRE_PUSH_HOOK_MARKER = "Feishu Lark CLI Sync";
 const AUTO_SYNC_WRITE_IGNORE_MS = 5000;
 const DEFAULT_AUTO_SYNC_DELAY_SECONDS = 15;
@@ -63,6 +75,7 @@ interface LarkCliSyncSettings {
 	updateFrontmatter: boolean;
 	autoSyncMode: AutoSyncMode;
 	autoSyncDelaySeconds: number;
+	syncStrategy: SyncStrategy;
 }
 
 interface BoundLarkDocument {
@@ -78,10 +91,12 @@ interface LarkCommandResult {
 	ok: boolean;
 	data?: {
 		token?: string;
-		document?: {
-			document_id?: string;
-			url?: string;
-		};
+			document?: {
+				document_id?: string;
+				url?: string;
+				revision_id?: number;
+				content?: string;
+			};
 		folder?: {
 			token?: string;
 			url?: string;
@@ -113,6 +128,9 @@ interface FolderPublishEntry {
 	file: TFile;
 	content: string;
 	binding?: BoundLarkDocument;
+	parent: RemoteParent;
+	remoteParentPath: string;
+	isNewDocument: boolean;
 }
 
 interface RemoteParent {
@@ -126,11 +144,19 @@ interface SyncFileOptions {
 	showSuccess: boolean;
 	showRemoteDeletedNotice: boolean;
 	updateFrontmatter: boolean;
+	mode: SyncMode;
 }
 
 interface SyncOrRecreateOptions {
 	allowRecreate: boolean;
 	showRemoteDeletedNotice: boolean;
+	mode: SyncMode;
+	path: string;
+	strategy?: SyncStrategy;
+	stateKeys?: string[];
+}
+
+class LocalizedSyncError extends Error {
 }
 
 const MESSAGES = {
@@ -172,11 +198,15 @@ const MESSAGES = {
 		titleSourceFirstHeading: "第一个标题",
 		titleSourceFileName: "文件名",
 		settingWriteBindingName: "写入 frontmatter 绑定信息",
-		settingWriteBindingDesc: "发布后把飞书文档 URL 和同步时间保存到笔记 frontmatter。",
+		settingWriteBindingDesc: "发布后把飞书文档 URL 保存到笔记 frontmatter。",
 		settingOpenAfterSyncName: "同步后打开文档",
 		settingOpenAfterSyncDesc: "发布或同步成功后，在浏览器中打开飞书文档。",
 		settingAutoSyncModeName: "自动同步方式",
 		settingAutoSyncModeDesc: "自动同步只处理已绑定的 Markdown 文档。保存后同步依赖 Obsidian；pre-push hook 可脱离 Obsidian 独立运行。",
+		settingSyncStrategyName: "同步策略",
+		settingSyncStrategyDesc: "安全增量同步会尽量只修改变动块；无法安全更新时会失败并通知，不会自动全量覆盖。全量覆盖同步会清空并重写远端文档。",
+		syncStrategyPrecise: "安全增量同步（推荐）",
+		syncStrategyOverwrite: "全量覆盖同步",
 		autoSyncModeManual: "关闭",
 		autoSyncModeSave: "保存后同步",
 		autoSyncModePrePush: "Git pre-push hook",
@@ -224,11 +254,15 @@ const MESSAGES = {
 		titleSourceFirstHeading: "First heading",
 		titleSourceFileName: "File name",
 		settingWriteBindingName: "Write binding to frontmatter",
-		settingWriteBindingDesc: "Store the Lark document URL and sync time in note frontmatter.",
+		settingWriteBindingDesc: "Store the Lark document URL in note frontmatter.",
 		settingOpenAfterSyncName: "Open after sync",
 		settingOpenAfterSyncDesc: "Open the Lark document in your browser after publish or sync succeeds.",
 		settingAutoSyncModeName: "Auto sync mode",
 		settingAutoSyncModeDesc: "Auto sync only handles bound Markdown notes. Save sync depends on Obsidian; the pre-push hook can run without Obsidian.",
+		settingSyncStrategyName: "Sync strategy",
+		settingSyncStrategyDesc: "Safe precise sync updates only changed blocks when possible. If it cannot update safely, it fails with a notice instead of falling back to overwrite. Overwrite sync clears and rewrites the remote document.",
+		syncStrategyPrecise: "Safe precise sync (recommended)",
+		syncStrategyOverwrite: "Overwrite sync",
 		autoSyncModeManual: "Off",
 		autoSyncModeSave: "Sync after save",
 		autoSyncModePrePush: "Git pre-push hook",
@@ -247,9 +281,12 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private readonly autoSyncTimers = new Map<string, number>();
 	private readonly autoSyncRunningPaths = new Set<string>();
 	private readonly selfWrittenPaths = new Map<string, number>();
+	private syncState: LarkSyncStateFile = createEmptySyncStateFile();
 
 	override async onload(): Promise<void> {
 		await this.loadSettings();
+		this.syncState = await this.loadLarkSyncState();
+		await this.tryEnsureLarkSyncStateFile();
 		this.registerSaveAutoSync();
 		this.register(() => {
 			for (const timer of this.autoSyncTimers.values()) {
@@ -358,6 +395,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 		await this.runWithNotice(this.t("noticePublishingToLark"), async () => {
 			const content = await this.readNoteForLark(file);
 			const result = await this.createLarkDocument(file, content);
+			await this.saveCreatedDocumentState(result, content);
 
 			if (this.settings.updateFrontmatter) {
 				await this.writeBinding(file, result);
@@ -375,7 +413,8 @@ export default class LarkCliSyncPlugin extends Plugin {
 				openAfterSync: true,
 				showSuccess: true,
 				showRemoteDeletedNotice: true,
-				updateFrontmatter: this.settings.updateFrontmatter
+				updateFrontmatter: this.settings.updateFrontmatter,
+				mode: "manual"
 			});
 		});
 	}
@@ -389,6 +428,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 			const content = await this.readNoteForLark(file);
 			const result = await this.createLarkDocument(file, content);
+			await this.saveCreatedDocumentState(result, content);
 
 			if (options.updateFrontmatter) {
 				await this.writeBinding(file, result);
@@ -408,7 +448,10 @@ export default class LarkCliSyncPlugin extends Plugin {
 		const content = await this.readNoteForLark(file);
 		const nextBinding = await this.syncOrRecreateDocument(file, binding, content, undefined, {
 			allowRecreate: options.allowCreate,
-			showRemoteDeletedNotice: options.showRemoteDeletedNotice
+			showRemoteDeletedNotice: options.showRemoteDeletedNotice,
+			mode: options.mode,
+			path: file.path,
+			stateKeys: [binding.token, binding.url]
 		});
 
 		if (options.updateFrontmatter) {
@@ -462,7 +505,8 @@ export default class LarkCliSyncPlugin extends Plugin {
 				openAfterSync: false,
 				showSuccess: false,
 				showRemoteDeletedNotice: false,
-				updateFrontmatter: this.settings.updateFrontmatter
+				updateFrontmatter: this.settings.updateFrontmatter,
+				mode: "save"
 			});
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
@@ -537,6 +581,105 @@ export default class LarkCliSyncPlugin extends Plugin {
 		return join(vaultPath, ".obsidian", "plugins", this.manifest.id);
 	}
 
+	private getLarkSyncStatePath(): string | null {
+		const vaultPath = this.getVaultBasePath();
+		if (!vaultPath) {
+			return null;
+		}
+
+		return join(vaultPath, ".obsidian", "plugins", this.manifest.id, LARK_SYNC_STATE_FILE_NAME);
+	}
+
+	private async loadLarkSyncState(): Promise<LarkSyncStateFile> {
+		const statePath = this.getLarkSyncStatePath();
+		if (!statePath) {
+			return createEmptySyncStateFile();
+		}
+
+		try {
+			const rawState = await readFile(statePath, "utf8");
+			const state = JSON.parse(rawState) as Partial<LarkSyncStateFile>;
+			if (this.isValidLarkSyncStateFile(state)) {
+				return {
+					version: 1,
+					documents: state.documents
+				};
+			}
+		} catch (error) {
+			if (!this.isFileNotFoundError(error)) {
+				console.warn("[Feishu Lark CLI Sync] failed to load sync state", error);
+			}
+		}
+
+		const emptyState = createEmptySyncStateFile();
+		await this.tryRepairLarkSyncStateFile(emptyState);
+		return emptyState;
+	}
+
+	private async saveLarkSyncState(): Promise<void> {
+		const statePath = this.getLarkSyncStatePath();
+		if (!statePath) {
+			return;
+		}
+
+		const tempPath = `${statePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+		await mkdir(dirname(statePath), { recursive: true });
+		try {
+			await writeFile(tempPath, JSON.stringify(this.syncState, null, 2), "utf8");
+			await rename(tempPath, statePath);
+		} catch (error) {
+			await rm(tempPath, { force: true });
+			throw error;
+		}
+	}
+
+	private async ensureLarkSyncStateFile(): Promise<void> {
+		const statePath = this.getLarkSyncStatePath();
+		if (!statePath || await this.pathExists(statePath)) {
+			return;
+		}
+
+		await this.saveLarkSyncState();
+	}
+
+	private async tryEnsureLarkSyncStateFile(): Promise<void> {
+		try {
+			await this.ensureLarkSyncStateFile();
+		} catch (error) {
+			console.warn("[Feishu Lark CLI Sync] failed to initialize sync state file", error);
+		}
+	}
+
+	private async tryRepairLarkSyncStateFile(state: LarkSyncStateFile): Promise<void> {
+		const previousState = this.syncState;
+		try {
+			this.syncState = state;
+			await this.saveLarkSyncState();
+		} catch (error) {
+			console.warn("[Feishu Lark CLI Sync] failed to repair sync state file", error);
+		} finally {
+			this.syncState = previousState;
+		}
+	}
+
+	private isValidLarkSyncStateFile(state: Partial<LarkSyncStateFile>): state is LarkSyncStateFile {
+		if (state.version !== 1 || !state.documents || Array.isArray(state.documents) || typeof state.documents !== "object") {
+			return false;
+		}
+
+		return Object.values(state.documents).every((documentState) => {
+			return Boolean(documentState)
+				&& typeof documentState.doc === "string"
+				&& typeof documentState.contentHash === "string"
+				&& Array.isArray(documentState.units)
+				&& typeof documentState.updatedAt === "string";
+		});
+	}
+
+	private isFileNotFoundError(error: unknown): boolean {
+		return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
+
 	private async backupExistingPrePushHook(hookPath: string): Promise<string> {
 		if (!await this.pathExists(hookPath)) {
 			return "";
@@ -605,7 +748,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			const entries: FolderPublishEntry[] = [];
-			const linkMap = new Map<string, LinkTarget>();
 			const folderRoot = this.getSelectedFolderName(folderPath);
 			const rootParent = await this.resolveRemoteRootParent();
 
@@ -615,7 +757,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				const documentParentPath = this.getRemoteParentPath(folderPath, file, folderRoot);
 				const documentParent = await this.ensureRemoteFolderPath(rootParent, documentParentPath);
 				const nextBinding = binding
-					? await this.syncOrRecreateDocument(file, binding, content, documentParent)
+					? await this.resolveFolderBinding(file, binding, content, documentParent)
 					: await this.createLarkDocument(file, content, documentParent);
 				const nextBindingWithParent = this.withRemoteParentMetadata(
 					nextBinding,
@@ -624,25 +766,100 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					documentParent
 				);
 
-				entries.push({ file, content, binding: nextBindingWithParent });
-				this.addLinkAliases(linkMap, folderPath, file, nextBindingWithParent);
+				entries.push({
+					file,
+					content,
+					binding: nextBindingWithParent,
+					parent: documentParent,
+					remoteParentPath: documentParentPath,
+					isNewDocument: !binding || nextBinding.token !== binding.token || nextBinding.url !== binding.url
+				});
 
 				if (this.settings.updateFrontmatter) {
 					await this.writeBinding(file, nextBindingWithParent);
 				}
 			}
 
-			for (const entry of entries) {
-				if (!entry.binding) {
-					continue;
-				}
-
-				const rewrittenContent = this.rewriteInternalLinks(entry.content, linkMap, entry.file);
-				await this.updateLarkDocument(entry.binding.token || entry.binding.url, rewrittenContent);
-			}
+			await this.syncFolderEntries(folderPath, folderRoot, entries);
 
 			new Notice(this.t("noticePublishedFolderToLark", { count: String(entries.length) }), 8000);
 		});
+	}
+
+	private async syncFolderEntries(folderPath: string, folderRoot: string, entries: FolderPublishEntry[]): Promise<void> {
+		const maxAttempts = entries.length + 1;
+		for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+			const linkMap = this.buildFolderLinkMap(folderPath, entries);
+			const bindingChanged = await this.syncFolderEntriesOnce(folderRoot, entries, linkMap);
+			if (!bindingChanged) {
+				return;
+			}
+		}
+
+		throw new LocalizedSyncError(this.formatSyncFailure("folder", folderPath, "remote-revision-changed"));
+	}
+
+	private buildFolderLinkMap(folderPath: string, entries: FolderPublishEntry[]): Map<string, LinkTarget> {
+		const linkMap = new Map<string, LinkTarget>();
+		for (const entry of entries) {
+			if (entry.binding) {
+				this.addLinkAliases(linkMap, folderPath, entry.file, entry.binding);
+			}
+		}
+		return linkMap;
+	}
+
+	private async syncFolderEntriesOnce(
+		folderRoot: string,
+		entries: FolderPublishEntry[],
+		linkMap: Map<string, LinkTarget>
+	): Promise<boolean> {
+		for (const entry of entries) {
+			if (!entry.binding) {
+				continue;
+			}
+
+			const rewrittenContent = this.rewriteInternalLinks(entry.content, linkMap, entry.file);
+			const strategy = entry.isNewDocument ? "overwrite" : undefined;
+			if (entry.isNewDocument && rewrittenContent === entry.content) {
+				await this.saveCreatedDocumentState(entry.binding, entry.content);
+				continue;
+			}
+
+			const nextBinding = await this.syncOrRecreateDocument(entry.file, entry.binding, rewrittenContent, entry.parent, {
+				allowRecreate: true,
+				showRemoteDeletedNotice: false,
+				mode: "folder",
+				path: entry.file.path,
+				strategy,
+				stateKeys: [entry.binding.token, entry.binding.url]
+			});
+			const nextBindingWithParent = this.withRemoteParentMetadata(
+				nextBinding,
+				folderRoot,
+				entry.remoteParentPath,
+				entry.parent
+			);
+
+			if (nextBindingWithParent.token !== entry.binding.token || nextBindingWithParent.url !== entry.binding.url) {
+				entry.binding = nextBindingWithParent;
+				entry.isNewDocument = true;
+				if (this.settings.updateFrontmatter) {
+					await this.writeBinding(entry.file, nextBindingWithParent);
+				}
+				return true;
+			}
+
+			if (this.settings.updateFrontmatter) {
+				await this.writeBinding(entry.file, nextBindingWithParent);
+			}
+
+			if (strategy === "overwrite") {
+				await this.saveCreatedDocumentState(nextBindingWithParent, rewrittenContent);
+			}
+		}
+
+		return false;
 	}
 
 	private getActiveMarkdownFile(): TFile | null {
@@ -716,32 +933,162 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		});
 	}
 
-	private async updateLarkDocument(doc: string, content: string): Promise<Partial<BoundLarkDocument>> {
-		return await this.withTempMarkdown("sync", content, async (tempFile) => {
-			const result = await this.runLarkCli(buildUpdateDocumentArgs(doc, tempFile.fileName), {
-				cwd: tempFile.directory
-			});
-			const document = result.data?.document;
-
-			return {
-				token: document?.document_id,
-				url: document?.url
-			};
+	private async updateLarkDocument(
+		doc: string,
+		content: string,
+		context: { mode: SyncMode; path: string; strategy?: SyncStrategy; stateKeys?: string[] }
+	): Promise<Partial<BoundLarkDocument>> {
+		const state = this.syncState.documents[doc];
+		const plan = await buildSyncPlan({
+			doc,
+			markdown: content,
+			contentFileName: "sync.md",
+			strategy: context.strategy || this.settings.syncStrategy,
+			state
 		});
+
+		return await this.executeSyncPlan(doc, content, plan, context);
+	}
+
+	private async executeSyncPlan(
+		doc: string,
+		content: string,
+		plan: SyncPlan,
+		context: { mode: SyncMode; path: string; stateKeys?: string[] }
+	): Promise<Partial<BoundLarkDocument>> {
+		if (plan.mode === "skipped") {
+			await this.ensureRemoteDocumentMatches(doc, plan.contentHash, context);
+			await this.saveSyncPlanStateForDocument(doc, {}, plan, context.stateKeys || []);
+			return {};
+		}
+
+		if (plan.mode === "blocked") {
+			await this.ensureRemoteDocumentExists(doc);
+			throw new LocalizedSyncError(this.formatSyncFailure(context.mode, context.path, plan.reason));
+		}
+
+		return await this.withTempMarkdown("sync", content, async (tempFile) => {
+			let latestDocument: Partial<BoundLarkDocument> = {};
+			for (const command of plan.commands) {
+				const commandArgs = buildUpdateCommandArgs(
+					"contentFileName" in command
+						? { ...command, doc, contentFileName: tempFile.fileName }
+						: { ...command, doc }
+				);
+				const result = await this.runLarkCli(commandArgs, {
+					cwd: tempFile.directory
+				});
+				const document = result.data?.document;
+				latestDocument = {
+					token: document?.document_id || latestDocument.token,
+					url: document?.url || latestDocument.url
+				};
+			}
+
+			await this.saveSyncPlanStateForDocument(doc, latestDocument, plan, context.stateKeys || []);
+			return latestDocument;
+		});
+	}
+
+	private async saveSyncPlanStateForDocument(
+		doc: string,
+		document: Partial<BoundLarkDocument>,
+		plan: SyncPlan,
+		extraKeys: string[]
+	): Promise<void> {
+		const keys = this.uniquePathEntries([doc, ...extraKeys, document.token || "", document.url || ""]);
+		for (const key of keys) {
+			await this.saveSyncPlanState(key, plan);
+		}
+	}
+
+	private async saveSyncPlanState(doc: string, plan: SyncPlan): Promise<void> {
+		if (plan.mode === "blocked") {
+			return;
+		}
+
+		if (!("nextState" in plan) || !plan.nextState) {
+			return;
+		}
+
+		this.syncState.documents[doc] = {
+			...plan.nextState,
+			doc
+		};
+		await this.saveLarkSyncState();
+	}
+
+	private async saveCreatedDocumentState(binding: BoundLarkDocument, content: string): Promise<void> {
+		const contentHash = await buildSyncPlan({
+			doc: binding.token || binding.url,
+			markdown: content,
+			contentFileName: "sync.md",
+			strategy: "overwrite"
+		}).then((plan) => plan.contentHash);
+		const documentKeys = this.uniquePathEntries([binding.token, binding.url]);
+		for (const doc of documentKeys) {
+			this.syncState.documents[doc] = createDocumentSyncState(doc, contentHash);
+		}
+		await this.saveLarkSyncState();
+	}
+
+	private formatSyncFailure(mode: SyncMode, path: string, reason: SyncFailureReason): string {
+		return formatSyncFailureMessage({
+			language: this.settings.language,
+			mode,
+			path,
+			reason
+		});
+	}
+
+	private async ensureRemoteDocumentExists(doc: string): Promise<void> {
+		const args = ["drive", "+inspect", "--as", "user", "--url", doc, "--json"];
+		if (!/^https?:\/\//.test(doc)) {
+			args.push("--type", "docx");
+		}
+
+		await this.runLarkCli(args);
+	}
+
+	private async ensureRemoteDocumentMatches(
+		doc: string,
+		expectedContentHash: string,
+		context: { mode: SyncMode; path: string }
+	): Promise<void> {
+		const result = await this.runLarkCli([
+			"docs",
+			"+fetch",
+			"--api-version",
+			"v2",
+			"--as",
+			"user",
+			"--doc",
+			doc,
+			"--doc-format",
+			"markdown",
+			"--json"
+		]);
+		const remoteContent = result.data?.document?.content || "";
+		const remoteContentHash = await createContentHash(remoteContent);
+		if (remoteContentHash !== expectedContentHash) {
+			throw new LocalizedSyncError(this.formatSyncFailure(context.mode, context.path, "remote-content-mismatch"));
+		}
 	}
 
 	private async syncOrRecreateDocument(
 		file: TFile,
 		binding: BoundLarkDocument,
 		content: string,
-		parent?: RemoteParent,
-		options: SyncOrRecreateOptions = {
-			allowRecreate: true,
-			showRemoteDeletedNotice: true
-		}
+		parent: RemoteParent | undefined,
+		options: SyncOrRecreateOptions
 	): Promise<BoundLarkDocument> {
 		try {
-			const result = await this.updateLarkDocument(binding.token || binding.url, content);
+			const result = await this.updateLarkDocument(binding.token || binding.url, content, {
+				mode: options.mode,
+				path: options.path,
+				strategy: options.strategy,
+				stateKeys: options.stateKeys
+			});
 
 			return {
 				token: result.token || binding.token,
@@ -759,7 +1106,29 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			if (options.showRemoteDeletedNotice) {
 				new Notice(this.t("noticeRemoteDeletedRecreate"), 5000);
 			}
-			return await this.createLarkDocument(file, content, parent);
+			const recreatedBinding = await this.createLarkDocument(file, content, parent);
+			await this.saveCreatedDocumentState(recreatedBinding, content);
+			return recreatedBinding;
+		}
+	}
+
+	private async resolveFolderBinding(
+		file: TFile,
+		binding: BoundLarkDocument,
+		content: string,
+		parent: RemoteParent
+	): Promise<BoundLarkDocument> {
+		try {
+			await this.ensureRemoteDocumentExists(binding.token || binding.url);
+			return binding;
+		} catch (error) {
+			if (!this.isRemoteDocumentDeletedError(error)) {
+				throw error;
+			}
+
+			const recreatedBinding = await this.createLarkDocument(file, content, parent);
+			await this.saveCreatedDocumentState(recreatedBinding, content);
+			return recreatedBinding;
 		}
 	}
 
@@ -1061,7 +1430,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const message = error instanceof Error ? error.message : String(error);
 		return message.includes("3380003")
 			|| message.toLowerCase().includes("document page has been deleted")
-			|| message.toLowerCase().includes("no longer be edited");
+			|| message.toLowerCase().includes("no longer be edited")
+			|| message.toLowerCase().includes("not exist")
+			|| message.toLowerCase().includes("not found");
 	}
 
 	private async buildCommandEnvironment(executable: string): Promise<NodeJS.ProcessEnv> {
@@ -1233,7 +1604,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			await callback();
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
-			new Notice(this.t("noticeSyncFailed", { message: errorMessage }), 10000);
+			const noticeMessage = error instanceof LocalizedSyncError
+				? errorMessage
+				: this.t("noticeSyncFailed", { message: errorMessage });
+			new Notice(noticeMessage, 10000);
 			console.error("[Feishu Lark CLI Sync] operation failed", error);
 		} finally {
 			notice.hide();
@@ -1339,6 +1713,18 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					this.plugin.settings.openAfterSync = value;
 					await this.plugin.saveSettings();
 				});
+			});
+
+		new Setting(containerEl)
+			.setName(this.plugin.t("settingSyncStrategyName"))
+			.setDesc(this.plugin.t("settingSyncStrategyDesc"))
+			.addDropdown((dropdown) => {
+				dropdown.addOption("precise", this.plugin.t("syncStrategyPrecise"))
+					.addOption("overwrite", this.plugin.t("syncStrategyOverwrite"))
+					.setValue(this.plugin.settings.syncStrategy).onChange(async (value) => {
+						this.plugin.settings.syncStrategy = value as SyncStrategy;
+						await this.plugin.saveSettings();
+					});
 			});
 
 		new Setting(containerEl)

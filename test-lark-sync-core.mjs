@@ -11,7 +11,12 @@ await esbuild.build({
 });
 
 const {
+	buildSyncPlan,
+	buildUpdateCommandArgs,
 	buildUpdateDocumentArgs,
+	createContentHash,
+	createEmptySyncStateFile,
+	formatSyncFailureMessage,
 	prepareNoteContentForLark,
 	readBindingFromMarkdown,
 	removeLarkBinding
@@ -58,5 +63,166 @@ assert.deepEqual(buildUpdateDocumentArgs("doc-token", "sync.md"), [
 	"@sync.md",
 	"--json"
 ]);
+
+assert.deepEqual(buildUpdateCommandArgs({
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "markdown",
+	blockId: "blk-1",
+	contentFileName: "unit.md"
+}), [
+	"docs",
+	"+update",
+	"--api-version",
+	"v2",
+	"--as",
+	"user",
+	"--doc",
+	"doc-token",
+	"--command",
+	"block_replace",
+	"--doc-format",
+	"markdown",
+	"--block-id",
+	"blk-1",
+	"--content",
+	"@unit.md",
+	"--json"
+]);
+
+assert.deepEqual(createEmptySyncStateFile(), {
+	version: 1,
+	documents: {}
+});
+
+const contentHash = await createContentHash("# Note\n\nBody");
+assert.equal(contentHash, await createContentHash("# Note\n\nBody"));
+assert.notEqual(contentHash, await createContentHash("# Note\n\nChanged"));
+assert.equal(contentHash.length, 64);
+
+const overwritePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "overwrite"
+});
+assert.equal(overwritePlan.mode, "overwrite");
+assert.deepEqual(overwritePlan.commands, [{
+	doc: "doc-token",
+	command: "overwrite",
+	docFormat: "markdown",
+	contentFileName: "sync.md"
+}]);
+assert.equal(overwritePlan.contentHash, contentHash);
+assert.equal(overwritePlan.nextState.doc, "doc-token");
+assert.equal(overwritePlan.nextState.contentHash, contentHash);
+assert.deepEqual(overwritePlan.nextState.units, []);
+assert.ok(Date.parse(overwritePlan.nextState.updatedAt));
+
+const state = {
+	doc: "doc-token",
+	contentHash,
+	units: [{
+		stableId: "unit-1",
+		kind: "paragraph",
+		hash: "hash-1",
+		blockId: "blk-1"
+	}],
+	updatedAt: "2026-06-12T00:00:00.000Z"
+};
+assert.deepEqual(await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state
+}), {
+	mode: "skipped",
+	commands: [],
+	contentHash,
+	nextState: state
+});
+
+const mismatchedStatePlan = await buildSyncPlan({
+	doc: "other-doc-token",
+	markdown: "# Note\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state
+});
+assert.equal(mismatchedStatePlan.mode, "blocked");
+assert.equal(mismatchedStatePlan.reason, "block-mapping-missing");
+
+const missingMappingPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "precise"
+});
+assert.equal(missingMappingPlan.mode, "blocked");
+assert.equal(missingMappingPlan.reason, "block-mapping-missing");
+
+const complexPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nChanged",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state
+});
+assert.equal(complexPlan.mode, "blocked");
+assert.equal(complexPlan.reason, "diff-too-complex");
+
+assert.equal(
+	formatSyncFailureMessage({
+		language: "zh-CN",
+		mode: "pre-push",
+		path: "docs/a.md",
+		reason: "remote-revision-changed"
+	}),
+	"[Feishu Lark CLI Sync] pre-push 同步失败：docs/a.md\n原因：远端文档版本已变化，已停止安全增量同步。\n已阻止 git push，以避免覆盖飞书文档修改历史。"
+);
+
+assert.equal(
+	formatSyncFailureMessage({
+		language: "en",
+		mode: "pre-push",
+		path: "docs/a.md",
+		reason: "remote-revision-changed"
+	}),
+	"[Feishu Lark CLI Sync] pre-push sync failed: docs/a.md\nReason: remote document revision changed; precise sync aborted.\nPush was blocked to avoid overwriting remote document history."
+);
+
+assert.equal(
+	formatSyncFailureMessage({
+		language: "zh-CN",
+		mode: "pre-push",
+		path: "docs/a.md",
+		reason: "lark-cli-failed",
+		detail: "network timeout"
+	}),
+	"[Feishu Lark CLI Sync] pre-push 同步失败：docs/a.md\n原因：lark-cli 执行失败。\nnetwork timeout\n已阻止 git push，以避免覆盖飞书文档修改历史。"
+);
+
+assert.equal(
+	formatSyncFailureMessage({
+		language: "en",
+		mode: "save",
+		path: "docs/a.md",
+		reason: "lark-cli-failed",
+		detail: "network timeout"
+	}),
+	"Auto sync failed: docs/a.md\nReason: lark-cli execution failed.\nnetwork timeout"
+);
+
+assert.equal(
+	formatSyncFailureMessage({
+		language: "zh-CN",
+		mode: "pre-push",
+		path: "docs/a.md",
+		reason: "diff-too-complex",
+		detail: "安全增量同步仍在接入中"
+	}),
+	"[Feishu Lark CLI Sync] pre-push 同步失败：docs/a.md\n原因：本次变更过于复杂，无法安全增量同步。\n安全增量同步仍在接入中\n已阻止 git push，以避免覆盖飞书文档修改历史。"
+);
 
 console.log("lark sync core tests passed");

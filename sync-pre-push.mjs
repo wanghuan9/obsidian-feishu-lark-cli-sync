@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 import { execFile } from "child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "fs/promises";
 import { constants } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 import { promisify } from "util";
 import {
-	buildUpdateDocumentArgs,
+	buildSyncPlan,
+	buildUpdateCommandArgs,
+	createContentHash,
+	createEmptySyncStateFile,
+	formatSyncFailureMessage,
 	prepareNoteContentForLark,
 	readBindingFromMarkdown,
 	removeLarkBinding
@@ -15,8 +19,10 @@ import {
 const execFileAsync = promisify(execFile);
 
 const PLUGIN_ID = "feishu-lark-cli-sync";
+const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const ZERO_REF = "0000000000000000000000000000000000000000";
 const MAX_STDERR_LENGTH = 1600;
+const MAX_PARALLEL_SYNCS = 4;
 const FALLBACK_PATH_ENTRIES = [
 	"/opt/homebrew/bin",
 	"/opt/homebrew/sbin",
@@ -39,8 +45,16 @@ async function main() {
 		return;
 	}
 
-	for (const file of files) {
-		await syncMarkdownFile(resolve(repoRoot.trim(), file), settings);
+	const syncState = await readSyncState(repoRoot.trim());
+	const tasks = await collectSyncTasks(repoRoot.trim(), files);
+	const failure = await runWithConcurrency(groupTasksByDoc(tasks, syncState), MAX_PARALLEL_SYNCS, async (taskGroup) => {
+		for (const task of taskGroup) {
+			await syncMarkdownTask(task, settings, syncState);
+		}
+	});
+	await writeSyncState(repoRoot.trim(), syncState);
+	if (failure) {
+		throw failure;
 	}
 }
 
@@ -92,19 +106,198 @@ function uniqueMarkdownFiles(files) {
 	return result;
 }
 
-async function syncMarkdownFile(filePath, settings) {
-	const content = await readFile(filePath, "utf8");
-	const binding = readBindingFromMarkdown(content);
-	if (!binding) {
+async function collectSyncTasks(repoRoot, files) {
+	const tasks = await Promise.all(files.map(async (file) => {
+		const filePath = resolve(repoRoot, file);
+		const content = await readFile(filePath, "utf8");
+		const binding = readBindingFromMarkdown(content);
+		if (!binding) {
+			return null;
+		}
+
+		return {
+			filePath,
+			repoRelativePath: file,
+			content,
+			binding,
+			doc: binding.token || binding.url,
+			docAliases: getDocumentAliases(binding)
+		};
+	}));
+
+	return tasks.filter(Boolean);
+}
+
+function groupTasksByDoc(tasks, syncState) {
+	const taskGroups = new Map();
+	for (const task of tasks) {
+		const groupKey = resolveDocumentGroupKey(task, syncState);
+		const existingTasks = taskGroups.get(groupKey) || [];
+		existingTasks.push(task);
+		taskGroups.set(groupKey, existingTasks);
+	}
+
+	return Array.from(taskGroups.values());
+}
+
+function resolveDocumentGroupKey(task, syncState) {
+	for (const alias of task.docAliases) {
+		const state = syncState.documents[alias];
+		if (state?.doc) {
+			return state.doc;
+		}
+	}
+
+	return task.docAliases[0] || task.doc;
+}
+
+function getDocumentAliases(binding) {
+	const aliases = [binding.token, extractDocTokenFromUrl(binding.url), binding.url];
+	return uniquePathEntries(aliases);
+}
+
+function extractDocTokenFromUrl(url) {
+	if (!url) {
+		return "";
+	}
+
+	try {
+		const parsedUrl = new URL(url);
+		const match = parsedUrl.pathname.match(/\/(?:wiki|folder|docx|doc)\/([^/?#]+)/);
+		return match?.[1] || "";
+	} catch {
+		const match = url.match(/\/(?:wiki|folder|docx|doc)\/([^/?#]+)/);
+		return match?.[1] || "";
+	}
+}
+
+async function syncMarkdownTask(task, settings, syncState) {
+	try {
+		const file = { basename: basename(task.filePath, ".md") };
+		const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(task.content), settings.titleSource);
+		const state = findDocumentState(syncState, task.docAliases);
+		const syncDoc = state?.doc || task.doc;
+		const plan = await buildSyncPlan({
+			doc: syncDoc,
+			markdown: contentForLark,
+			contentFileName: "sync.md",
+			strategy: readSyncStrategy(settings),
+			state
+		});
+		const stateKeys = task.docAliases;
+
+		if (plan.mode === "skipped") {
+			await ensureRemoteDocumentMatches(settings, syncDoc, plan.contentHash, task.repoRelativePath);
+			savePlanState(syncState, stateKeys, plan);
+			return;
+		}
+
+		if (plan.mode === "blocked") {
+			throw new PrePushSyncError(formatSyncFailureMessage({
+				language: readLanguage(settings),
+				mode: "pre-push",
+				path: task.repoRelativePath,
+				reason: plan.reason
+			}));
+		}
+
+		await withTempMarkdown(basename(task.filePath, ".md"), contentForLark, async (tempFile) => {
+			for (const command of plan.commands) {
+				const args = buildUpdateCommandArgs(
+					"contentFileName" in command
+						? { ...command, contentFileName: tempFile.fileName }
+						: command
+				);
+				await runLarkCli(settings, args, tempFile.directory);
+			}
+		});
+		savePlanState(syncState, stateKeys, plan);
+	} catch (error) {
+		if (error instanceof PrePushSyncError) {
+			throw error;
+		}
+
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new Error(formatSyncFailureMessage({
+			language: readLanguage(settings),
+			mode: "pre-push",
+			path: task.repoRelativePath,
+			reason: "lark-cli-failed",
+			detail
+		}));
+	}
+}
+
+class PrePushSyncError extends Error {
+}
+
+function findDocumentState(syncState, aliases) {
+	for (const alias of aliases) {
+		const state = syncState.documents[alias];
+		if (state) {
+			return state;
+		}
+	}
+
+	return undefined;
+}
+
+function savePlanState(syncState, docs, plan) {
+	if (!("nextState" in plan) || !plan.nextState) {
 		return;
 	}
 
-	const file = { basename: basename(filePath, ".md") };
-	const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(content), settings.titleSource);
-	await withTempMarkdown(basename(filePath, ".md"), contentForLark, async (tempFile) => {
-		const args = buildUpdateDocumentArgs(binding.token || binding.url, tempFile.fileName);
-		await runLarkCli(settings, args, tempFile.directory);
-	});
+	for (const doc of uniquePathEntries(docs)) {
+		syncState.documents[doc] = plan.nextState;
+	}
+}
+
+async function ensureRemoteDocumentMatches(settings, doc, expectedContentHash, repoRelativePath) {
+	const result = await runLarkCli(settings, [
+		"docs",
+		"+fetch",
+		"--api-version",
+		"v2",
+		"--as",
+		"user",
+		"--doc",
+		doc,
+		"--doc-format",
+		"markdown",
+		"--json"
+	]);
+	const remoteContent = result.data?.document?.content || "";
+	const remoteContentHash = await createContentHash(remoteContent);
+	if (remoteContentHash !== expectedContentHash) {
+		throw new PrePushSyncError(formatSyncFailureMessage({
+			language: readLanguage(settings),
+			mode: "pre-push",
+			path: repoRelativePath,
+			reason: "remote-content-mismatch"
+		}));
+	}
+}
+
+async function runWithConcurrency(items, limit, worker) {
+	const executing = new Set();
+	const failures = [];
+	for (const item of items) {
+		const task = Promise.resolve().then(() => worker(item)).catch((error) => {
+			failures.push(error);
+		});
+		executing.add(task);
+		task.finally(() => executing.delete(task));
+		if (executing.size >= limit) {
+			await Promise.race(executing);
+		}
+	}
+
+	await Promise.all(executing);
+	if (failures.length > 0) {
+		return failures[0];
+	}
+
+	return null;
 }
 
 async function withTempMarkdown(baseName, content, callback) {
@@ -134,6 +327,49 @@ async function readSettings(repoRoot) {
 	}
 }
 
+async function readSyncState(repoRoot) {
+	const statePath = getSyncStatePath(repoRoot);
+	try {
+		const rawState = await readFile(statePath, "utf8");
+		const state = JSON.parse(rawState);
+		if (isValidSyncState(state)) {
+			return {
+				version: 1,
+				documents: state.documents
+			};
+		}
+	} catch {
+		return createEmptySyncStateFile();
+	}
+
+	return createEmptySyncStateFile();
+}
+
+async function writeSyncState(repoRoot, syncState) {
+	const statePath = getSyncStatePath(repoRoot);
+	const tempPath = `${statePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+	await mkdir(dirname(statePath), { recursive: true });
+	try {
+		await writeFile(tempPath, JSON.stringify(syncState, null, 2), "utf8");
+		await rename(tempPath, statePath);
+	} catch (error) {
+		await rm(tempPath, { force: true });
+		throw error;
+	}
+}
+
+function getSyncStatePath(repoRoot) {
+	return join(repoRoot, ".obsidian", "plugins", PLUGIN_ID, LARK_SYNC_STATE_FILE_NAME);
+}
+
+function isValidSyncState(state) {
+	return Boolean(state)
+		&& state.version === 1
+		&& state.documents
+		&& !Array.isArray(state.documents)
+		&& typeof state.documents === "object";
+}
+
 async function runLarkCli(settings, args, cwd) {
 	const executable = await resolveLarkCliPath(settings);
 	try {
@@ -147,6 +383,7 @@ async function runLarkCli(settings, args, cwd) {
 		if (!result.ok) {
 			throw new Error(formatLarkError(result));
 		}
+		return result;
 	} catch (error) {
 		throw new Error(formatCommandError(error));
 	}
@@ -237,6 +474,14 @@ function formatCommandError(error) {
 	return String(error);
 }
 
+function readLanguage(settings) {
+	return settings.language === "en" ? "en" : "zh-CN";
+}
+
+function readSyncStrategy(settings) {
+	return settings.syncStrategy === "overwrite" ? "overwrite" : "precise";
+}
+
 async function git(args) {
 	const { stdout } = await execFileAsync("git", args, {
 		env: buildCommandEnvironment("git"),
@@ -260,6 +505,6 @@ async function readStdin() {
 }
 
 main().catch((error) => {
-	console.error(`[Feishu Lark CLI Sync] pre-push sync failed: ${error.message || String(error)}`);
+	console.error(error.message || String(error));
 	process.exit(1);
 });

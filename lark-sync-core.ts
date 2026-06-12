@@ -1,4 +1,15 @@
 export type TitleSource = "first-heading" | "file-name";
+export type SyncStrategy = "precise" | "overwrite";
+export type MessageLanguage = "zh-CN" | "en";
+export type SyncMode = "manual" | "save" | "pre-push" | "folder";
+export type SyncFailureReason =
+	| "remote-revision-changed"
+	| "remote-content-mismatch"
+	| "block-mapping-missing"
+	| "block-id-invalid"
+	| "diff-too-complex"
+	| "lark-cli-failed";
+export type SyncPlanMode = "skipped" | "precise" | "overwrite" | "blocked";
 
 export interface NoteFile {
 	basename: string;
@@ -7,6 +18,111 @@ export interface NoteFile {
 export interface LarkDocumentBinding {
 	token: string;
 	url: string;
+}
+
+export interface LarkSyncStateFile {
+	version: 1;
+	documents: Record<string, DocumentSyncState>;
+}
+
+export interface DocumentSyncState {
+	doc: string;
+	revisionId?: number;
+	contentHash: string;
+	units: SyncUnitState[];
+	updatedAt: string;
+}
+
+export interface SyncUnitState {
+	stableId: string;
+	kind: string;
+	hash: string;
+	blockId: string;
+}
+
+export type LarkUpdateCommand =
+	| LarkOverwriteCommand
+	| LarkBlockReplaceCommand
+	| LarkBlockInsertAfterCommand
+	| LarkBlockDeleteCommand;
+
+export interface LarkOverwriteCommand {
+	doc: string;
+	command: "overwrite";
+	docFormat: "markdown" | "xml";
+	contentFileName: string;
+}
+
+export interface LarkBlockReplaceCommand {
+	doc: string;
+	command: "block_replace";
+	docFormat: "markdown" | "xml";
+	blockId: string;
+	contentFileName: string;
+}
+
+export interface LarkBlockInsertAfterCommand {
+	doc: string;
+	command: "block_insert_after";
+	docFormat: "markdown" | "xml";
+	blockId: string;
+	contentFileName: string;
+}
+
+export interface LarkBlockDeleteCommand {
+	doc: string;
+	command: "block_delete";
+	blockId: string;
+}
+
+export type SyncPlan =
+	| SkippedSyncPlan
+	| PreciseSyncPlan
+	| OverwriteSyncPlan
+	| BlockedSyncPlan;
+
+export interface SkippedSyncPlan {
+	mode: "skipped";
+	commands: [];
+	contentHash: string;
+	nextState: DocumentSyncState;
+}
+
+export interface PreciseSyncPlan {
+	mode: "precise";
+	commands: LarkUpdateCommand[];
+	contentHash: string;
+	nextState?: DocumentSyncState;
+}
+
+export interface OverwriteSyncPlan {
+	mode: "overwrite";
+	commands: [LarkOverwriteCommand];
+	contentHash: string;
+	nextState: DocumentSyncState;
+}
+
+export interface BlockedSyncPlan {
+	mode: "blocked";
+	commands: [];
+	contentHash: string;
+	reason: SyncFailureReason;
+}
+
+export interface BuildSyncPlanInput {
+	doc: string;
+	markdown: string;
+	contentFileName: string;
+	strategy: SyncStrategy;
+	state?: DocumentSyncState;
+}
+
+export interface FormatSyncFailureInput {
+	language: MessageLanguage;
+	mode: SyncMode;
+	path: string;
+	reason: SyncFailureReason;
+	detail?: string;
 }
 
 export const FRONTMATTER_URL_KEY = "lark_doc_url";
@@ -83,7 +199,16 @@ export function removeLarkBinding(content: string): string {
 }
 
 export function buildUpdateDocumentArgs(doc: string, fileName: string): string[] {
-	return [
+	return buildUpdateCommandArgs({
+		doc,
+		command: "overwrite",
+		docFormat: "markdown",
+		contentFileName: fileName
+	});
+}
+
+export function buildUpdateCommandArgs(command: LarkUpdateCommand): string[] {
+	const args = [
 		"docs",
 		"+update",
 		"--api-version",
@@ -91,16 +216,171 @@ export function buildUpdateDocumentArgs(doc: string, fileName: string): string[]
 		"--as",
 		"user",
 		"--doc",
-		doc,
+		command.doc,
 		"--command",
-		"overwrite",
-		"--doc-format",
-		"markdown",
-		"--content",
-		`@${fileName}`,
-		"--json"
+		command.command
 	];
+
+	switch (command.command) {
+		case "overwrite":
+			args.push("--doc-format", command.docFormat, "--content", `@${command.contentFileName}`);
+			break;
+		case "block_replace":
+		case "block_insert_after":
+			args.push(
+				"--doc-format",
+				command.docFormat,
+				"--block-id",
+				command.blockId,
+				"--content",
+				`@${command.contentFileName}`
+			);
+			break;
+		case "block_delete":
+			args.push("--block-id", command.blockId);
+			break;
+	}
+
+	args.push("--json");
+	return args;
 }
+
+export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan> {
+	const contentHash = await createContentHash(input.markdown);
+	if (input.strategy === "overwrite") {
+		return {
+			mode: "overwrite",
+			commands: [
+				{
+					doc: input.doc,
+					command: "overwrite",
+					docFormat: "markdown",
+					contentFileName: input.contentFileName
+				}
+			],
+			contentHash,
+			nextState: createDocumentSyncState(input.doc, contentHash)
+		};
+	}
+
+	if (input.state && input.state.doc !== input.doc) {
+		return {
+			mode: "blocked",
+			commands: [],
+			contentHash,
+			reason: "block-mapping-missing"
+		};
+	}
+
+	if (input.state?.contentHash === contentHash) {
+		return {
+			mode: "skipped",
+			commands: [],
+			contentHash,
+			nextState: input.state
+		};
+	}
+
+	if (!input.state || input.state.units.length === 0) {
+		return {
+			mode: "blocked",
+			commands: [],
+			contentHash,
+			reason: "block-mapping-missing"
+		};
+	}
+
+	return {
+		mode: "blocked",
+		commands: [],
+		contentHash,
+		reason: "diff-too-complex"
+	};
+}
+
+export function createEmptySyncStateFile(): LarkSyncStateFile {
+	return {
+		version: 1,
+		documents: {}
+	};
+}
+
+export function createDocumentSyncState(doc: string, contentHash: string): DocumentSyncState {
+	return {
+		doc,
+		contentHash,
+		units: [],
+		updatedAt: new Date().toISOString()
+	};
+}
+
+export async function createContentHash(content: string): Promise<string> {
+	const bytes = new TextEncoder().encode(content);
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function formatSyncFailureMessage(input: FormatSyncFailureInput): string {
+	const language = input.language === "en" ? "en" : "zh-CN";
+	const reason = SYNC_FAILURE_REASON_MESSAGES[language][input.reason];
+	const detail = input.detail ? `\n${input.detail}` : "";
+	if (language === "en") {
+		return formatEnglishSyncFailure(input, reason, detail);
+	}
+
+	return formatChineseSyncFailure(input, reason, detail);
+}
+
+function formatEnglishSyncFailure(input: FormatSyncFailureInput, reason: string, detail: string): string {
+	if (input.mode === "pre-push") {
+		return `[Feishu Lark CLI Sync] pre-push sync failed: ${input.path}\nReason: ${reason}.${detail}\nPush was blocked to avoid overwriting remote document history.`;
+	}
+
+	if (input.mode === "save") {
+		return `Auto sync failed: ${input.path}\nReason: ${reason}.${detail}`;
+	}
+
+	if (input.mode === "folder") {
+		return `Folder sync failed: ${input.path}\nReason: ${reason}.${detail}`;
+	}
+
+	return `Feishu/Lark sync failed: ${input.path}\nReason: ${reason}.${detail}`;
+}
+
+function formatChineseSyncFailure(input: FormatSyncFailureInput, reason: string, detail: string): string {
+	if (input.mode === "pre-push") {
+		return `[Feishu Lark CLI Sync] pre-push 同步失败：${input.path}\n原因：${reason}。${detail}\n已阻止 git push，以避免覆盖飞书文档修改历史。`;
+	}
+
+	if (input.mode === "save") {
+		return `自动同步失败：${input.path}\n原因：${reason}。${detail}`;
+	}
+
+	if (input.mode === "folder") {
+		return `目录同步失败：${input.path}\n原因：${reason}。${detail}`;
+	}
+
+	return `飞书同步失败：${input.path}\n原因：${reason}。${detail}`;
+}
+
+const SYNC_FAILURE_REASON_MESSAGES: Record<MessageLanguage, Record<SyncFailureReason, string>> = {
+	"zh-CN": {
+		"remote-revision-changed": "远端文档版本已变化，已停止安全增量同步",
+		"remote-content-mismatch": "远端文档内容与本地基线不一致，无法安全建立增量同步状态",
+		"block-mapping-missing": "缺少远端 block 映射，无法安全增量同步",
+		"block-id-invalid": "远端 block id 已失效，无法安全增量同步",
+		"diff-too-complex": "本次变更过于复杂，无法安全增量同步",
+		"lark-cli-failed": "lark-cli 执行失败"
+	},
+	en: {
+		"remote-revision-changed": "remote document revision changed; precise sync aborted",
+		"remote-content-mismatch": "remote content does not match the local baseline; precise sync state cannot be established safely",
+		"block-mapping-missing": "remote block mapping is missing; precise sync aborted",
+		"block-id-invalid": "remote block id is invalid; precise sync aborted",
+		"diff-too-complex": "the change is too complex for safe precise sync",
+		"lark-cli-failed": "lark-cli execution failed"
+	}
+};
 
 function withMarkdownTitle(content: string, title: string): string {
 	if (/^[ \t]*#[ \t]+/m.test(content)) {

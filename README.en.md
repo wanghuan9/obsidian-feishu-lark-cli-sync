@@ -69,8 +69,9 @@ which lark-cli
 - `lark-cli path`: command name or absolute path; keep `lark-cli` for automatic detection
 - `Default target`: Wiki URL, Wiki node token, folder token, or blank for personal library
 - `Title source`: first Markdown H1 or file name
-- `Write binding to frontmatter`: store the Feishu/Lark document URL and sync time after publishing
+- `Write binding to frontmatter`: store the Feishu/Lark document URL after publishing
 - `Open after sync`: open the remote document after publish or sync
+- `Sync strategy`: use safe precise sync by default, or switch to overwrite sync. Safe precise sync fails with a notice when it cannot update safely and does not fall back to overwrite automatically.
 - `Auto sync mode`: choose off, sync after save, or Git `pre-push` hook. Auto sync only handles bound Markdown notes and never auto-publishes unbound notes.
 - `Save sync delay`: wait a few seconds after save before syncing, used to merge continuous edits.
 
@@ -79,7 +80,7 @@ which lark-cli
 Right-click a Markdown file, or open the command palette while a note is active:
 
 - `Publish to Feishu/Lark`: create a new Feishu/Lark Docx document and write binding metadata
-- `Sync to Feishu/Lark`: overwrite-sync the bound remote document; if no binding exists, publish a new document first
+- `Sync to Feishu/Lark`: update the bound remote document using the configured sync strategy; if no binding exists, publish a new document first
 
 Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source, and the remote document is updated to match it.
 
@@ -93,6 +94,8 @@ The plugin supports two mutually exclusive auto sync modes:
 When `Sync after save` or `Off` is selected, an installed hook reads the plugin settings and exits without syncing. Git hooks are installed per repository, so another Obsidian vault needs its own hook installation.
 
 The plugin does not write sync timestamps, so auto sync and Git hooks do not create extra local note changes.
+
+Safe precise sync keeps its private index at `.obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.json`. The file stores remote revision and block mapping metadata only; it is not written into Markdown content. If safe precise sync cannot run safely, it stops with a notice; switch to `Overwrite sync` in settings to keep the previous overwrite behavior.
 
 ## Folder Publishing
 
