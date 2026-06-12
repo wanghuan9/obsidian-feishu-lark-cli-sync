@@ -2,7 +2,7 @@
 import { execFile } from "child_process";
 import { access, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { constants } from "fs";
-import { basename, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 import { promisify } from "util";
 import {
@@ -17,6 +17,15 @@ const execFileAsync = promisify(execFile);
 const PLUGIN_ID = "feishu-lark-cli-sync";
 const ZERO_REF = "0000000000000000000000000000000000000000";
 const MAX_STDERR_LENGTH = 1600;
+const FALLBACK_PATH_ENTRIES = [
+	"/opt/homebrew/bin",
+	"/opt/homebrew/sbin",
+	"/usr/local/bin",
+	"/usr/bin",
+	"/bin",
+	"/usr/sbin",
+	"/sbin"
+];
 
 async function main() {
 	const repoRoot = await git(["rev-parse", "--show-toplevel"]);
@@ -128,9 +137,10 @@ async function readSettings(repoRoot) {
 async function runLarkCli(settings, args, cwd) {
 	const executable = await resolveLarkCliPath(settings);
 	try {
+		const env = buildCommandEnvironment(executable);
 		const { stdout } = await execFileAsync(executable, args, {
 			cwd,
-			env: process.env,
+			env,
 			maxBuffer: 20 * 1024 * 1024
 		});
 		const result = JSON.parse(stdout);
@@ -140,6 +150,37 @@ async function runLarkCli(settings, args, cwd) {
 	} catch (error) {
 		throw new Error(formatCommandError(error));
 	}
+}
+
+function buildCommandEnvironment(executable) {
+	const pathEntries = [...FALLBACK_PATH_ENTRIES];
+	if (executable.startsWith("/")) {
+		pathEntries.unshift(dirname(executable));
+	}
+
+	if (process.env.PATH) {
+		pathEntries.push(process.env.PATH);
+	}
+
+	return {
+		...process.env,
+		PATH: uniquePathEntries(pathEntries.join(":").split(":")).join(":")
+	};
+}
+
+function uniquePathEntries(entries) {
+	const seen = new Set();
+	const result = [];
+	for (const entry of entries) {
+		if (!entry || seen.has(entry)) {
+			continue;
+		}
+
+		seen.add(entry);
+		result.push(entry);
+	}
+
+	return result;
 }
 
 async function resolveLarkCliPath(settings) {
@@ -197,7 +238,10 @@ function formatCommandError(error) {
 }
 
 async function git(args) {
-	const { stdout } = await execFileAsync("git", args, { maxBuffer: 20 * 1024 * 1024 });
+	const { stdout } = await execFileAsync("git", args, {
+		env: buildCommandEnvironment("git"),
+		maxBuffer: 20 * 1024 * 1024
+	});
 	return stdout;
 }
 

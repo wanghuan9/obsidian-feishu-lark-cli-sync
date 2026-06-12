@@ -29,7 +29,7 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	larkCliPath: "lark-cli",
 	targetTokenOrUrl: "",
 	folderBindings: {},
-	titleSource: "first-heading",
+	titleSource: "file-name",
 	openAfterSync: true,
 	updateFrontmatter: true,
 	autoSyncMode: "manual",
@@ -40,7 +40,9 @@ const FRONTMATTER_REMOTE_ROOT_KEY = "remoteRoot";
 const FRONTMATTER_REMOTE_PARENT_PATH_KEY = "remoteParentPath";
 const MAX_STDERR_LENGTH = 1600;
 const LARK_CLI_COMMAND = "lark-cli";
+const NODE_COMMAND = "node";
 const PRE_PUSH_SCRIPT_NAME = "sync-pre-push.mjs";
+const PRE_PUSH_CORE_SCRIPT_NAME = "lark-sync-core.mjs";
 const PRE_PUSH_HOOK_MARKER = "Feishu Lark CLI Sync";
 const AUTO_SYNC_WRITE_IGNORE_MS = 5000;
 const DEFAULT_AUTO_SYNC_DELAY_SECONDS = 15;
@@ -495,12 +497,16 @@ export default class LarkCliSyncPlugin extends Plugin {
 			const hooksDirectory = join(gitDirectory, "hooks");
 			const hookPath = join(hooksDirectory, "pre-push");
 			const sourceScript = join(this.getPluginDirectoryPath(), PRE_PUSH_SCRIPT_NAME);
+			const sourceCoreScript = join(this.getPluginDirectoryPath(), PRE_PUSH_CORE_SCRIPT_NAME);
 			const targetScript = join(hooksDirectory, PRE_PUSH_SCRIPT_NAME);
+			const targetCoreScript = join(hooksDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
+			const nodePath = await this.resolveNodePath();
 			await mkdir(hooksDirectory, { recursive: true });
 			await copyFile(sourceScript, targetScript);
+			await copyFile(sourceCoreScript, targetCoreScript);
 			await chmod(targetScript, 0o755);
 			const backupHookPath = await this.backupExistingPrePushHook(hookPath);
-			await writeFile(hookPath, this.buildPrePushHookScript(targetScript, backupHookPath), { mode: 0o755 });
+			await writeFile(hookPath, this.buildPrePushHookScript(targetScript, backupHookPath, nodePath), { mode: 0o755 });
 			await chmod(hookPath, 0o755);
 			if (backupHookPath) {
 				new Notice(this.t("noticeExistingGitHookBackedUp", { path: backupHookPath }), 10000);
@@ -547,7 +553,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 		return backupHookPath;
 	}
 
-	private buildPrePushHookScript(scriptPath: string, backupHookPath: string): string {
+	private buildPrePushHookScript(scriptPath: string, backupHookPath: string, nodePath: string): string {
 		const runBackupHook = backupHookPath
 			? `"${backupHookPath}" "$@"\n`
 			: "";
@@ -555,8 +561,30 @@ export default class LarkCliSyncPlugin extends Plugin {
 # ${PRE_PUSH_HOOK_MARKER}
 set -eu
 ${runBackupHook}
-exec node "${scriptPath}" "$@"
+exec "${nodePath}" "${scriptPath}" "$@"
 `;
+	}
+
+	private async resolveNodePath(): Promise<string> {
+		const shellPath = await this.resolveCommandFromLoginShell(NODE_COMMAND);
+		if (shellPath) {
+			return shellPath;
+		}
+
+		const candidates = [
+			"/opt/homebrew/bin/node",
+			"/usr/local/bin/node",
+			join(homedir(), ".nvm/current/bin/node"),
+			NODE_COMMAND
+		];
+
+		for (const candidate of candidates) {
+			if (candidate === NODE_COMMAND || await this.canExecute(candidate)) {
+				return candidate;
+			}
+		}
+
+		return NODE_COMMAND;
 	}
 
 	private async pathExists(path: string): Promise<boolean> {
