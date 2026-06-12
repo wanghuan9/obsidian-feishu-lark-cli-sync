@@ -454,7 +454,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 			stateKeys: [binding.token, binding.url]
 		});
 
-		if (options.updateFrontmatter) {
+		if (options.updateFrontmatter || this.hasBindingChanged(binding, nextBinding)) {
 			await this.writeBinding(file, nextBinding);
 		}
 
@@ -775,7 +775,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					isNewDocument: !binding || nextBinding.token !== binding.token || nextBinding.url !== binding.url
 				});
 
-				if (this.settings.updateFrontmatter) {
+				if (this.settings.updateFrontmatter || this.hasBindingChanged(binding, nextBindingWithParent)) {
 					await this.writeBinding(file, nextBindingWithParent);
 				}
 			}
@@ -844,9 +844,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			if (nextBindingWithParent.token !== entry.binding.token || nextBindingWithParent.url !== entry.binding.url) {
 				entry.binding = nextBindingWithParent;
 				entry.isNewDocument = true;
-				if (this.settings.updateFrontmatter) {
-					await this.writeBinding(entry.file, nextBindingWithParent);
-				}
+				await this.writeBinding(entry.file, nextBindingWithParent);
 				return true;
 			}
 
@@ -938,16 +936,33 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		content: string,
 		context: { mode: SyncMode; path: string; strategy?: SyncStrategy; stateKeys?: string[] }
 	): Promise<Partial<BoundLarkDocument>> {
-		const state = this.syncState.documents[doc];
+		const strategy = context.strategy || this.settings.syncStrategy;
+		let state = this.findDocumentState([doc, ...(context.stateKeys || [])]);
+		let syncDoc = state?.doc || doc;
+		if (strategy === "precise" && (!state || state.units.length === 0)) {
+			state = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
+			syncDoc = state?.doc || syncDoc;
+		}
 		const plan = await buildSyncPlan({
-			doc,
+			doc: syncDoc,
 			markdown: content,
 			contentFileName: "sync.md",
-			strategy: context.strategy || this.settings.syncStrategy,
+			strategy,
 			state
 		});
 
-		return await this.executeSyncPlan(doc, content, plan, context);
+		return await this.executeSyncPlan(syncDoc, content, plan, context);
+	}
+
+	private findDocumentState(docs: string[]): LarkSyncStateFile["documents"][string] | undefined {
+		for (const doc of this.uniquePathEntries(docs)) {
+			const state = this.syncState.documents[doc];
+			if (state) {
+				return state;
+			}
+		}
+
+		return undefined;
 	}
 
 	private async executeSyncPlan(
@@ -1033,6 +1048,49 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			};
 		}
 		await this.saveLarkSyncState();
+	}
+
+	private async tryBootstrapPreciseSyncState(
+		doc: string,
+		stateKeys: string[]
+	): Promise<LarkSyncStateFile["documents"][string] | undefined> {
+		const [remoteMarkdown, remoteXml] = await Promise.all([
+			this.fetchLarkDocumentMarkdown(doc),
+			this.fetchLarkDocumentWithIds(doc)
+		]);
+		const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
+		if (state.units.length === 0) {
+			return undefined;
+		}
+
+		for (const key of this.uniquePathEntries([doc, ...stateKeys])) {
+			this.syncState.documents[key] = {
+				...state,
+				doc: key
+			};
+		}
+		await this.saveLarkSyncState();
+		return state;
+	}
+
+	private async fetchLarkDocumentMarkdown(doc: string): Promise<{ content: string; revisionId?: number }> {
+		const result = await this.runLarkCli([
+			"docs",
+			"+fetch",
+			"--api-version",
+			"v2",
+			"--as",
+			"user",
+			"--doc",
+			doc,
+			"--doc-format",
+			"markdown",
+			"--json"
+		]);
+		return {
+			content: result.data?.document?.content || "",
+			revisionId: result.data?.document?.revision_id
+		};
 	}
 
 	private async fetchLarkDocumentWithIds(doc: string): Promise<{ content: string; revisionId?: number }> {
@@ -1130,6 +1188,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				new Notice(this.t("noticeRemoteDeletedRecreate"), 5000);
 			}
 			const recreatedBinding = await this.createLarkDocument(file, content, parent);
+			this.removeSyncStateForBinding(binding);
 			await this.saveCreatedDocumentState(recreatedBinding, content);
 			return recreatedBinding;
 		}
@@ -1150,9 +1209,29 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			const recreatedBinding = await this.createLarkDocument(file, content, parent);
+			this.removeSyncStateForBinding(binding);
 			await this.saveCreatedDocumentState(recreatedBinding, content);
 			return recreatedBinding;
 		}
+	}
+
+	private hasBindingChanged(previous: BoundLarkDocument | null | undefined, next: BoundLarkDocument): boolean {
+		return Boolean(previous)
+			&& (previous?.token !== next.token || previous.url !== next.url);
+	}
+
+	private removeSyncStateForBinding(binding: BoundLarkDocument): void {
+		for (const key of this.getBindingAliases(binding)) {
+			delete this.syncState.documents[key];
+		}
+	}
+
+	private getBindingAliases(binding: BoundLarkDocument): string[] {
+		return this.uniquePathEntries([
+			binding.token,
+			binding.url,
+			binding.url ? this.extractPathToken(binding.url) : ""
+		]);
 	}
 
 	private addLinkAliases(
@@ -1617,10 +1696,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		this.selfWrittenPaths.set(file.path, Date.now());
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			delete frontmatter.lark_doc;
-			delete frontmatter[FRONTMATTER_TOKEN_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
 			delete frontmatter[LEGACY_FRONTMATTER_SYNCED_AT_KEY];
+			frontmatter[FRONTMATTER_TOKEN_KEY] = binding.token;
 			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
 		});
 		this.selfWrittenPaths.set(file.path, Date.now());

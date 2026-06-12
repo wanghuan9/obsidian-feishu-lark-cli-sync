@@ -27,7 +27,8 @@ async function run() {
 		await execFileAsync("git", ["commit", "-m", "init"], { cwd: workspace });
 
 		await testPreciseSkip(workspace);
-		await testPreciseBlocked(workspace);
+		await testPreciseBootstrapFromRemote(workspace);
+		await testPreciseBlockedWhenBootstrapFails(workspace);
 		await testOverwriteUpdates(workspace);
 		await testUnboundFilesDoNotBlock(workspace);
 		await testTokenUrlStateAliases(workspace);
@@ -50,17 +51,41 @@ async function testPreciseSkip(workspace) {
 	assert.doesNotMatch(log, /docs \+update/);
 }
 
-async function testPreciseBlocked(workspace) {
+async function testPreciseBootstrapFromRemote(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Changed"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	await runHook(workspace);
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+fetch .*--doc-format markdown/);
+	assert.match(log, /docs \+fetch .*--detail with-ids/);
+	assert.match(log, /docs \+update .*--command block_replace .*--block-id blk-1/);
+	const state = await readSyncState(workspace);
+	assert.equal(state.documents["https://example.feishu.cn/docx/doc-token"].units.length, 1);
+	assert.equal(state.documents["https://example.feishu.cn/docx/doc-token"].units[0].blockId, "blk-1");
+}
+
+async function testPreciseBlockedWhenBootstrapFails(workspace) {
 	await resetWorkspaceFiles(workspace);
 	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "zh-CN" });
 	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
 	await clearLog(workspace);
-	const result = await runHook(workspace, { reject: false });
+	const result = await runHook(workspace, {
+		reject: false,
+		env: {
+			LARK_CLI_NO_BLOCK_IDS: "1"
+		}
+	});
 	assert.notEqual(result.exitCode, 0);
 	assert.match(result.stderr, /pre-push 同步失败：bound\.md/);
 	assert.match(result.stderr, /缺少远端 block 映射/);
 	assert.match(result.stderr, /已阻止 git push/);
-	assert.equal(await readLog(workspace), "");
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+fetch/);
+	assert.doesNotMatch(log, /docs \+update/);
 }
 
 async function testTokenUrlStateAliases(workspace) {
@@ -266,8 +291,12 @@ if (process.env.LARK_CLI_FAIL_DOC && doc.includes(process.env.LARK_CLI_FAIL_DOC)
   process.exit(0);
 }
 if (args.includes("+fetch")) {
-  const content = doc.includes("second-token") ? "# second\\n\\nSecond" : "# bound\\n\\nBody";
-  process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: doc, url: doc, content } } }));
+  const isWithIds = args.includes("--detail") && args.includes("with-ids");
+  const markdown = doc.includes("second-token") ? "# second\\n\\nSecond" : "# bound\\n\\nBody";
+  const content = isWithIds && !process.env.LARK_CLI_NO_BLOCK_IDS
+    ? "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p>"
+    : markdown;
+  process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: doc, url: doc, content, revision_id: 4 } } }));
 } else {
   process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: doc, url: doc } } }));
 }

@@ -8,6 +8,7 @@ import { promisify } from "util";
 import {
 	buildSyncPlan,
 	buildUpdateCommandArgs,
+	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
 	formatSyncFailureMessage,
@@ -175,13 +176,17 @@ async function syncMarkdownTask(task, settings, syncState) {
 	try {
 		const file = { basename: basename(task.filePath, ".md") };
 		const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(task.content), settings.titleSource);
-		const state = findDocumentState(syncState, task.docAliases);
+		const strategy = readSyncStrategy(settings);
+		let state = findDocumentState(syncState, task.docAliases);
 		const syncDoc = state?.doc || task.doc;
+		if (strategy === "precise" && (!state || state.units.length === 0)) {
+			state = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, task.docAliases);
+		}
 		const plan = await buildSyncPlan({
 			doc: syncDoc,
 			markdown: contentForLark,
 			contentFileName: "sync.md",
-			strategy: readSyncStrategy(settings),
+			strategy,
 			state
 		});
 		const stateKeys = task.docAliases;
@@ -254,6 +259,66 @@ function savePlanState(syncState, docs, plan) {
 	for (const doc of uniquePathEntries(docs)) {
 		syncState.documents[doc] = plan.nextState;
 	}
+}
+
+async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs) {
+	const [remoteMarkdown, remoteXml] = await Promise.all([
+		fetchLarkDocumentMarkdown(settings, doc),
+		fetchLarkDocumentWithIds(settings, doc)
+	]);
+	const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
+	if (state.units.length === 0) {
+		return undefined;
+	}
+
+	for (const key of uniquePathEntries([doc, ...docs])) {
+		syncState.documents[key] = {
+			...state,
+			doc: key
+		};
+	}
+
+	return state;
+}
+
+async function fetchLarkDocumentMarkdown(settings, doc) {
+	const result = await runLarkCli(settings, [
+		"docs",
+		"+fetch",
+		"--api-version",
+		"v2",
+		"--as",
+		"user",
+		"--doc",
+		doc,
+		"--doc-format",
+		"markdown",
+		"--json"
+	]);
+	return {
+		content: result.data?.document?.content || "",
+		revisionId: result.data?.document?.revision_id
+	};
+}
+
+async function fetchLarkDocumentWithIds(settings, doc) {
+	const result = await runLarkCli(settings, [
+		"docs",
+		"+fetch",
+		"--api-version",
+		"v2",
+		"--as",
+		"user",
+		"--doc",
+		doc,
+		"--detail",
+		"with-ids",
+		"--json"
+	]);
+	return {
+		content: result.data?.document?.content || "",
+		revisionId: result.data?.document?.revision_id
+	};
 }
 
 async function ensureRemoteDocumentMatches(settings, doc, expectedContentHash, repoRelativePath) {

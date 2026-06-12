@@ -127,6 +127,55 @@ assert.equal(mappedState.units.length, 2);
 assert.deepEqual(mappedState.units.map((unit) => unit.blockId), ["blk-1", "blk-2"]);
 assert.deepEqual(mappedState.units.map((unit) => unit.kind), ["paragraph", "heading"]);
 
+const partialRemoteXml = "<title id=\"doc-token\">Note</title><p id=\"blk-1\">Body</p><p id=\"blk-2\">Merged<br/>Second</p>";
+const partialState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\nBody\n\n1. Second", partialRemoteXml, 8);
+assert.equal(partialState.revisionId, 8);
+assert.equal(partialState.units.length, 2);
+assert.deepEqual(partialState.units.map((unit) => unit.blockId), ["blk-1", ""]);
+
+const partialReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nChanged\n\n1. Second",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: partialState
+});
+assert.equal(partialReplacePlan.mode, "precise");
+assert.equal(partialReplacePlan.commands.length, 1);
+assert.equal(partialReplacePlan.commands[0].blockId, "blk-1");
+
+const unmappedReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody\n\n1. Changed",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: partialState
+});
+assert.equal(unmappedReplacePlan.mode, "blocked");
+assert.equal(unmappedReplacePlan.reason, "block-mapping-missing");
+
+const tableRemoteXml = "<title id=\"doc-token\">Note</title><table id=\"blk-1\"><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>";
+const tableState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\n| A | B |\n|-|-|\n| 1 | 2 |", tableRemoteXml, 9);
+assert.equal(tableState.units.length, 1);
+assert.equal(tableState.units[0].blockId, "blk-1");
+assert.equal((await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n| A | B |\n|----|------|\n| 1 | 2 |",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: tableState
+})).mode, "skipped");
+
+const indentedCodeRemoteXml = "<title id=\"doc-token\">Note</title><ul><li id=\"blk-1\">Hint</li></ul><pre id=\"blk-2\"><code>x</code></pre><h2 id=\"blk-3\">Next</h2>";
+const indentedCodeState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n- Hint\n\n  ```java\n  x\n  ```\n\n## Next",
+	indentedCodeRemoteXml,
+	9
+);
+assert.equal(indentedCodeState.units.length, 3);
+assert.deepEqual(indentedCodeState.units.map((unit) => unit.kind), ["list", "code", "heading"]);
+
 const replacePlan = await buildSyncPlan({
 	doc: "doc-token",
 	markdown: "# Note\n\nChanged\n\n## Next",

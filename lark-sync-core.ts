@@ -316,7 +316,7 @@ export async function createDocumentSyncStateFromRemote(
 	const markdownUnits = await createMarkdownSyncUnits(markdown);
 	const remoteUnits = readRemoteTopLevelUnits(remoteXml);
 	if (markdownUnits.length !== remoteUnits.length) {
-		return createDocumentSyncState(doc, contentHash, revisionId);
+		return createDocumentSyncStateFromPartialMapping(doc, contentHash, markdownUnits, remoteUnits, revisionId);
 	}
 
 	const units = markdownUnits.map((unit, index) => {
@@ -334,7 +334,7 @@ export async function createDocumentSyncStateFromRemote(
 	});
 
 	if (units.some((unit) => !unit)) {
-		return createDocumentSyncState(doc, contentHash, revisionId);
+		return createDocumentSyncStateFromPartialMapping(doc, contentHash, markdownUnits, remoteUnits, revisionId);
 	}
 
 	return {
@@ -342,6 +342,39 @@ export async function createDocumentSyncStateFromRemote(
 		revisionId,
 		contentHash,
 		units: units as SyncUnitState[],
+		updatedAt: new Date().toISOString()
+	};
+}
+
+function createDocumentSyncStateFromPartialMapping(
+	doc: string,
+	contentHash: string,
+	markdownUnits: MarkdownSyncUnit[],
+	remoteUnits: RemoteSyncUnit[],
+	revisionId?: number
+): DocumentSyncState {
+	const markdownKeyCounts = countUnitFingerprintKeys(markdownUnits);
+	const remoteUnitsByKey = collectUniqueRemoteUnitsByFingerprint(remoteUnits);
+	const units = markdownUnits.map((unit) => {
+		const key = createUnitFingerprintKey(unit);
+		const remoteUnit = markdownKeyCounts.get(key) === 1 ? remoteUnitsByKey.get(key) : undefined;
+		return {
+			stableId: unit.stableId,
+			kind: unit.kind,
+			hash: unit.hash,
+			blockId: remoteUnit?.blockId || ""
+		};
+	});
+
+	if (units.every((unit) => !unit.blockId)) {
+		return createDocumentSyncState(doc, contentHash, revisionId);
+	}
+
+	return {
+		doc,
+		revisionId,
+		contentHash,
+		units,
 		updatedAt: new Date().toISOString()
 	};
 }
@@ -444,11 +477,13 @@ interface MarkdownSyncUnit {
 	kind: string;
 	hash: string;
 	content: string;
+	fingerprint: string;
 }
 
 interface RemoteSyncUnit {
 	kind: string;
 	blockId: string;
+	fingerprint: string;
 }
 
 async function buildPreciseReplacePlan(
@@ -476,6 +511,15 @@ async function buildPreciseReplacePlan(
 			blockId: previousUnit.blockId
 		});
 		if (previousUnit.hash !== nextUnit.hash) {
+			if (!previousUnit.blockId) {
+				return {
+					mode: "blocked",
+					commands: [],
+					contentHash,
+					reason: "block-mapping-missing"
+				};
+			}
+
 			commands.push({
 				doc: input.doc,
 				command: "block_replace",
@@ -517,8 +561,9 @@ async function createMarkdownSyncUnits(markdown: string): Promise<MarkdownSyncUn
 		units.push({
 			stableId: `${index}:${block.kind}`,
 			kind: block.kind,
-			hash: await createContentHash(block.content),
-			content: block.content
+			hash: await createContentHash(createMarkdownComparisonContent(block.kind, block.content)),
+			content: block.content,
+			fingerprint: createMarkdownFingerprint(block.kind, block.content)
 		});
 	}
 
@@ -560,7 +605,7 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 			index += 1;
 		} else if (kind === "code") {
 			index += 1;
-			while (index < lines.length && !/^```/.test(lines[index] || "")) {
+			while (index < lines.length && !/^\s{0,3}```/.test(lines[index] || "")) {
 				index += 1;
 			}
 			if (index < lines.length) {
@@ -607,7 +652,7 @@ function readMarkdownBlockKind(line: string): string {
 		return "heading";
 	}
 
-	if (/^```/.test(line)) {
+	if (/^\s{0,3}```/.test(line)) {
 		return "code";
 	}
 
@@ -633,8 +678,7 @@ function readMarkdownBlockKind(line: string): string {
 function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 	const units: RemoteSyncUnit[] = [];
 	const tagPattern = /<\/?([A-Za-z][A-Za-z0-9-]*)([^>]*)>/g;
-	let depth = 0;
-	const stack: string[] = [];
+	const stack: Array<{ tagName: string; startIndex: number; kind?: string; blockId?: string }> = [];
 	let match: RegExpExecArray | null;
 	while ((match = tagPattern.exec(xml))) {
 		const rawTag = match[0] || "";
@@ -643,36 +687,172 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 		const isClosing = rawTag.startsWith("</");
 		const isSelfClosing = rawTag.endsWith("/>");
 		if (isClosing) {
-			depth = Math.max(0, depth - 1);
-			stack.pop();
+			const frame = stack.pop();
+			if (frame?.blockId && frame.kind) {
+				const content = xml.slice(frame.startIndex, tagPattern.lastIndex);
+				units.push({
+					kind: frame.kind,
+					blockId: frame.blockId,
+					fingerprint: createXmlFingerprint(frame.kind, content)
+				});
+			}
 			continue;
 		}
 
-		if (depth === 0 && tagName !== "title") {
-			const blockId = readXmlAttribute(attributes, "id");
-			if (blockId && tagName !== "ul" && tagName !== "ol") {
+		const depth = stack.length;
+		const parentTagName = stack[0]?.tagName;
+		const blockId = readXmlAttribute(attributes, "id");
+		const isTopLevelBlock = depth === 0 && tagName !== "title" && tagName !== "ul" && tagName !== "ol" && blockId;
+		const isTopLevelListItem = depth === 1 && tagName === "li" && (parentTagName === "ul" || parentTagName === "ol")
+			&& blockId;
+		const kind = isTopLevelBlock ? normalizeRemoteBlockKind(tagName) : isTopLevelListItem ? "list" : "";
+		if (isSelfClosing) {
+			if (kind) {
 				units.push({
-					kind: normalizeRemoteBlockKind(tagName),
-					blockId
+					kind,
+					blockId,
+					fingerprint: createXmlFingerprint(kind, rawTag)
 				});
 			}
-		} else if (depth === 1 && tagName === "li" && (stack[0] === "ul" || stack[0] === "ol")) {
-			const blockId = readXmlAttribute(attributes, "id");
-			if (blockId) {
-				units.push({
-					kind: "list",
-					blockId
-				});
-			}
+			continue;
 		}
 
-		if (!isSelfClosing) {
-			stack.push(tagName);
-			depth += 1;
-		}
+		stack.push({
+			tagName,
+			startIndex: match.index,
+			kind,
+			blockId
+		});
 	}
 
 	return units;
+}
+
+function countUnitFingerprintKeys(units: MarkdownSyncUnit[]): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const unit of units) {
+		const key = createUnitFingerprintKey(unit);
+		counts.set(key, (counts.get(key) || 0) + 1);
+	}
+
+	return counts;
+}
+
+function collectUniqueRemoteUnitsByFingerprint(units: RemoteSyncUnit[]): Map<string, RemoteSyncUnit> {
+	const result = new Map<string, RemoteSyncUnit>();
+	const duplicates = new Set<string>();
+	for (const unit of units) {
+		const key = createUnitFingerprintKey(unit);
+		if (result.has(key)) {
+			result.delete(key);
+			duplicates.add(key);
+			continue;
+		}
+
+		if (!duplicates.has(key)) {
+			result.set(key, unit);
+		}
+	}
+
+	return result;
+}
+
+function createUnitFingerprintKey(unit: { kind: string; fingerprint: string }): string {
+	return `${unit.kind}\u0000${unit.fingerprint}`;
+}
+
+function createMarkdownFingerprint(kind: string, content: string): string {
+	if (kind === "table") {
+		return createMarkdownTableFingerprint(content);
+	}
+
+	const lines = content.replace(/\r\n/g, "\n").split("\n");
+	const normalizedLines = lines.map((line) => {
+		if (kind === "heading") {
+			return line.replace(/^#{2,6}\s+/, "");
+		}
+
+		if (kind === "list") {
+			return line.replace(/^\s*(?:[-+*]|\d+\.)\s+/, "");
+		}
+
+		if (kind === "blockquote") {
+			return line.replace(/^\s*>\s?/, "");
+		}
+
+		return line;
+	});
+	return normalizeFingerprintText(normalizedLines.join("\n"));
+}
+
+function createMarkdownComparisonContent(kind: string, content: string): string {
+	if (kind === "code") {
+		return content.replace(/\r\n/g, "\n").trim();
+	}
+
+	return createMarkdownFingerprint(kind, content);
+}
+
+function createMarkdownTableFingerprint(content: string): string {
+	return content.replace(/\r\n/g, "\n").split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line && !isMarkdownTableSeparatorLine(line))
+		.map((line) => line.split("|").map((cell) => normalizeFingerprintText(cell)).join("|"))
+		.join("\n");
+}
+
+function isMarkdownTableSeparatorLine(line: string): boolean {
+	return /^\|?\s*:?-{1,}:?\s*(?:\|\s*:?-{1,}:?\s*)+\|?$/.test(line);
+}
+
+function createXmlFingerprint(kind: string, content: string): string {
+	if (kind === "hr") {
+		return "";
+	}
+
+	if (kind === "table") {
+		return createXmlTableFingerprint(content);
+	}
+
+	const text = content
+		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/<[^>]+>/g, "");
+	return normalizeFingerprintText(decodeXmlEntities(text));
+}
+
+function createXmlTableFingerprint(content: string): string {
+	const rows = Array.from(content.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi), (rowMatch) => {
+		const rowContent = rowMatch[1] || "";
+		const cells = Array.from(rowContent.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi), (cellMatch) => {
+			const text = (cellMatch[1] || "").replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "");
+			return normalizeFingerprintText(decodeXmlEntities(text));
+		});
+		return cells.join("|");
+	});
+
+	return rows.join("\n");
+}
+
+function normalizeFingerprintText(content: string): string {
+	return content
+		.replace(/\\([~`*_{}\[\]()#+\-.!|>])/g, "$1")
+		.replace(/`([^`]+)`/g, "$1")
+		.replace(/\*\*([^*]+)\*\*/g, "$1")
+		.replace(/__([^_]+)__/g, "$1")
+		.replace(/\*([^*]+)\*/g, "$1")
+		.replace(/_([^_]+)_/g, "$1")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function decodeXmlEntities(content: string): string {
+	return content
+		.replace(/&nbsp;/g, " ")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, "\"")
+		.replace(/&#39;/g, "'")
+		.replace(/&amp;/g, "&");
 }
 
 function normalizeRemoteBlockKind(tagName: string): string {
