@@ -29,11 +29,15 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 const FRONTMATTER_URL_KEY = "lark_doc_url";
 const FRONTMATTER_TOKEN_KEY = "lark_doc_token";
 const FRONTMATTER_SYNCED_AT_KEY = "lark_doc_synced_at";
+const FRONTMATTER_REMOTE_ROOT_KEY = "remoteRoot";
+const FRONTMATTER_REMOTE_PARENT_PATH_KEY = "remoteParentPath";
 const FRONTMATTER_BINDING_KEYS = [
 	"lark_doc",
 	FRONTMATTER_URL_KEY,
 	FRONTMATTER_TOKEN_KEY,
-	FRONTMATTER_SYNCED_AT_KEY
+	FRONTMATTER_SYNCED_AT_KEY,
+	FRONTMATTER_REMOTE_ROOT_KEY,
+	FRONTMATTER_REMOTE_PARENT_PATH_KEY
 ];
 const MAX_STDERR_LENGTH = 1600;
 const LARK_CLI_COMMAND = "lark-cli";
@@ -142,7 +146,7 @@ const MESSAGES = {
 		titleSourceFirstHeading: "第一个标题",
 		titleSourceFileName: "文件名",
 		settingWriteBindingName: "写入 frontmatter 绑定信息",
-		settingWriteBindingDesc: "发布后把飞书文档 URL、token 和同步时间保存到笔记 frontmatter。",
+		settingWriteBindingDesc: "发布后把飞书文档 URL 和同步时间保存到笔记 frontmatter。",
 		settingOpenAfterSyncName: "同步后打开文档",
 		settingOpenAfterSyncDesc: "发布或同步成功后，在浏览器中打开飞书文档。"
 	},
@@ -178,7 +182,7 @@ const MESSAGES = {
 		titleSourceFirstHeading: "First heading",
 		titleSourceFileName: "File name",
 		settingWriteBindingName: "Write binding to frontmatter",
-		settingWriteBindingDesc: "Store the Lark document URL, token, and sync time in note frontmatter.",
+		settingWriteBindingDesc: "Store the Lark document URL and sync time in note frontmatter.",
 		settingOpenAfterSyncName: "Open after sync",
 		settingOpenAfterSyncDesc: "Open the Lark document in your browser after publish or sync succeeds."
 	}
@@ -935,8 +939,10 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private async writeBinding(file: TFile, binding: BoundLarkDocument): Promise<void> {
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			delete frontmatter.lark_doc;
+			delete frontmatter[FRONTMATTER_TOKEN_KEY];
+			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
+			delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
 			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
-			frontmatter[FRONTMATTER_TOKEN_KEY] = binding.token;
 			frontmatter[FRONTMATTER_SYNCED_AT_KEY] = this.formatSyncTime(binding.lastSyncedAt);
 		});
 	}
