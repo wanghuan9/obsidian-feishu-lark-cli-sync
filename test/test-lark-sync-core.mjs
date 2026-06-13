@@ -252,8 +252,42 @@ const complexPlan = await buildSyncPlan({
 	strategy: "precise",
 	state: mappedState
 });
-assert.equal(complexPlan.mode, "blocked");
-assert.equal(complexPlan.reason, "diff-too-complex");
+assert.equal(complexPlan.mode, "precise");
+assert.deepEqual(complexPlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "blk-1",
+	contentFileName: "sync.md",
+	content: "Inserted"
+}]);
+
+const headingInsertPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody\n\n## Inserted\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: mappedState
+});
+assert.equal(headingInsertPlan.mode, "precise");
+assert.deepEqual(headingInsertPlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "blk-1",
+	contentFileName: "sync.md",
+	content: "## Inserted"
+}]);
+
+const leadingInsertPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nInserted\n\nBody\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: mappedState
+});
+assert.equal(leadingInsertPlan.mode, "blocked");
+assert.equal(leadingInsertPlan.reason, "diff-too-complex");
 
 assert.equal(
 	formatSyncFailureMessage({

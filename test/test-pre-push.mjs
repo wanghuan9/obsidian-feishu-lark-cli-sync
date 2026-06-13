@@ -29,6 +29,7 @@ async function run() {
 		await testPreciseSkip(workspace);
 		await testPreciseBootstrapFromRemote(workspace);
 		await testPreciseBlockedWhenBootstrapFails(workspace);
+		await testPreciseInsertRefreshesState(workspace);
 		await testOverwriteUpdates(workspace);
 		await testUnboundFilesDoNotBlock(workspace);
 		await testTokenUrlStateAliases(workspace);
@@ -87,6 +88,34 @@ async function testPreciseBlockedWhenBootstrapFails(workspace) {
 	assert.match(log, /docs \+fetch/);
 	assert.doesNotMatch(log, /docs \+update/);
 }
+
+async function testPreciseInsertRefreshesState(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Body\n\n## Inserted"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateWithUnits(workspace, "https://example.feishu.cn/docx/doc-token", "# bound\n\nBody", [{
+		stableId: "0:paragraph",
+		kind: "paragraph",
+		hash: await createContentHash("Body"),
+		blockId: "blk-1"
+	}]);
+	await clearLog(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_FETCH_INSERTED: "1"
+		}
+	});
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+update .*--command block_insert_after .*--block-id blk-1/);
+	assert.match(log, /docs \+fetch .*--detail with-ids/);
+	const state = await readSyncState(workspace);
+	assert.deepEqual(state.documents["https://example.feishu.cn/docx/doc-token"].units.map((unit) => unit.blockId), [
+		"blk-1",
+		"blk-2"
+	]);
+}
+
 
 async function testTokenUrlStateAliases(workspace) {
 	await resetWorkspaceFiles(workspace);
@@ -248,13 +277,18 @@ async function writeSettings(workspace, settings) {
 
 async function writeSyncState(workspace, doc, content) {
 	const contentHash = await createContentHash(content);
+	await writeSyncStateWithUnits(workspace, doc, content, []);
+}
+
+async function writeSyncStateWithUnits(workspace, doc, content, units) {
+	const contentHash = await createContentHash(content);
 	await writeSyncStateRaw(workspace, {
 		version: 1,
 		documents: {
 			[doc]: {
 				doc,
 				contentHash,
-				units: [],
+				units,
 				updatedAt: "2026-06-12T00:00:00.000Z"
 			}
 		}
@@ -292,9 +326,15 @@ if (process.env.LARK_CLI_FAIL_DOC && doc.includes(process.env.LARK_CLI_FAIL_DOC)
 }
 if (args.includes("+fetch")) {
   const isWithIds = args.includes("--detail") && args.includes("with-ids");
-  const markdown = doc.includes("second-token") ? "# second\\n\\nSecond" : "# bound\\n\\nBody";
+  const markdown = doc.includes("second-token")
+    ? "# second\\n\\nSecond"
+    : process.env.LARK_CLI_FETCH_INSERTED
+      ? "# bound\\n\\nBody\\n\\n## Inserted"
+      : "# bound\\n\\nBody";
   const content = isWithIds && !process.env.LARK_CLI_NO_BLOCK_IDS
-    ? "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p>"
+    ? process.env.LARK_CLI_FETCH_INSERTED
+      ? "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p><h2 id=\\"blk-2\\">Inserted</h2>"
+      : "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p>"
     : markdown;
   process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: doc, url: doc, content, revision_id: 4 } } }));
 } else {

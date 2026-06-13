@@ -221,6 +221,9 @@ async function syncMarkdownTask(task, settings, syncState) {
 			}
 		});
 		savePlanState(syncState, stateKeys, plan);
+		if (plan.mode === "precise" && !plan.nextState) {
+			await saveRemoteDocumentState(settings, syncState, syncDoc, stateKeys);
+		}
 	} catch (error) {
 		if (error instanceof PrePushSyncError) {
 			throw error;
@@ -258,6 +261,24 @@ function savePlanState(syncState, docs, plan) {
 
 	for (const doc of uniquePathEntries(docs)) {
 		syncState.documents[doc] = plan.nextState;
+	}
+}
+
+async function saveRemoteDocumentState(settings, syncState, doc, docs) {
+	const [remoteMarkdown, remoteXml] = await Promise.all([
+		fetchLarkDocumentMarkdown(settings, doc),
+		fetchLarkDocumentWithIds(settings, doc)
+	]);
+	const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
+	if (state.units.length === 0) {
+		return;
+	}
+
+	for (const key of uniquePathEntries([doc, ...docs])) {
+		syncState.documents[key] = {
+			...state,
+			doc: key
+		};
 	}
 }
 

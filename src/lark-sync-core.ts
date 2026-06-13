@@ -298,6 +298,11 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		return precisePlan;
 	}
 
+	const insertPlan = await buildPreciseInsertPlan(input, contentHash, units);
+	if (insertPlan) {
+		return insertPlan;
+	}
+
 	return {
 		mode: "blocked",
 		commands: [],
@@ -552,6 +557,75 @@ async function buildPreciseReplacePlan(
 			updatedAt: new Date().toISOString()
 		}
 	};
+}
+
+async function buildPreciseInsertPlan(
+	input: BuildSyncPlanInput,
+	contentHash: string,
+	units: MarkdownSyncUnit[]
+): Promise<SyncPlan | null> {
+	if (!input.state || input.state.units.length >= units.length) {
+		return null;
+	}
+
+	const previousUnits = input.state.units;
+	let prefixLength = 0;
+	while (prefixLength < previousUnits.length
+		&& areEquivalentMappedUnits(previousUnits[prefixLength], units[prefixLength])) {
+		prefixLength += 1;
+	}
+
+	let suffixLength = 0;
+	while (suffixLength < previousUnits.length - prefixLength
+		&& areEquivalentMappedUnits(
+			previousUnits[previousUnits.length - 1 - suffixLength],
+			units[units.length - 1 - suffixLength]
+		)) {
+		suffixLength += 1;
+	}
+
+	if (prefixLength + suffixLength !== previousUnits.length || prefixLength === 0) {
+		return null;
+	}
+
+	const anchorUnit = previousUnits[prefixLength - 1];
+	if (!anchorUnit?.blockId) {
+		return {
+			mode: "blocked",
+			commands: [],
+			contentHash,
+			reason: "block-mapping-missing"
+		};
+	}
+
+	const insertedUnits = units.slice(prefixLength, units.length - suffixLength);
+	if (insertedUnits.length === 0) {
+		return null;
+	}
+
+	return {
+		mode: "precise",
+		commands: [{
+			doc: input.doc,
+			command: "block_insert_after",
+			docFormat: "markdown",
+			blockId: anchorUnit.blockId,
+			contentFileName: input.contentFileName,
+			content: insertedUnits.map((unit) => unit.content).join("\n\n")
+		}],
+		contentHash
+	};
+}
+
+function areEquivalentMappedUnits(
+	previousUnit: SyncUnitState | undefined,
+	nextUnit: MarkdownSyncUnit | undefined
+): boolean {
+	return Boolean(previousUnit)
+		&& Boolean(nextUnit)
+		&& previousUnit?.kind === nextUnit?.kind
+		&& previousUnit?.hash === nextUnit?.hash
+		&& Boolean(previousUnit?.blockId);
 }
 
 async function createMarkdownSyncUnits(markdown: string): Promise<MarkdownSyncUnit[]> {

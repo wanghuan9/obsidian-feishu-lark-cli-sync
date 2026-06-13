@@ -960,6 +960,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			await this.saveSyncPlanStateForDocument(doc, latestDocument, plan, context.stateKeys || []);
+			if (plan.mode === "precise" && !plan.nextState) {
+				await this.saveRemoteDocumentState(doc, context.stateKeys || []);
+			}
 			return latestDocument;
 		});
 	}
@@ -998,6 +1001,25 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const state = await createDocumentSyncStateFromRemote(doc, content, fetched.content, fetched.revisionId);
 		const documentKeys = this.uniquePathEntries([binding.token, binding.url]);
 		for (const key of documentKeys) {
+			this.syncState.documents[key] = {
+				...state,
+				doc: key
+			};
+		}
+		await this.saveLarkSyncState();
+	}
+
+	private async saveRemoteDocumentState(doc: string, stateKeys: string[]): Promise<void> {
+		const [remoteMarkdown, remoteXml] = await Promise.all([
+			this.fetchLarkDocumentMarkdown(doc),
+			this.fetchLarkDocumentWithIds(doc)
+		]);
+		const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
+		if (state.units.length === 0) {
+			return;
+		}
+
+		for (const key of this.uniquePathEntries([doc, ...stateKeys])) {
 			this.syncState.documents[key] = {
 				...state,
 				doc: key
