@@ -211,6 +211,22 @@ async function syncMarkdownTask(task, settings, syncState) {
 				}
 			}
 		}
+		if (strategy === "precise" && plan.mode === "precise" && plan.commands.some((command) => {
+			return command.command === "block_insert_after";
+		})) {
+			const refreshedState = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, stateKeys);
+			if (refreshedState && refreshedState.contentHash !== state?.contentHash) {
+				const refreshedPlan = await buildSyncPlan({
+					doc: refreshedState.doc,
+					markdown: contentForLark,
+					contentFileName: "sync.md",
+					strategy,
+					state: refreshedState
+				});
+				await executeSyncPlanForTask(task, settings, syncState, refreshedState.doc, contentForLark, refreshedPlan, stateKeys);
+				return;
+			}
+		}
 
 		await executeSyncPlanForTask(task, settings, syncState, syncDoc, contentForLark, plan, stateKeys);
 	} catch (error) {

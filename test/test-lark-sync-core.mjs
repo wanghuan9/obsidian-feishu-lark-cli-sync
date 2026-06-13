@@ -324,8 +324,15 @@ const leadingInsertPlan = await buildSyncPlan({
 	strategy: "precise",
 	state: mappedState
 });
-assert.equal(leadingInsertPlan.mode, "blocked");
-assert.equal(leadingInsertPlan.reason, "diff-too-complex");
+assert.equal(leadingInsertPlan.mode, "precise");
+assert.deepEqual(leadingInsertPlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "doc-token",
+	contentFileName: "sync.md",
+	content: "Inserted"
+}]);
 
 const middleDeleteState = await createDocumentSyncStateFromRemote(
 	"doc-token",
@@ -345,6 +352,119 @@ assert.deepEqual(middleDeletePlan.commands, [{
 	doc: "doc-token",
 	command: "block_delete",
 	blockId: "blk-2"
+}]);
+
+const listHeadRestoreFullMarkdown = "# Note\n\n**原因**：\n\n- 权限项稳定，适合用枚举表达\n- 避免额外的权限定义表查询\n- 子账号权限读取链路简单，便于缓存\n- 当前权限数量少，JSON 存储足够支撑本期复杂度\n\n## Next";
+const listHeadRestoreDeletedMarkdown = "# Note\n\n**原因**：\n\n- 当前权限数量少，JSON 存储足够支撑本期复杂度\n\n## Next";
+const listHeadRestoreState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	listHeadRestoreDeletedMarkdown,
+	"<title id=\"doc-title\">Note</title><p id=\"blk-1\"><b>原因</b>：</p><ul><li id=\"blk-5\">当前权限数量少，JSON 存储足够支撑本期复杂度</li></ul><h2 id=\"blk-6\">Next</h2>",
+	11
+);
+assert.equal(listHeadRestoreState.titleBlockId, "doc-title");
+const listHeadRestorePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: listHeadRestoreFullMarkdown,
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: listHeadRestoreState
+});
+assert.equal(listHeadRestorePlan.mode, "precise");
+assert.deepEqual(listHeadRestorePlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "blk-1",
+	contentFileName: "sync.md",
+	content: "- 权限项稳定，适合用枚举表达\n- 避免额外的权限定义表查询\n- 子账号权限读取链路简单，便于缓存"
+}]);
+
+const mixedRestoreState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n**原因**：\n21212\n\n- 权限项稳定，适合用枚举表达\n- 当前权限数量少，JSON 存储足够支撑本期复杂度\n\n## Next",
+	"<title id=\"doc-title\">Note</title><p id=\"blk-1\"><b>原因</b>：<br/>21212</p><ul><li id=\"blk-2\">权限项稳定，适合用枚举表达</li><li id=\"blk-5\">当前权限数量少，JSON 存储足够支撑本期复杂度</li></ul><h2 id=\"blk-6\">Next</h2>",
+	13
+);
+const mixedRestorePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n**原因**：\n21212333\n\n- 权限项稳定，适合用枚举表达\n- 避免额外的权限定义表查询\n- 子账号权限读取链路简单，便于缓存\n- 当前权限数量少，JSON 存储足够支撑本期复杂度\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: mixedRestoreState
+});
+assert.equal(mixedRestorePlan.mode, "precise");
+assert.deepEqual(mixedRestorePlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_replace",
+		docFormat: "markdown",
+		blockId: "blk-1",
+		contentFileName: "sync.md",
+		content: "**原因**：\n21212333"
+	},
+	{
+		doc: "doc-token",
+		command: "block_insert_after",
+		docFormat: "markdown",
+		blockId: "blk-2",
+		contentFileName: "sync.md",
+		content: "- 避免额外的权限定义表查询\n- 子账号权限读取链路简单，便于缓存"
+	}
+]);
+
+const mixedDeleteReplaceRemoteMarkdown = "# Note\n\n**原因**：\n\n- A\n- B\n- C\n- B\n- C\n- D\n\n```java\nclass Demo {\n    private final String code;\n    private final String desc;\n\n    private final List<String> dependencies;\n}\n```\n\n## Next";
+const mixedDeleteReplaceState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	mixedDeleteReplaceRemoteMarkdown,
+	"<title id=\"doc-title\">Note</title><p id=\"blk-1\"><b>原因</b>：</p><ul><li id=\"blk-2\">A</li><li id=\"blk-3\">B</li><li id=\"blk-4\">C</li><li id=\"blk-5\">B</li><li id=\"blk-6\">C</li><li id=\"blk-7\">D</li></ul><pre id=\"blk-8\" lang=\"java\"><code>class Demo {<br/>    private final String code;<br/>    private final String desc;<br/><br/>    private final List&lt;String&gt; dependencies;<br/>}</code></pre><h2 id=\"blk-9\">Next</h2>",
+	14
+);
+const mixedDeleteReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n**原因**：\n\n- A\n- B\n- C\n- D\n\n```java\nclass Demo {\n    private final String code;\n    private final String desc;\n    private final PermissionType type;\n    private final List<String> dependencies;\n}\n```\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: mixedDeleteReplaceState
+});
+assert.equal(mixedDeleteReplacePlan.mode, "precise");
+assert.deepEqual(mixedDeleteReplacePlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_delete",
+		blockId: "blk-5,blk-6"
+	},
+	{
+		doc: "doc-token",
+		command: "block_replace",
+		docFormat: "markdown",
+		blockId: "blk-8",
+		contentFileName: "sync.md",
+		content: "```java\nclass Demo {\n    private final String code;\n    private final String desc;\n    private final PermissionType type;\n    private final List<String> dependencies;\n}\n```"
+	}
+]);
+
+const leadingRestoreState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\nBody\n\n## Next",
+	"<title id=\"doc-title\">Note</title><p id=\"blk-1\">Body</p><h2 id=\"blk-2\">Next</h2>",
+	12
+);
+const leadingRestorePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nInserted\n\nBody\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: leadingRestoreState
+});
+assert.equal(leadingRestorePlan.mode, "precise");
+assert.deepEqual(leadingRestorePlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "doc-title",
+	contentFileName: "sync.md",
+	content: "Inserted"
 }]);
 
 assert.equal(

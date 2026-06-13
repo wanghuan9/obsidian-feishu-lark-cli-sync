@@ -30,6 +30,7 @@ export interface DocumentSyncState {
 	doc: string;
 	revisionId?: number;
 	contentHash: string;
+	titleBlockId?: string;
 	units: SyncUnitState[];
 	updatedAt: string;
 }
@@ -314,6 +315,11 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		return insertPlan;
 	}
 
+	const mixedInsertReplacePlan = await buildPreciseMixedInsertReplacePlan(input, contentHash, units);
+	if (mixedInsertReplacePlan) {
+		return mixedInsertReplacePlan;
+	}
+
 	const deletePlan = await buildPreciseDeletePlan(input, contentHash, units);
 	if (deletePlan) {
 		return deletePlan;
@@ -336,8 +342,16 @@ export async function createDocumentSyncStateFromRemote(
 	const contentHash = await createContentHash(markdown);
 	const markdownUnits = await createMarkdownSyncUnits(markdown);
 	const remoteUnits = readRemoteTopLevelUnits(remoteXml);
+	const titleBlockId = readRemoteTitleBlockId(remoteXml);
 	if (markdownUnits.length !== remoteUnits.length) {
-		return createDocumentSyncStateFromPartialMapping(doc, contentHash, markdownUnits, remoteUnits, revisionId);
+		return createDocumentSyncStateFromPartialMapping(
+			doc,
+			contentHash,
+			markdownUnits,
+			remoteUnits,
+			revisionId,
+			titleBlockId
+		);
 	}
 
 	const units = markdownUnits.map((unit, index) => {
@@ -355,13 +369,21 @@ export async function createDocumentSyncStateFromRemote(
 	});
 
 	if (units.some((unit) => !unit)) {
-		return createDocumentSyncStateFromPartialMapping(doc, contentHash, markdownUnits, remoteUnits, revisionId);
+		return createDocumentSyncStateFromPartialMapping(
+			doc,
+			contentHash,
+			markdownUnits,
+			remoteUnits,
+			revisionId,
+			titleBlockId
+		);
 	}
 
 	return {
 		doc,
 		revisionId,
 		contentHash,
+		titleBlockId,
 		units: units as SyncUnitState[],
 		updatedAt: new Date().toISOString()
 	};
@@ -372,7 +394,8 @@ function createDocumentSyncStateFromPartialMapping(
 	contentHash: string,
 	markdownUnits: MarkdownSyncUnit[],
 	remoteUnits: RemoteSyncUnit[],
-	revisionId?: number
+	revisionId?: number,
+	titleBlockId?: string
 ): DocumentSyncState {
 	const markdownKeyCounts = countUnitFingerprintKeys(markdownUnits);
 	const remoteUnitsByKey = collectUniqueRemoteUnitsByFingerprint(remoteUnits);
@@ -395,6 +418,7 @@ function createDocumentSyncStateFromPartialMapping(
 		doc,
 		revisionId,
 		contentHash,
+		titleBlockId,
 		units,
 		updatedAt: new Date().toISOString()
 	};
@@ -623,6 +647,7 @@ async function buildPreciseReplacePlan(
 			doc: input.doc,
 			revisionId: input.state.revisionId,
 			contentHash,
+			titleBlockId: input.state.titleBlockId,
 			units: nextUnits,
 			updatedAt: new Date().toISOString()
 		}
@@ -654,12 +679,14 @@ async function buildPreciseInsertPlan(
 		suffixLength += 1;
 	}
 
-	if (prefixLength + suffixLength !== previousUnits.length || prefixLength === 0) {
+	if (prefixLength + suffixLength !== previousUnits.length) {
 		return null;
 	}
 
-	const anchorUnit = previousUnits[prefixLength - 1];
-	if (!anchorUnit?.blockId) {
+	const anchorBlockId = prefixLength === 0
+		? input.state.titleBlockId
+		: previousUnits[prefixLength - 1]?.blockId;
+	if (!anchorBlockId) {
 		return {
 			mode: "blocked",
 			commands: [],
@@ -679,12 +706,214 @@ async function buildPreciseInsertPlan(
 			doc: input.doc,
 			command: "block_insert_after",
 			docFormat: "markdown",
-			blockId: anchorUnit.blockId,
+			blockId: anchorBlockId,
 			contentFileName: input.contentFileName,
-			content: insertedUnits.map((unit) => unit.content).join("\n\n")
+			content: joinInsertedUnitContent(insertedUnits)
 		}],
 		contentHash
 	};
+}
+
+function joinInsertedUnitContent(units: MarkdownSyncUnit[]): string {
+	return units.reduce((content, unit, index) => {
+		if (index === 0) {
+			return unit.content;
+		}
+
+		const previousUnit = units[index - 1];
+		const separator = previousUnit?.kind === "list" && unit.kind === "list" ? "\n" : "\n\n";
+		return `${content}${separator}${unit.content}`;
+	}, "");
+}
+
+async function buildPreciseMixedInsertReplacePlan(
+	input: BuildSyncPlanInput,
+	contentHash: string,
+	units: MarkdownSyncUnit[]
+): Promise<SyncPlan | null> {
+	if (!input.state) {
+		return null;
+	}
+
+	const previousUnits = input.state.units;
+	const matches = findMappedContentMatches(previousUnits, units);
+	if (matches.length === 0 || matches.length === previousUnits.length) {
+		return null;
+	}
+
+	const commands: LarkUpdateCommand[] = [];
+	let previousCursor = 0;
+	let nextCursor = 0;
+	let anchorBlockId = input.state.titleBlockId || "";
+	for (const match of [...matches, { previousIndex: previousUnits.length, nextIndex: units.length }]) {
+		const previousGap = previousUnits.slice(previousCursor, match.previousIndex);
+		const nextGap = units.slice(nextCursor, match.nextIndex);
+		const gapCommands = buildMixedGapCommands(input.doc, input.contentFileName, previousGap, nextGap, anchorBlockId);
+		if (!gapCommands) {
+			return null;
+		}
+
+		commands.push(...gapCommands);
+		if (match.previousIndex < previousUnits.length) {
+			anchorBlockId = previousUnits[match.previousIndex]?.blockId || "";
+		}
+		previousCursor = match.previousIndex + 1;
+		nextCursor = match.nextIndex + 1;
+	}
+
+	if (commands.length === 0) {
+		return null;
+	}
+
+	return {
+		mode: "precise",
+		commands,
+		contentHash
+	};
+}
+
+function findMappedContentMatches(
+	previousUnits: SyncUnitState[],
+	nextUnits: MarkdownSyncUnit[]
+): Array<{ previousIndex: number; nextIndex: number }> {
+	const lengths = Array.from({ length: previousUnits.length + 1 }, () => {
+		return new Array<number>(nextUnits.length + 1).fill(0);
+	});
+	for (let previousIndex = previousUnits.length - 1; previousIndex >= 0; previousIndex -= 1) {
+		for (let nextIndex = nextUnits.length - 1; nextIndex >= 0; nextIndex -= 1) {
+			const row = lengths[previousIndex];
+			if (!row) {
+				continue;
+			}
+
+			row[nextIndex] = areEquivalentMappedUnits(previousUnits[previousIndex], nextUnits[nextIndex])
+				? readMatrixValue(lengths, previousIndex + 1, nextIndex + 1) + 1
+				: Math.max(
+					readMatrixValue(lengths, previousIndex + 1, nextIndex),
+					readMatrixValue(lengths, previousIndex, nextIndex + 1)
+				);
+		}
+	}
+
+	const matches: Array<{ previousIndex: number; nextIndex: number }> = [];
+	let previousIndex = 0;
+	let nextIndex = 0;
+	while (previousIndex < previousUnits.length && nextIndex < nextUnits.length) {
+		if (areEquivalentMappedUnits(previousUnits[previousIndex], nextUnits[nextIndex])) {
+			matches.push({ previousIndex, nextIndex });
+			previousIndex += 1;
+			nextIndex += 1;
+		} else if (
+			readMatrixValue(lengths, previousIndex + 1, nextIndex)
+			>= readMatrixValue(lengths, previousIndex, nextIndex + 1)
+		) {
+			previousIndex += 1;
+		} else {
+			nextIndex += 1;
+		}
+	}
+
+	return matches;
+}
+
+function readMatrixValue(matrix: number[][], rowIndex: number, columnIndex: number): number {
+	return matrix[rowIndex]?.[columnIndex] || 0;
+}
+
+function buildMixedGapCommands(
+	doc: string,
+	contentFileName: string,
+	previousGap: SyncUnitState[],
+	nextGap: MarkdownSyncUnit[],
+	anchorBlockId: string
+): LarkUpdateCommand[] | null {
+	if (previousGap.length === 0 && nextGap.length === 0) {
+		return [];
+	}
+
+	if (previousGap.length === 0) {
+		return buildInsertAfterCommands(doc, contentFileName, nextGap, anchorBlockId);
+	}
+
+	if (nextGap.length === 0) {
+		return buildDeleteCommands(doc, previousGap);
+	}
+
+	const replaceCount = Math.min(previousGap.length, nextGap.length);
+	const replaceUnits = nextGap.slice(0, replaceCount);
+	const replacedPreviousUnits = previousGap.slice(0, replaceCount);
+	if (!replacedPreviousUnits.every((unit, index) => unit.blockId && replaceUnits[index]?.kind === unit.kind)) {
+		return null;
+	}
+
+	const commands: LarkUpdateCommand[] = [];
+	for (let index = 0; index < replaceCount; index += 1) {
+		const previousUnit = replacedPreviousUnits[index];
+		const nextUnit = replaceUnits[index];
+		if (!previousUnit || !nextUnit || previousUnit.hash === nextUnit.hash) {
+			continue;
+		}
+
+		commands.push({
+			doc,
+			command: "block_replace",
+			docFormat: "markdown",
+			blockId: previousUnit.blockId,
+			contentFileName,
+			content: nextUnit.content
+		});
+	}
+
+	if (previousGap.length > nextGap.length) {
+		const deleteCommands = buildDeleteCommands(doc, previousGap.slice(replaceCount));
+		return deleteCommands ? [...commands, ...deleteCommands] : null;
+	}
+
+	const insertedUnits = nextGap.slice(previousGap.length);
+	const insertAnchorBlockId = previousGap[previousGap.length - 1]?.blockId || "";
+	const insertCommands = buildInsertAfterCommands(doc, contentFileName, insertedUnits, insertAnchorBlockId);
+	return insertCommands ? [...commands, ...insertCommands] : null;
+}
+
+function buildDeleteCommands(doc: string, deletedUnits: SyncUnitState[]): LarkUpdateCommand[] | null {
+	if (deletedUnits.length === 0) {
+		return [];
+	}
+
+	const deletedBlockIds = deletedUnits.map((unit) => unit.blockId).filter(Boolean);
+	if (deletedBlockIds.length !== deletedUnits.length) {
+		return null;
+	}
+
+	return [{
+		doc,
+		command: "block_delete",
+		blockId: deletedBlockIds.join(",")
+	}];
+}
+
+function buildInsertAfterCommands(
+	doc: string,
+	contentFileName: string,
+	insertedUnits: MarkdownSyncUnit[],
+	anchorBlockId: string
+): LarkUpdateCommand[] | null {
+	if (insertedUnits.length === 0) {
+		return [];
+	}
+
+	if (!anchorBlockId) {
+		return null;
+	}
+
+	return [{
+		doc,
+		command: "block_insert_after",
+		docFormat: "markdown",
+		blockId: anchorBlockId,
+		contentFileName,
+		content: joinInsertedUnitContent(insertedUnits)
+	}];
 }
 
 async function buildPreciseDeletePlan(
@@ -929,6 +1158,11 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 	}
 
 	return units;
+}
+
+function readRemoteTitleBlockId(xml: string): string | undefined {
+	const titleMatch = xml.match(/<title\b([^>]*)>/i);
+	return titleMatch ? readXmlAttribute(titleMatch[1] || "", "id") || undefined : undefined;
 }
 
 function countUnitFingerprintKeys(units: MarkdownSyncUnit[]): Map<string, number> {

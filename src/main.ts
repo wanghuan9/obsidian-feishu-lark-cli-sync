@@ -926,6 +926,21 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				}
 			}
 		}
+		if (strategy === "precise" && plan.mode === "precise" && plan.commands.some((command) => {
+			return command.command === "block_insert_after";
+		})) {
+			const refreshedState = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
+			if (refreshedState && refreshedState.contentHash !== state?.contentHash) {
+				const refreshedPlan = await buildSyncPlan({
+					doc: refreshedState.doc,
+					markdown: content,
+					contentFileName: "sync.md",
+					strategy,
+					state: refreshedState
+				});
+				return await this.executeSyncPlan(refreshedState.doc, content, refreshedPlan, context);
+			}
+		}
 
 		return await this.executeSyncPlan(syncDoc, content, plan, context);
 	}
