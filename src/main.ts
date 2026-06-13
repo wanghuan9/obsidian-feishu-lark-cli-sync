@@ -393,11 +393,15 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	private async publishFile(file: TFile): Promise<void> {
 		await this.runWithNotice(this.t("noticePublishingToLark"), async () => {
+			const binding = this.getBinding(file);
 			const content = await this.readNoteForLark(file);
 			const result = await this.createLarkDocument(file, content);
+			if (binding) {
+				this.removeSyncStateForBinding(binding);
+			}
 			await this.saveCreatedDocumentState(result, content);
 
-			if (this.settings.updateFrontmatter) {
+			if (this.settings.updateFrontmatter || this.hasBindingChanged(binding, result)) {
 				await this.writeBinding(file, result);
 			}
 
@@ -1696,10 +1700,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		this.selfWrittenPaths.set(file.path, Date.now());
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			delete frontmatter.lark_doc;
+			delete frontmatter[FRONTMATTER_TOKEN_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
 			delete frontmatter[LEGACY_FRONTMATTER_SYNCED_AT_KEY];
-			frontmatter[FRONTMATTER_TOKEN_KEY] = binding.token;
 			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
 		});
 		this.selfWrittenPaths.set(file.path, Date.now());

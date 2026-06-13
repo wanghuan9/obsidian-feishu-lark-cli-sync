@@ -42,6 +42,12 @@ tags:
 ---
 Body`);
 
+assert.equal(removeLarkBinding(`---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+lark_doc_token: "abc"
+---
+Body`), "Body");
+
 assert.equal(
 	prepareNoteContentForLark({ basename: "Note" }, "Body", "file-name"),
 	"# Note\n\nBody"
