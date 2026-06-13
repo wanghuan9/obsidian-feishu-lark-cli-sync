@@ -11,7 +11,10 @@ import {
 	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
+	createSyncContentSignature,
 	formatSyncFailureMessage,
+	isDocumentStateContentEquivalent,
+	isSyncContentSignatureEquivalent,
 	prepareNoteContentForLark,
 	readBindingFromMarkdown,
 	removeLarkBinding
@@ -24,6 +27,8 @@ const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const ZERO_REF = "0000000000000000000000000000000000000000";
 const MAX_STDERR_LENGTH = 1600;
 const MAX_PARALLEL_SYNCS = 4;
+const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
+const REMOTE_STATE_REFRESH_DELAY_MS = 600;
 const FALLBACK_PATH_ENTRIES = [
 	"/opt/homebrew/bin",
 	"/opt/homebrew/sbin",
@@ -190,40 +195,24 @@ async function syncMarkdownTask(task, settings, syncState) {
 			state
 		});
 		const stateKeys = task.docAliases;
-
-		if (plan.mode === "skipped") {
-			await ensureRemoteDocumentMatches(settings, syncDoc, plan.contentHash, task.repoRelativePath);
-			savePlanState(syncState, stateKeys, plan);
-			return;
-		}
-
-		if (plan.mode === "blocked") {
-			throw new PrePushSyncError(formatSyncFailureMessage({
-				language: readLanguage(settings),
-				mode: "pre-push",
-				path: task.repoRelativePath,
-				reason: plan.reason
-			}));
-		}
-
-		await withTempMarkdown(basename(task.filePath, ".md"), contentForLark, async (tempFile) => {
-			for (let index = 0; index < plan.commands.length; index += 1) {
-				const command = plan.commands[index];
-				const contentFileName = "content" in command && command.content
-					? await writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
-					: tempFile.fileName;
-				const args = buildUpdateCommandArgs(
-					"contentFileName" in command
-						? { ...command, contentFileName }
-						: command
-				);
-				await runLarkCli(settings, args, tempFile.directory);
+		if (strategy === "precise" && plan.mode === "blocked") {
+			const refreshedState = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, stateKeys);
+			if (refreshedState) {
+				const refreshedPlan = await buildSyncPlan({
+					doc: refreshedState.doc,
+					markdown: contentForLark,
+					contentFileName: "sync.md",
+					strategy,
+					state: refreshedState
+				});
+				if (refreshedPlan.mode !== "blocked") {
+					await executeSyncPlanForTask(task, settings, syncState, refreshedState.doc, contentForLark, refreshedPlan, stateKeys);
+					return;
+				}
 			}
-		});
-		savePlanState(syncState, stateKeys, plan);
-		if (plan.mode === "precise" && !plan.nextState) {
-			await saveRemoteDocumentState(settings, syncState, syncDoc, stateKeys);
 		}
+
+		await executeSyncPlanForTask(task, settings, syncState, syncDoc, contentForLark, plan, stateKeys);
 	} catch (error) {
 		if (error instanceof PrePushSyncError) {
 			throw error;
@@ -237,6 +226,43 @@ async function syncMarkdownTask(task, settings, syncState) {
 			reason: "lark-cli-failed",
 			detail
 		}));
+	}
+}
+
+async function executeSyncPlanForTask(task, settings, syncState, doc, contentForLark, plan, stateKeys) {
+	if (plan.mode === "skipped") {
+		await ensureRemoteDocumentMatches(settings, doc, contentForLark, task.repoRelativePath);
+		savePlanState(syncState, stateKeys, plan);
+		return;
+	}
+
+	if (plan.mode === "blocked") {
+		throw new PrePushSyncError(formatSyncFailureMessage({
+			language: readLanguage(settings),
+			mode: "pre-push",
+			path: task.repoRelativePath,
+			reason: plan.reason
+		}));
+	}
+
+	await withTempMarkdown(basename(task.filePath, ".md"), contentForLark, async (tempFile) => {
+		for (let index = 0; index < plan.commands.length; index += 1) {
+			const command = plan.commands[index];
+			const contentFileName = "content" in command && command.content
+				? await writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
+				: tempFile.fileName;
+			const args = buildUpdateCommandArgs(
+				"contentFileName" in command
+					? { ...command, contentFileName }
+					: command
+			);
+			await runLarkCli(settings, args, tempFile.directory);
+		}
+	});
+	if (plan.mode === "precise") {
+		await saveRemoteDocumentState(settings, syncState, doc, stateKeys, contentForLark, task.repoRelativePath);
+	} else {
+		savePlanState(syncState, stateKeys, plan);
 	}
 }
 
@@ -264,14 +290,39 @@ function savePlanState(syncState, docs, plan) {
 	}
 }
 
-async function saveRemoteDocumentState(settings, syncState, doc, docs) {
-	const [remoteMarkdown, remoteXml] = await Promise.all([
-		fetchLarkDocumentMarkdown(settings, doc),
-		fetchLarkDocumentWithIds(settings, doc)
-	]);
-	const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
-	if (state.units.length === 0) {
-		return;
+async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedMarkdown, path) {
+	const expectedSignature = expectedMarkdown
+		? await createSyncContentSignature(expectedMarkdown)
+		: undefined;
+	let state;
+	for (let attempt = 0; attempt < REMOTE_STATE_REFRESH_ATTEMPTS; attempt += 1) {
+		const [remoteMarkdown, remoteXml] = await Promise.all([
+			fetchLarkDocumentMarkdown(settings, doc),
+			fetchLarkDocumentWithIds(settings, doc)
+		]);
+		const remoteState = await createDocumentSyncStateFromRemote(
+			doc,
+			remoteMarkdown.content,
+			remoteXml.content,
+			remoteXml.revisionId
+		);
+		if (!expectedSignature || isDocumentStateContentEquivalent(remoteState, expectedSignature)) {
+			state = remoteState;
+			break;
+		}
+
+		if (attempt < REMOTE_STATE_REFRESH_ATTEMPTS - 1) {
+			await sleep(REMOTE_STATE_REFRESH_DELAY_MS);
+		}
+	}
+
+	if (!state) {
+		throw new PrePushSyncError(formatSyncFailureMessage({
+			language: readLanguage(settings),
+			mode: "pre-push",
+			path,
+			reason: "remote-update-not-visible"
+		}));
 	}
 
 	for (const key of uniquePathEntries([doc, ...docs])) {
@@ -280,6 +331,12 @@ async function saveRemoteDocumentState(settings, syncState, doc, docs) {
 			doc: key
 		};
 	}
+}
+
+async function sleep(ms) {
+	await new Promise((resolvePromise) => {
+		setTimeout(resolvePromise, ms);
+	});
 }
 
 async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs) {
@@ -342,7 +399,7 @@ async function fetchLarkDocumentWithIds(settings, doc) {
 	};
 }
 
-async function ensureRemoteDocumentMatches(settings, doc, expectedContentHash, repoRelativePath) {
+async function ensureRemoteDocumentMatches(settings, doc, expectedMarkdown, repoRelativePath) {
 	const result = await runLarkCli(settings, [
 		"docs",
 		"+fetch",
@@ -357,8 +414,11 @@ async function ensureRemoteDocumentMatches(settings, doc, expectedContentHash, r
 		"--json"
 	]);
 	const remoteContent = result.data?.document?.content || "";
-	const remoteContentHash = await createContentHash(remoteContent);
-	if (remoteContentHash !== expectedContentHash) {
+	const [remoteSignature, expectedSignature] = await Promise.all([
+		createSyncContentSignature(remoteContent),
+		createSyncContentSignature(expectedMarkdown)
+	]);
+	if (!isSyncContentSignatureEquivalent(remoteSignature, expectedSignature)) {
 		throw new PrePushSyncError(formatSyncFailureMessage({
 			language: readLanguage(settings),
 			mode: "pre-push",

@@ -8,6 +8,7 @@ export type SyncFailureReason =
 	| "block-mapping-missing"
 	| "block-id-invalid"
 	| "diff-too-complex"
+	| "remote-update-not-visible"
 	| "lark-cli-failed";
 export type SyncPlanMode = "skipped" | "precise" | "overwrite" | "blocked";
 
@@ -38,6 +39,16 @@ export interface SyncUnitState {
 	kind: string;
 	hash: string;
 	blockId: string;
+}
+
+export interface SyncContentSignature {
+	contentHash: string;
+	units: SyncContentUnitSignature[];
+}
+
+export interface SyncContentUnitSignature {
+	kind: string;
+	hash: string;
 }
 
 export type LarkUpdateCommand =
@@ -303,6 +314,11 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		return insertPlan;
 	}
 
+	const deletePlan = await buildPreciseDeletePlan(input, contentHash, units);
+	if (deletePlan) {
+		return deletePlan;
+	}
+
 	return {
 		mode: "blocked",
 		commands: [],
@@ -384,6 +400,58 @@ function createDocumentSyncStateFromPartialMapping(
 	};
 }
 
+export async function createSyncContentSignature(markdown: string): Promise<SyncContentSignature> {
+	const contentHash = await createContentHash(markdown);
+	const units = await createMarkdownSyncUnits(markdown);
+	return {
+		contentHash,
+		units: units.map((unit) => ({
+			kind: unit.kind,
+			hash: unit.hash
+		}))
+	};
+}
+
+export function isDocumentStateContentEquivalent(
+	state: DocumentSyncState,
+	signature: SyncContentSignature
+): boolean {
+	if (state.contentHash === signature.contentHash) {
+		return true;
+	}
+
+	return areSyncContentUnitsEquivalent(state.units, signature.units);
+}
+
+export function isSyncContentSignatureEquivalent(
+	current: SyncContentSignature,
+	expected: SyncContentSignature
+): boolean {
+	if (current.contentHash === expected.contentHash) {
+		return true;
+	}
+
+	return areSyncContentUnitsEquivalent(current.units, expected.units);
+}
+
+function areSyncContentUnitsEquivalent(
+	currentUnits: SyncContentUnitSignature[],
+	expectedUnits: SyncContentUnitSignature[]
+): boolean {
+	if (currentUnits.length !== expectedUnits.length) {
+		return false;
+	}
+
+	return currentUnits.every((unit, index) => {
+		const expectedUnit = expectedUnits[index];
+		if (!expectedUnit) {
+			return false;
+		}
+
+		return unit.kind === expectedUnit.kind && unit.hash === expectedUnit.hash;
+	});
+}
+
 export function createEmptySyncStateFile(): LarkSyncStateFile {
 	return {
 		version: 1,
@@ -457,6 +525,7 @@ const SYNC_FAILURE_REASON_MESSAGES: Record<MessageLanguage, Record<SyncFailureRe
 		"block-mapping-missing": "缺少远端 block 映射，无法安全增量同步",
 		"block-id-invalid": "远端 block id 已失效，无法安全增量同步",
 		"diff-too-complex": "本次变更过于复杂，无法安全增量同步",
+		"remote-update-not-visible": "远端更新尚未可见，无法安全刷新增量同步状态，请稍后重试",
 		"lark-cli-failed": "lark-cli 执行失败"
 	},
 	en: {
@@ -465,6 +534,7 @@ const SYNC_FAILURE_REASON_MESSAGES: Record<MessageLanguage, Record<SyncFailureRe
 		"block-mapping-missing": "remote block mapping is missing; precise sync aborted",
 		"block-id-invalid": "remote block id is invalid; precise sync aborted",
 		"diff-too-complex": "the change is too complex for safe precise sync",
+		"remote-update-not-visible": "remote update is not visible yet; precise sync state cannot be refreshed safely; retry later",
 		"lark-cli-failed": "lark-cli execution failed"
 	}
 };
@@ -617,6 +687,60 @@ async function buildPreciseInsertPlan(
 	};
 }
 
+async function buildPreciseDeletePlan(
+	input: BuildSyncPlanInput,
+	contentHash: string,
+	units: MarkdownSyncUnit[]
+): Promise<SyncPlan | null> {
+	if (!input.state || input.state.units.length <= units.length) {
+		return null;
+	}
+
+	const previousUnits = input.state.units;
+	let prefixLength = 0;
+	while (prefixLength < units.length && areEquivalentMappedUnits(previousUnits[prefixLength], units[prefixLength])) {
+		prefixLength += 1;
+	}
+
+	let suffixLength = 0;
+	while (suffixLength < units.length - prefixLength
+		&& areEquivalentMappedUnits(
+			previousUnits[previousUnits.length - 1 - suffixLength],
+			units[units.length - 1 - suffixLength]
+		)) {
+		suffixLength += 1;
+	}
+
+	if (prefixLength + suffixLength !== units.length) {
+		return null;
+	}
+
+	const deletedUnits = previousUnits.slice(prefixLength, previousUnits.length - suffixLength);
+	if (deletedUnits.length === 0) {
+		return null;
+	}
+
+	const deletedBlockIds = deletedUnits.map((unit) => unit.blockId).filter(Boolean);
+	if (deletedBlockIds.length !== deletedUnits.length) {
+		return {
+			mode: "blocked",
+			commands: [],
+			contentHash,
+			reason: "block-mapping-missing"
+		};
+	}
+
+	return {
+		mode: "precise",
+		commands: [{
+			doc: input.doc,
+			command: "block_delete",
+			blockId: deletedBlockIds.join(",")
+		}],
+		contentHash
+	};
+}
+
 function areEquivalentMappedUnits(
 	previousUnit: SyncUnitState | undefined,
 	nextUnit: MarkdownSyncUnit | undefined
@@ -702,7 +826,8 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 			index += 1;
 			while (index < lines.length
 				&& (lines[index] || "").trim() !== ""
-				&& !isMarkdownBlockBoundary(lines[index] || "")) {
+				&& !isMarkdownBlockBoundary(lines[index] || "")
+				&& !isMarkdownParagraphLabelBoundary(lines[index] || "")) {
 				index += 1;
 			}
 		}
@@ -719,6 +844,10 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 function isMarkdownBlockBoundary(line: string): boolean {
 	const kind = readMarkdownBlockKind(line);
 	return kind !== "paragraph";
+}
+
+function isMarkdownParagraphLabelBoundary(line: string): boolean {
+	return /^\*\*[^*\n]+?\*\*[：:]\s*$/.test(line.trim());
 }
 
 function readMarkdownBlockKind(line: string): string {

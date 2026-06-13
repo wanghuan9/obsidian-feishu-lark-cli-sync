@@ -17,7 +17,9 @@ const {
 	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
+	createSyncContentSignature,
 	formatSyncFailureMessage,
+	isDocumentStateContentEquivalent,
 	prepareNoteContentForLark,
 	readBindingFromMarkdown,
 	removeLarkBinding
@@ -107,6 +109,15 @@ assert.equal(contentHash, await createContentHash("# Note\n\nBody"));
 assert.notEqual(contentHash, await createContentHash("# Note\n\nChanged"));
 assert.equal(contentHash.length, 64);
 
+const formattedSignature = await createSyncContentSignature("# Note\n\n**Changed**");
+const normalizedRemoteState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\nChanged",
+	"<title id=\"title\">Note</title><p id=\"blk-1\">Changed</p>"
+);
+assert.ok(isDocumentStateContentEquivalent(normalizedRemoteState, formattedSignature));
+assert.notEqual(normalizedRemoteState.contentHash, formattedSignature.contentHash);
+
 const overwritePlan = await buildSyncPlan({
 	doc: "doc-token",
 	markdown: "# Note\n\nBody",
@@ -132,6 +143,10 @@ assert.equal(mappedState.revisionId, 7);
 assert.equal(mappedState.units.length, 2);
 assert.deepEqual(mappedState.units.map((unit) => unit.blockId), ["blk-1", "blk-2"]);
 assert.deepEqual(mappedState.units.map((unit) => unit.kind), ["paragraph", "heading"]);
+
+const exportedMarkdownState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\n## Exported", remoteXml, 7);
+assert.equal(exportedMarkdownState.contentHash, await createContentHash("# Note\n\n## Exported"));
+assert.notEqual(exportedMarkdownState.contentHash, await createContentHash("# Note\n\n## Local"));
 
 const partialRemoteXml = "<title id=\"doc-token\">Note</title><p id=\"blk-1\">Body</p><p id=\"blk-2\">Merged<br/>Second</p>";
 const partialState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\nBody\n\n1. Second", partialRemoteXml, 8);
@@ -279,6 +294,29 @@ assert.deepEqual(headingInsertPlan.commands, [{
 	content: "## Inserted"
 }]);
 
+const paragraphLabelState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\nBody\n\n**原因**：\n\n- Keep",
+	"<title id=\"doc-token\">Note</title><p id=\"blk-1\">Body</p><p id=\"blk-2\"><b>原因</b>：</p><ul><li id=\"blk-3\">Keep</li></ul>",
+	10
+);
+const paragraphLabelPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody\n2121\n21212\n**原因**：\n\n- Keep",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: paragraphLabelState
+});
+assert.equal(paragraphLabelPlan.mode, "precise");
+assert.deepEqual(paragraphLabelPlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "markdown",
+	blockId: "blk-1",
+	contentFileName: "sync.md",
+	content: "Body\n2121\n21212"
+}]);
+
 const leadingInsertPlan = await buildSyncPlan({
 	doc: "doc-token",
 	markdown: "# Note\n\nInserted\n\nBody\n\n## Next",
@@ -288,6 +326,26 @@ const leadingInsertPlan = await buildSyncPlan({
 });
 assert.equal(leadingInsertPlan.mode, "blocked");
 assert.equal(leadingInsertPlan.reason, "diff-too-complex");
+
+const middleDeleteState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\nBody\n\nInserted\n\n## Next",
+	"<title id=\"doc-token\">Note</title><p id=\"blk-1\">Body</p><p id=\"blk-2\">Inserted</p><h2 id=\"blk-3\">Next</h2>",
+	10
+);
+const middleDeletePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: middleDeleteState
+});
+assert.equal(middleDeletePlan.mode, "precise");
+assert.deepEqual(middleDeletePlan.commands, [{
+	doc: "doc-token",
+	command: "block_delete",
+	blockId: "blk-2"
+}]);
 
 assert.equal(
 	formatSyncFailureMessage({

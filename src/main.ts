@@ -18,9 +18,12 @@ import {
 	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
+	createSyncContentSignature,
 	formatSyncFailureMessage,
 	FRONTMATTER_TOKEN_KEY,
 	FRONTMATTER_URL_KEY,
+	isDocumentStateContentEquivalent,
+	isSyncContentSignatureEquivalent,
 	LEGACY_FRONTMATTER_SYNCED_AT_KEY,
 	LarkSyncStateFile,
 	prepareNoteContentForLark,
@@ -58,6 +61,8 @@ const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const PRE_PUSH_HOOK_MARKER = "Feishu Lark CLI Sync";
 const AUTO_SYNC_WRITE_IGNORE_MS = 5000;
 const DEFAULT_AUTO_SYNC_DELAY_SECONDS = 15;
+const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
+const REMOTE_STATE_REFRESH_DELAY_MS = 600;
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
 const FALLBACK_PATH_ENTRIES = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
@@ -384,7 +389,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 			const content = await this.readNoteForLark(file);
 			const result = await this.createLarkDocument(file, content);
-			await this.saveCreatedDocumentState(result, content);
+			await this.saveCreatedDocumentState(result);
 
 			if (options.updateFrontmatter) {
 				await this.writeBinding(file, result);
@@ -778,7 +783,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			const rewrittenContent = this.rewriteInternalLinks(entry.content, linkMap, entry.file);
 			const strategy = entry.isNewDocument ? "overwrite" : undefined;
 			if (entry.isNewDocument && rewrittenContent === entry.content) {
-				await this.saveCreatedDocumentState(entry.binding, entry.content);
+				await this.saveCreatedDocumentState(entry.binding);
 				continue;
 			}
 
@@ -809,7 +814,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			if (strategy === "overwrite") {
-				await this.saveCreatedDocumentState(nextBindingWithParent, rewrittenContent);
+				await this.saveCreatedDocumentState(nextBindingWithParent);
 			}
 		}
 
@@ -906,6 +911,21 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			strategy,
 			state
 		});
+		if (strategy === "precise" && plan.mode === "blocked") {
+			const refreshedState = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
+			if (refreshedState) {
+				const refreshedPlan = await buildSyncPlan({
+					doc: refreshedState.doc,
+					markdown: content,
+					contentFileName: "sync.md",
+					strategy,
+					state: refreshedState
+				});
+				if (refreshedPlan.mode !== "blocked") {
+					return await this.executeSyncPlan(refreshedState.doc, content, refreshedPlan, context);
+				}
+			}
+		}
 
 		return await this.executeSyncPlan(syncDoc, content, plan, context);
 	}
@@ -928,7 +948,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		context: { mode: SyncMode; path: string; stateKeys?: string[] }
 	): Promise<Partial<BoundLarkDocument>> {
 		if (plan.mode === "skipped") {
-			await this.ensureRemoteDocumentMatches(doc, plan.contentHash, context);
+			await this.ensureRemoteDocumentMatches(doc, content, context);
 			await this.saveSyncPlanStateForDocument(doc, {}, plan, context.stateKeys || []);
 			return {};
 		}
@@ -959,9 +979,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				};
 			}
 
-			await this.saveSyncPlanStateForDocument(doc, latestDocument, plan, context.stateKeys || []);
-			if (plan.mode === "precise" && !plan.nextState) {
-				await this.saveRemoteDocumentState(doc, context.stateKeys || []);
+			if (plan.mode === "precise") {
+				await this.saveRemoteDocumentState(doc, context.stateKeys || [], content, context);
+			} else {
+				await this.saveSyncPlanStateForDocument(doc, latestDocument, plan, context.stateKeys || []);
 			}
 			return latestDocument;
 		});
@@ -995,10 +1016,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		await this.saveLarkSyncState();
 	}
 
-	private async saveCreatedDocumentState(binding: BoundLarkDocument, content: string): Promise<void> {
+	private async saveCreatedDocumentState(binding: BoundLarkDocument): Promise<void> {
 		const doc = binding.token || binding.url;
-		const fetched = await this.fetchLarkDocumentWithIds(doc);
-		const state = await createDocumentSyncStateFromRemote(doc, content, fetched.content, fetched.revisionId);
+		const [remoteMarkdown, remoteXml] = await Promise.all([
+			this.fetchLarkDocumentMarkdown(doc),
+			this.fetchLarkDocumentWithIds(doc)
+		]);
+		const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
 		const documentKeys = this.uniquePathEntries([binding.token, binding.url]);
 		for (const key of documentKeys) {
 			this.syncState.documents[key] = {
@@ -1009,13 +1033,41 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		await this.saveLarkSyncState();
 	}
 
-	private async saveRemoteDocumentState(doc: string, stateKeys: string[]): Promise<void> {
-		const [remoteMarkdown, remoteXml] = await Promise.all([
-			this.fetchLarkDocumentMarkdown(doc),
-			this.fetchLarkDocumentWithIds(doc)
-		]);
-		const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
-		if (state.units.length === 0) {
+	private async saveRemoteDocumentState(
+		doc: string,
+		stateKeys: string[],
+		expectedMarkdown?: string,
+		context?: { mode: SyncMode; path: string }
+	): Promise<void> {
+		const expectedSignature = expectedMarkdown
+			? await createSyncContentSignature(expectedMarkdown)
+			: undefined;
+		let state: LarkSyncStateFile["documents"][string] | undefined;
+		for (let attempt = 0; attempt < REMOTE_STATE_REFRESH_ATTEMPTS; attempt += 1) {
+			const [remoteMarkdown, remoteXml] = await Promise.all([
+				this.fetchLarkDocumentMarkdown(doc),
+				this.fetchLarkDocumentWithIds(doc)
+			]);
+			const remoteState = await createDocumentSyncStateFromRemote(
+				doc,
+				remoteMarkdown.content,
+				remoteXml.content,
+				remoteXml.revisionId
+			);
+			if (!expectedSignature || isDocumentStateContentEquivalent(remoteState, expectedSignature)) {
+				state = remoteState;
+				break;
+			}
+
+			if (attempt < REMOTE_STATE_REFRESH_ATTEMPTS - 1) {
+				await this.sleep(REMOTE_STATE_REFRESH_DELAY_MS);
+			}
+		}
+
+		if (!state) {
+			if (context) {
+				throw new LocalizedSyncError(this.formatSyncFailure(context.mode, context.path, "remote-update-not-visible"));
+			}
 			return;
 		}
 
@@ -1091,6 +1143,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		};
 	}
 
+	private async sleep(ms: number): Promise<void> {
+		await new Promise((resolvePromise) => window.setTimeout(resolvePromise, ms));
+	}
+
 	private formatSyncFailure(mode: SyncMode, path: string, reason: SyncFailureReason): string {
 		return formatSyncFailureMessage({
 			language: this.settings.language,
@@ -1111,7 +1167,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private async ensureRemoteDocumentMatches(
 		doc: string,
-		expectedContentHash: string,
+		expectedMarkdown: string,
 		context: { mode: SyncMode; path: string }
 	): Promise<void> {
 		const result = await this.runLarkCli([
@@ -1128,8 +1184,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			"--json"
 		]);
 		const remoteContent = result.data?.document?.content || "";
-		const remoteContentHash = await createContentHash(remoteContent);
-		if (remoteContentHash !== expectedContentHash) {
+		const [remoteSignature, expectedSignature] = await Promise.all([
+			createSyncContentSignature(remoteContent),
+			createSyncContentSignature(expectedMarkdown)
+		]);
+		if (!isSyncContentSignatureEquivalent(remoteSignature, expectedSignature)) {
 			throw new LocalizedSyncError(this.formatSyncFailure(context.mode, context.path, "remote-content-mismatch"));
 		}
 	}
@@ -1167,7 +1226,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 			const recreatedBinding = await this.createLarkDocument(file, content, parent);
 			this.removeSyncStateForBinding(binding);
-			await this.saveCreatedDocumentState(recreatedBinding, content);
+			await this.saveCreatedDocumentState(recreatedBinding);
 			return recreatedBinding;
 		}
 	}
@@ -1188,7 +1247,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 			const recreatedBinding = await this.createLarkDocument(file, content, parent);
 			this.removeSyncStateForBinding(binding);
-			await this.saveCreatedDocumentState(recreatedBinding, content);
+			await this.saveCreatedDocumentState(recreatedBinding);
 			return recreatedBinding;
 		}
 	}
