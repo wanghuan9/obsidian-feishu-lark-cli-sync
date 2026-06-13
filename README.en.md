@@ -75,12 +75,11 @@ which lark-cli
 - `Auto sync mode`: choose off, sync after save, or Git `pre-push` hook. Auto sync only handles bound Markdown notes and never auto-publishes unbound notes.
 - `Save sync delay`: wait a few seconds after save before syncing, used to merge continuous edits.
 
-## Single-Note Publish and Sync
+## Single-Note Sync
 
 Right-click a Markdown file, or open the command palette while a note is active:
 
-- `Publish to Feishu/Lark`: create a new Feishu/Lark Docx document and write binding metadata
-- `Sync to Feishu/Lark`: update the bound remote document using the configured sync strategy; if no binding exists, publish a new document first
+- `Sync to Feishu/Lark`: create a document when no binding exists, update it when the binding is valid, or recreate it and refresh the URL when the binding is invalid
 
 Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source, and the remote document is updated to match it.
 

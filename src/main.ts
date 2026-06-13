@@ -161,14 +161,11 @@ class LocalizedSyncError extends Error {
 
 const MESSAGES = {
 	"zh-CN": {
-		commandPublishCurrentNote: "发布到飞书",
 		commandSyncCurrentNote: "同步到飞书",
-		menuPublishToLark: "发布到飞书",
 		menuSyncToLark: "同步到飞书",
 		menuPublishFolderToLark: "发布整个目录到飞书",
 		ribbonSyncCurrentNote: "同步到飞书",
 		noticeNoActiveMarkdownNote: "当前没有打开 Markdown 笔记。",
-		noticePublishingToLark: "正在发布到飞书...",
 		noticeSyncingToLark: "正在同步到飞书...",
 		noticePublishingFolderToLark: "正在发布目录到飞书...",
 		noticeNoMarkdownFilesInFolder: "该目录下没有 Markdown 文件。",
@@ -217,14 +214,11 @@ const MESSAGES = {
 		installPrePushHookButton: "安装 hook"
 	},
 	en: {
-		commandPublishCurrentNote: "Publish to Feishu/Lark",
 		commandSyncCurrentNote: "Sync to Feishu/Lark",
-		menuPublishToLark: "Publish to Feishu/Lark",
 		menuSyncToLark: "Sync to Feishu/Lark",
 		menuPublishFolderToLark: "Publish folder to Feishu/Lark",
 		ribbonSyncCurrentNote: "Sync to Feishu/Lark",
 		noticeNoActiveMarkdownNote: "No active Markdown note.",
-		noticePublishingToLark: "Publishing to Lark...",
 		noticeSyncingToLark: "Syncing to Lark...",
 		noticePublishingFolderToLark: "Publishing folder to Lark...",
 		noticeNoMarkdownFilesInFolder: "No Markdown files found in this folder.",
@@ -296,14 +290,6 @@ export default class LarkCliSyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: "publish-current-note-to-lark",
-			name: this.t("commandPublishCurrentNote"),
-			callback: () => {
-				void this.publishCurrentNote();
-			}
-		});
-
-		this.addCommand({
 			id: "sync-current-note-to-lark",
 			name: this.t("commandSyncCurrentNote"),
 			callback: () => {
@@ -317,11 +303,6 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu: Menu, file) => {
 			if (file instanceof TFile && file.extension === "md") {
-				menu.addItem((item) => {
-					item.setTitle(this.t("menuPublishToLark")).setIcon("upload").onClick(() => {
-						void this.publishFile(file);
-					});
-				});
 				menu.addItem((item) => {
 					item.setTitle(this.t("menuSyncToLark")).setIcon("refresh-cw").onClick(() => {
 						void this.syncFile(file);
@@ -371,16 +352,6 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}));
 	}
 
-	private async publishCurrentNote(): Promise<void> {
-		const file = this.getActiveMarkdownFile();
-		if (!file) {
-			new Notice(this.t("noticeNoActiveMarkdownNote"));
-			return;
-		}
-
-		await this.publishFile(file);
-	}
-
 	private async syncCurrentNote(): Promise<void> {
 		const file = this.getActiveMarkdownFile();
 		if (!file) {
@@ -389,25 +360,6 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}
 
 		await this.syncFile(file);
-	}
-
-	private async publishFile(file: TFile): Promise<void> {
-		await this.runWithNotice(this.t("noticePublishingToLark"), async () => {
-			const binding = this.getBinding(file);
-			const content = await this.readNoteForLark(file);
-			const result = await this.createLarkDocument(file, content);
-			if (binding) {
-				this.removeSyncStateForBinding(binding);
-			}
-			await this.saveCreatedDocumentState(result, content);
-
-			if (this.settings.updateFrontmatter || this.hasBindingChanged(binding, result)) {
-				await this.writeBinding(file, result);
-			}
-
-			this.showSuccess(this.t("noticePublishedToLark"), result.url);
-			this.openUrlIfNeeded(result.url);
-		});
 	}
 
 	private async syncFile(file: TFile): Promise<void> {

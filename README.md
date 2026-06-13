@@ -2,7 +2,7 @@
 
 [简体中文](./README.md) | [English](./README.en.md)
 
-通过本地 `lark-cli` 将 Obsidian Markdown 笔记一键发布和同步到飞书 / Lark 云文档的桌面端插件。
+通过本地 `lark-cli` 将 Obsidian Markdown 笔记一键同步到飞书 / Lark 云文档的桌面端插件。
 
 > 中文用户可以直接理解为“Obsidian 飞书同步插件”。海外用户通常使用 Lark，因此 README 同时保留 Feishu / Lark 关键词。
 
@@ -77,12 +77,11 @@ which lark-cli
 - `自动同步方式`：可选择关闭、保存后同步、Git `pre-push` hook。自动同步只处理已绑定 Markdown 文档，不会自动发布未绑定文档。
 - `保存后同步延迟`：保存后等待一段时间再同步，用于合并连续编辑。
 
-## 单文件发布和同步
+## 单文件同步
 
 在 Markdown 文件上右键，或打开当前笔记后使用命令面板：
 
-- `发布到飞书` / `Publish to Feishu/Lark`：创建一个新的飞书 / Lark Docx 文档，并写入绑定信息
-- `同步到飞书` / `Sync to Feishu/Lark`：如果已有绑定，则按设置中的同步策略更新对应远端文档；如果没有绑定，则先发布为新文档
+- `同步到飞书` / `Sync to Feishu/Lark`：没有绑定时创建新文档；绑定有效时更新远端文档；绑定失效时重新创建并更新 URL
 
 同步是从 Obsidian 到飞书 / Lark 的单向同步。本地 Markdown 是源内容，远端文档会被更新为本地内容。
 
