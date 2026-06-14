@@ -287,6 +287,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 		await this.loadSettings();
 		this.syncState = await this.loadLarkSyncState();
 		await this.tryEnsureLarkSyncStateFile();
+		await this.tryRefreshInstalledPrePushHook();
 		this.registerSaveAutoSync();
 		this.register(() => {
 			for (const timer of this.autoSyncTimers.values()) {
@@ -511,15 +512,10 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 			const hooksDirectory = join(gitDirectory, "hooks");
 			const hookPath = join(hooksDirectory, "pre-push");
-			const sourceScript = join(this.getPluginDirectoryPath(), PRE_PUSH_SCRIPT_NAME);
-			const sourceCoreScript = join(this.getPluginDirectoryPath(), PRE_PUSH_CORE_SCRIPT_NAME);
 			const targetScript = join(hooksDirectory, PRE_PUSH_SCRIPT_NAME);
-			const targetCoreScript = join(hooksDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
 			const nodePath = await this.resolveNodePath();
 			await mkdir(hooksDirectory, { recursive: true });
-			await copyFile(sourceScript, targetScript);
-			await copyFile(sourceCoreScript, targetCoreScript);
-			await chmod(targetScript, 0o755);
+			await this.refreshPrePushHookHelpers(hooksDirectory);
 			const backupHookPath = await this.backupExistingPrePushHook(hookPath);
 			await writeFile(hookPath, this.buildPrePushHookScript(targetScript, backupHookPath, nodePath), { mode: 0o755 });
 			await chmod(hookPath, 0o755);
@@ -532,6 +528,41 @@ export default class LarkCliSyncPlugin extends Plugin {
 			new Notice(this.t("noticeGitHookInstallFailed", { message }), 10000);
 			console.error("[Feishu Lark CLI Sync] install pre-push hook failed", error);
 		}
+	}
+
+	private async tryRefreshInstalledPrePushHook(): Promise<void> {
+		try {
+			const vaultPath = this.getVaultBasePath();
+			if (!vaultPath) {
+				return;
+			}
+
+			const hooksDirectory = join(vaultPath, ".git", "hooks");
+			const hookPath = join(hooksDirectory, "pre-push");
+			if (!await this.pathExists(hookPath)) {
+				return;
+			}
+
+			const hookContent = await readFile(hookPath, "utf8");
+			if (!hookContent.includes(PRE_PUSH_HOOK_MARKER)) {
+				return;
+			}
+
+			await this.refreshPrePushHookHelpers(hooksDirectory);
+		} catch (error) {
+			console.warn("[Feishu Lark CLI Sync] failed to refresh pre-push hook helpers", error);
+		}
+	}
+
+	private async refreshPrePushHookHelpers(hooksDirectory: string): Promise<void> {
+		const pluginDirectory = this.getPluginDirectoryPath();
+		const sourceScript = join(pluginDirectory, PRE_PUSH_SCRIPT_NAME);
+		const sourceCoreScript = join(pluginDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
+		const targetScript = join(hooksDirectory, PRE_PUSH_SCRIPT_NAME);
+		const targetCoreScript = join(hooksDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
+		await copyFile(sourceScript, targetScript);
+		await copyFile(sourceCoreScript, targetCoreScript);
+		await chmod(targetScript, 0o755);
 	}
 
 	private getVaultBasePath(): string | null {

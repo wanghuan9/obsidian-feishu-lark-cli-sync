@@ -43,6 +43,14 @@ done
 
 chmod +x "$PLUGIN_DIR/sync-pre-push.mjs"
 
+HOOK_PATH="$VAULT_PATH/.git/hooks/pre-push"
+HOOK_DIR="$VAULT_PATH/.git/hooks"
+if [ -f "$HOOK_PATH" ] && grep -q "Feishu Lark CLI Sync" "$HOOK_PATH"; then
+  cp "$PLUGIN_DIR/sync-pre-push.mjs" "$HOOK_DIR/sync-pre-push.mjs"
+  cp "$PLUGIN_DIR/lark-sync-core.mjs" "$HOOK_DIR/lark-sync-core.mjs"
+  chmod +x "$HOOK_DIR/sync-pre-push.mjs"
+fi
+
 echo "已安装到 / Installed to: $PLUGIN_DIR"
 echo "请在 Obsidian 设置中启用 Feishu Lark CLI Sync。"
 echo "Enable Feishu Lark CLI Sync in Obsidian settings."
