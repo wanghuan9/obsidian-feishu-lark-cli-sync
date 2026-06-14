@@ -160,10 +160,6 @@ export const FRONTMATTER_BINDING_KEYS = [
 
 export function prepareNoteContentForLark(file: NoteFile, content: string, titleSource: TitleSource): string {
 	const title = extractTitle(file, content, titleSource);
-	if (titleSource === "file-name") {
-		return withMarkdownTitle(content, title);
-	}
-
 	if (/^\s*#\s+/m.test(content)) {
 		return content;
 	}

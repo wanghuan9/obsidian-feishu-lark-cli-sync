@@ -60,6 +60,7 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 const FRONTMATTER_REMOTE_ROOT_KEY = "remoteRoot";
 const FRONTMATTER_REMOTE_PARENT_PATH_KEY = "remoteParentPath";
 const MAX_STDERR_LENGTH = 1600;
+const MAX_NOTICE_ERROR_DETAIL_LENGTH = 260;
 const LARK_CLI_COMMAND = "lark-cli";
 const NODE_COMMAND = "node";
 const PRE_PUSH_SCRIPT_NAME = "sync-pre-push.mjs";
@@ -177,7 +178,7 @@ const MESSAGES = {
 	"zh-CN": {
 		commandSyncCurrentNote: "同步到飞书",
 		menuSyncToLark: "同步到飞书",
-		menuPublishFolderToLark: "发布整个目录到飞书",
+		menuPublishFolderToLark: "同步目录到飞书",
 		ribbonSyncCurrentNote: "同步到飞书",
 		noticeNoActiveMarkdownNote: "当前没有打开 Markdown 笔记。",
 		noticeSyncingToLark: "正在同步到飞书...",
@@ -195,6 +196,7 @@ const MESSAGES = {
 		noticeExistingGitHookBackedUp: "检测到已有 pre-push hook，已备份并在新 hook 中继续调用：{path}",
 		noticeAutoSyncFailed: "自动同步失败：{path}\n{message}",
 		errorNoDocumentToken: "lark-cli 没有返回文档 token 或 URL。",
+		errorInvalidDefaultTarget: "默认上传位置无效或当前飞书账号无权访问。\n请检查插件设置中的“默认上传位置”：{target}\n底层原因：{detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
 		settingLanguageName: "语言",
 		settingLanguageDesc: "切换插件设置、菜单和通知的显示语言。",
@@ -232,7 +234,7 @@ const MESSAGES = {
 	en: {
 		commandSyncCurrentNote: "Sync to Feishu/Lark",
 		menuSyncToLark: "Sync to Feishu/Lark",
-		menuPublishFolderToLark: "Publish folder to Feishu/Lark",
+		menuPublishFolderToLark: "Sync folder to Feishu/Lark",
 		ribbonSyncCurrentNote: "Sync to Feishu/Lark",
 		noticeNoActiveMarkdownNote: "No active Markdown note.",
 		noticeSyncingToLark: "Syncing to Lark...",
@@ -250,6 +252,7 @@ const MESSAGES = {
 		noticeExistingGitHookBackedUp: "Existing pre-push hook detected. It was backed up and will still be called by the new hook: {path}",
 		noticeAutoSyncFailed: "Auto sync failed: {path}\n{message}",
 		errorNoDocumentToken: "lark-cli did not return a document token or URL.",
+		errorInvalidDefaultTarget: "Default upload target is invalid or inaccessible.\nCheck the Default target setting: {target}\nCause: {detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
 		settingLanguageName: "Language",
 		settingLanguageDesc: "Switch the display language for settings, menus, and notices.",
@@ -1601,7 +1604,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			};
 		}
 
-		const result = await this.runLarkCli(["drive", "+inspect", "--as", "user", "--url", target, "--json"]);
+		const result = await this.inspectDefaultTarget(target);
 		const kind = target.includes("/drive/folder/") ? "drive" : "wiki";
 		const token = kind === "drive"
 			? result.data?.token || extractDocumentToken(target)
@@ -1611,6 +1614,18 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			token,
 			kind
 		};
+	}
+
+	private async inspectDefaultTarget(target: string): Promise<LarkCommandResult> {
+		try {
+			return await this.runLarkCli(["drive", "+inspect", "--as", "user", "--url", target, "--json"]);
+		} catch (error) {
+			const detail = this.formatNoticeErrorDetail(error);
+			throw new LocalizedSyncError(this.t("errorInvalidDefaultTarget", {
+				target,
+				detail
+			}));
+		}
 	}
 
 	private async resolveParentToken(): Promise<string> {
@@ -1681,7 +1696,36 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			// stderr is often plain text from node or shell.
 		}
 
+		const embeddedJson = this.extractEmbeddedJson(stderr);
+		if (embeddedJson) {
+			try {
+				const parsed = JSON.parse(embeddedJson) as LarkCommandResult;
+				if (parsed.error?.message) {
+					return this.formatLarkError(parsed);
+				}
+			} catch {
+				// Keep the original stderr when the embedded block is not lark-cli JSON.
+			}
+		}
+
 		return stderr.slice(0, MAX_STDERR_LENGTH);
+	}
+
+	private extractEmbeddedJson(text: string): string {
+		const firstBrace = text.indexOf("{");
+		const lastBrace = text.lastIndexOf("}");
+		if (firstBrace < 0 || lastBrace <= firstBrace) {
+			return "";
+		}
+
+		return text.slice(firstBrace, lastBrace + 1);
+	}
+
+	private formatNoticeErrorDetail(error: unknown): string {
+		const message = error instanceof Error ? error.message : String(error);
+		const lines = message.split("\n").map((line) => line.trim()).filter(Boolean);
+		const detail = lines[0] || message;
+		return detail.slice(0, MAX_NOTICE_ERROR_DETAIL_LENGTH);
 	}
 
 	private isRemoteDocumentDeletedError(error: unknown): boolean {
