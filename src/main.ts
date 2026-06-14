@@ -19,20 +19,26 @@ import {
 	createContentHash,
 	createEmptySyncStateFile,
 	createSyncContentSignature,
+	extractDocumentToken,
 	formatSyncFailureMessage,
+	getDocumentStateKey,
+	getDocumentStateKeys,
 	FRONTMATTER_TOKEN_KEY,
 	FRONTMATTER_URL_KEY,
 	isDocumentStateContentEquivalent,
 	isSyncContentSignatureEquivalent,
 	LEGACY_FRONTMATTER_SYNCED_AT_KEY,
 	LarkSyncStateFile,
+	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
 	removeLarkBinding,
 	SyncFailureReason,
 	SyncMode,
 	SyncPlan,
 	SyncStrategy,
-	TitleSource
+	TitleSource,
+	touchDocumentSyncState,
+	trimSyncStateCache
 } from "./lark-sync-core";
 
 const execFileAsync = promisify(execFile);
@@ -47,7 +53,8 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	updateFrontmatter: true,
 	autoSyncMode: "manual",
 	autoSyncDelaySeconds: 15,
-	syncStrategy: "precise"
+	syncStrategy: "precise",
+	stateCacheRetainLimit: 100
 };
 
 const FRONTMATTER_REMOTE_ROOT_KEY = "remoteRoot";
@@ -61,6 +68,7 @@ const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const PRE_PUSH_HOOK_MARKER = "Feishu Lark CLI Sync";
 const AUTO_SYNC_WRITE_IGNORE_MS = 5000;
 const DEFAULT_AUTO_SYNC_DELAY_SECONDS = 15;
+const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
 const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
 const REMOTE_STATE_REFRESH_DELAY_MS = 600;
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
@@ -81,6 +89,7 @@ interface LarkCliSyncSettings {
 	autoSyncMode: AutoSyncMode;
 	autoSyncDelaySeconds: number;
 	syncStrategy: SyncStrategy;
+	stateCacheRetainLimit: number;
 }
 
 interface BoundLarkDocument {
@@ -214,6 +223,8 @@ const MESSAGES = {
 		autoSyncModePrePush: "Git pre-push hook",
 		settingAutoSyncDelayName: "保存后同步延迟",
 		settingAutoSyncDelayDesc: "文件保存后等待多少秒再同步，用于合并连续编辑。",
+		settingStateCacheName: "同步状态缓存",
+		settingStateCacheDesc: "设置最多保留多少篇文档状态；超过保留数的 1.5 倍时自动裁剪旧状态。老文档下次同步会重新建立块映射。",
 		settingInstallPrePushHookName: "安装 Git pre-push hook",
 		settingInstallPrePushHookDesc: "把 hook 安装到当前 Obsidian 仓库的 .git/hooks/pre-push。hook 会读取插件设置，只有选择 Git pre-push hook 时才同步。",
 		installPrePushHookButton: "安装 hook"
@@ -267,6 +278,8 @@ const MESSAGES = {
 		autoSyncModePrePush: "Git pre-push hook",
 		settingAutoSyncDelayName: "Save sync delay",
 		settingAutoSyncDelayDesc: "Seconds to wait after a save before syncing, used to merge continuous edits.",
+		settingStateCacheName: "Sync state cache",
+		settingStateCacheDesc: "Maximum document states to keep. Old states are trimmed after the cache exceeds 1.5x this value. Old documents rebuild block mapping on next sync.",
 		settingInstallPrePushHookName: "Install Git pre-push hook",
 		settingInstallPrePushHookDesc: "Install the hook into .git/hooks/pre-push of the current Obsidian vault. The hook reads plugin settings and syncs only when Git pre-push hook mode is selected.",
 		installPrePushHookButton: "Install hook"
@@ -331,9 +344,17 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		const savedSettings = await this.loadData() as Partial<LarkCliSyncSettings> | null;
+		const savedSettingsWithoutTrimThreshold = {
+			...(savedSettings || {})
+		} as Partial<LarkCliSyncSettings> & { stateCacheTrimThreshold?: unknown };
+		delete savedSettingsWithoutTrimThreshold.stateCacheTrimThreshold;
 		this.settings = {
 			...DEFAULT_SETTINGS,
-			...savedSettings,
+			...savedSettingsWithoutTrimThreshold,
+			stateCacheRetainLimit: this.normalizePositiveInteger(
+				savedSettings?.stateCacheRetainLimit,
+				DEFAULT_STATE_CACHE_RETAIN_LIMIT
+			),
 			folderBindings: {
 				...DEFAULT_SETTINGS.folderBindings,
 				...(savedSettings?.folderBindings || {})
@@ -627,7 +648,9 @@ export default class LarkCliSyncPlugin extends Plugin {
 		const tempPath = `${statePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
 		await mkdir(dirname(statePath), { recursive: true });
 		try {
-			await writeFile(tempPath, JSON.stringify(this.syncState, null, 2), "utf8");
+			const nextState = this.trimSyncStateCacheIfNeeded(this.syncState);
+			await writeFile(tempPath, JSON.stringify(nextState, null, 2), "utf8");
+			this.syncState = nextState;
 			await rename(tempPath, statePath);
 		} catch (error) {
 			await rm(tempPath, { force: true });
@@ -680,6 +703,25 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	private isFileNotFoundError(error: unknown): boolean {
 		return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
+
+	private trimSyncStateCacheIfNeeded(state: LarkSyncStateFile): LarkSyncStateFile {
+		const retainLimit = normalizeStateCacheRetainLimit(
+			this.settings.stateCacheRetainLimit,
+			DEFAULT_STATE_CACHE_RETAIN_LIMIT
+		);
+		return trimSyncStateCache(state, {
+			retainLimit
+		});
+	}
+
+	private normalizePositiveInteger(value: unknown, fallback: number): number {
+		const numericValue = typeof value === "number" ? value : Number.parseInt(String(value || ""), 10);
+		if (!Number.isFinite(numericValue)) {
+			return fallback;
+		}
+
+		return Math.max(1, Math.floor(numericValue));
 	}
 
 	private async backupExistingPrePushHook(hookPath: string): Promise<string> {
@@ -945,6 +987,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			state = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
 			syncDoc = state?.doc || syncDoc;
 		}
+		syncDoc = state?.doc || syncDoc;
 		const plan = await buildSyncPlan({
 			doc: syncDoc,
 			markdown: content,
@@ -987,8 +1030,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private findDocumentState(docs: string[]): LarkSyncStateFile["documents"][string] | undefined {
-		for (const doc of this.uniquePathEntries(docs)) {
-			const state = this.syncState.documents[doc];
+		for (const key of getDocumentStateKeys(docs)) {
+			const state = this.syncState.documents[key];
 			if (state) {
 				return state;
 			}
@@ -1050,10 +1093,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		plan: SyncPlan,
 		extraKeys: string[]
 	): Promise<void> {
-		const keys = this.uniquePathEntries([doc, ...extraKeys, document.token || "", document.url || ""]);
-		for (const key of keys) {
-			await this.saveSyncPlanState(key, plan);
-		}
+		await this.saveSyncPlanState(doc, plan);
 	}
 
 	private async saveSyncPlanState(doc: string, plan: SyncPlan): Promise<void> {
@@ -1065,9 +1105,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			return;
 		}
 
-		this.syncState.documents[doc] = {
-			...plan.nextState,
-			doc
+		const stateKey = getDocumentStateKey(doc);
+		this.syncState.documents[stateKey] = {
+			...touchDocumentSyncState(plan.nextState),
+			doc: stateKey
 		};
 		await this.saveLarkSyncState();
 	}
@@ -1079,13 +1120,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			this.fetchLarkDocumentWithIds(doc)
 		]);
 		const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
-		const documentKeys = this.uniquePathEntries([binding.token, binding.url]);
-		for (const key of documentKeys) {
-			this.syncState.documents[key] = {
-				...state,
-				doc: key
-			};
-		}
+		const stateKey = getDocumentStateKey(state.doc);
+		this.syncState.documents[stateKey] = {
+			...touchDocumentSyncState(state),
+			doc: stateKey
+		};
 		await this.saveLarkSyncState();
 	}
 
@@ -1104,8 +1143,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				this.fetchLarkDocumentMarkdown(doc),
 				this.fetchLarkDocumentWithIds(doc)
 			]);
+			const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
 			const remoteState = await createDocumentSyncStateFromRemote(
-				doc,
+				remoteDoc,
 				remoteMarkdown.content,
 				remoteXml.content,
 				remoteXml.revisionId
@@ -1127,12 +1167,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			return;
 		}
 
-		for (const key of this.uniquePathEntries([doc, ...stateKeys])) {
-			this.syncState.documents[key] = {
-				...state,
-				doc: key
-			};
-		}
+		const stateKey = getDocumentStateKey(doc);
+		this.syncState.documents[stateKey] = {
+			...touchDocumentSyncState(state),
+			doc: stateKey
+		};
 		await this.saveLarkSyncState();
 	}
 
@@ -1144,22 +1183,24 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			this.fetchLarkDocumentMarkdown(doc),
 			this.fetchLarkDocumentWithIds(doc)
 		]);
-		const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
-		if (state.units.length === 0) {
-			return undefined;
-		}
+		const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+		const state = await createDocumentSyncStateFromRemote(
+			remoteDoc,
+			remoteMarkdown.content,
+			remoteXml.content,
+			remoteXml.revisionId
+		);
 
-		for (const key of this.uniquePathEntries([doc, ...stateKeys])) {
-			this.syncState.documents[key] = {
-				...state,
-				doc: key
-			};
-		}
+		const stateKey = getDocumentStateKey(remoteDoc);
+		this.syncState.documents[stateKey] = {
+			...touchDocumentSyncState(state),
+			doc: stateKey
+		};
 		await this.saveLarkSyncState();
 		return state;
 	}
 
-	private async fetchLarkDocumentMarkdown(doc: string): Promise<{ content: string; revisionId?: number }> {
+	private async fetchLarkDocumentMarkdown(doc: string): Promise<{ doc?: string; content: string; revisionId?: number }> {
 		const result = await this.runLarkCli([
 			"docs",
 			"+fetch",
@@ -1174,12 +1215,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			"--json"
 		]);
 		return {
+			doc: result.data?.document?.document_id,
 			content: result.data?.document?.content || "",
 			revisionId: result.data?.document?.revision_id
 		};
 	}
 
-	private async fetchLarkDocumentWithIds(doc: string): Promise<{ content: string; revisionId?: number }> {
+	private async fetchLarkDocumentWithIds(doc: string): Promise<{ doc?: string; content: string; revisionId?: number }> {
 		const result = await this.runLarkCli([
 			"docs",
 			"+fetch",
@@ -1194,6 +1236,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			"--json"
 		]);
 		return {
+			doc: result.data?.document?.document_id,
 			content: result.data?.document?.content || "",
 			revisionId: result.data?.document?.revision_id
 		};
@@ -1334,7 +1377,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private removeSyncStateForBinding(binding: BoundLarkDocument): void {
-		for (const key of this.getBindingAliases(binding)) {
+		this.removeSyncStateForDocuments(this.getBindingAliases(binding));
+	}
+
+	private removeSyncStateForDocuments(docs: string[]): void {
+		const keys = this.uniquePathEntries([...docs, ...getDocumentStateKeys(docs)]);
+		for (const key of keys) {
 			delete this.syncState.documents[key];
 		}
 	}
@@ -1343,7 +1391,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		return this.uniquePathEntries([
 			binding.token,
 			binding.url,
-			binding.url ? this.extractPathToken(binding.url) : ""
+			binding.url ? extractDocumentToken(binding.url) : ""
 		]);
 	}
 
@@ -1556,8 +1604,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const result = await this.runLarkCli(["drive", "+inspect", "--as", "user", "--url", target, "--json"]);
 		const kind = target.includes("/drive/folder/") ? "drive" : "wiki";
 		const token = kind === "drive"
-			? result.data?.token || this.extractPathToken(target)
-			: result.data?.wiki_node?.node_token || result.data?.node?.node_token || result.data?.token || this.extractPathToken(target);
+			? result.data?.token || extractDocumentToken(target)
+			: result.data?.wiki_node?.node_token || result.data?.node?.node_token || result.data?.token || extractDocumentToken(target);
 
 		return {
 			token,
@@ -1579,11 +1627,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const wikiNodeToken = result.data?.wiki_node?.node_token;
 
 		return wikiNodeToken || result.data?.token || target;
-	}
-
-	private extractPathToken(url: string): string {
-		const match = url.match(/\/(?:wiki|folder|docx|doc)\/([^/?#]+)/);
-		return match?.[1] || "";
 	}
 
 	private async runLarkCli(args: string[], options: LarkCommandOptions = {}): Promise<LarkCommandResult> {
@@ -1806,6 +1849,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async writeBinding(file: TFile, binding: BoundLarkDocument): Promise<void> {
+		const previousBinding = this.getBinding(file);
+		if (previousBinding && this.hasBindingChanged(previousBinding, binding)) {
+			this.removeSyncStateForBinding(previousBinding);
+			await this.saveLarkSyncState();
+		}
+
 		this.selfWrittenPaths.set(file.path, Date.now());
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			delete frontmatter.lark_doc;
@@ -1971,6 +2020,20 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 						this.plugin.settings.autoSyncDelaySeconds = Number.isFinite(delay)
 							? Math.max(1, delay)
 							: DEFAULT_SETTINGS.autoSyncDelaySeconds;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName(this.plugin.t("settingStateCacheName"))
+			.setDesc(this.plugin.t("settingStateCacheDesc"))
+			.addText((text) => {
+				text.setPlaceholder(String(DEFAULT_STATE_CACHE_RETAIN_LIMIT))
+					.setValue(String(this.plugin.settings.stateCacheRetainLimit)).onChange(async (value) => {
+						const retainLimit = Number.parseInt(value, 10);
+						this.plugin.settings.stateCacheRetainLimit = Number.isFinite(retainLimit)
+							? Math.max(1, retainLimit)
+							: DEFAULT_STATE_CACHE_RETAIN_LIMIT;
 						await this.plugin.saveSettings();
 					});
 			});

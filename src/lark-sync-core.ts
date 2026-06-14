@@ -26,6 +26,11 @@ export interface LarkSyncStateFile {
 	documents: Record<string, DocumentSyncState>;
 }
 
+export interface TrimSyncStateCacheOptions {
+	retainLimit: number;
+	trimThreshold?: number;
+}
+
 export interface DocumentSyncState {
 	doc: string;
 	revisionId?: number;
@@ -190,6 +195,101 @@ export function readBindingFromMarkdown(content: string): LarkDocumentBinding | 
 	return { token, url };
 }
 
+export function extractDocumentToken(doc: string): string {
+	if (!doc) {
+		return "";
+	}
+
+	try {
+		const parsedUrl = new URL(doc);
+		const match = parsedUrl.pathname.match(/\/(?:wiki|folder|docx|doc)\/([^/?#]+)/);
+		return match?.[1] || "";
+	} catch {
+		const match = doc.match(/\/(?:wiki|folder|docx|doc)\/([^/?#]+)/);
+		return match?.[1] || "";
+	}
+}
+
+export function getDocumentStateKey(doc: string): string {
+	const normalizedDoc = doc.trim();
+	return extractDocumentToken(normalizedDoc) || normalizedDoc;
+}
+
+export function getDocumentStateKeys(docs: string[]): string[] {
+	const seen = new Set<string>();
+	const keys: string[] = [];
+	for (const doc of docs) {
+		const key = getDocumentStateKey(doc || "");
+		if (!key || seen.has(key)) {
+			continue;
+		}
+
+		seen.add(key);
+		keys.push(key);
+	}
+
+	return keys;
+}
+
+export function trimSyncStateCache(
+	state: LarkSyncStateFile,
+	options: TrimSyncStateCacheOptions
+): LarkSyncStateFile {
+	const retainLimit = normalizeStateCacheRetainLimit(options.retainLimit);
+	const trimThreshold = normalizeStateCacheTrimThreshold(retainLimit, options.trimThreshold);
+	if (trimThreshold <= retainLimit) {
+		return state;
+	}
+
+	const keys = Object.keys(state.documents);
+	if (keys.length <= trimThreshold) {
+		return state;
+	}
+
+	const entries: Array<[string, DocumentSyncState]> = [];
+	for (const key of keys) {
+		const documentState = state.documents[key];
+		if (documentState) {
+			entries.push([key, documentState]);
+		}
+	}
+	const sortedEntries = entries.sort(([, left], [, right]) => {
+		return getDocumentStateUpdatedAt(left) - getDocumentStateUpdatedAt(right);
+	});
+	const documents = Object.fromEntries(sortedEntries.slice(entries.length - retainLimit));
+	return {
+		version: 1,
+		documents
+	};
+}
+
+export function normalizeStateCacheRetainLimit(value: unknown, fallback = 100): number {
+	const numericValue = typeof value === "number" ? value : Number.parseInt(String(value || ""), 10);
+	if (!Number.isFinite(numericValue)) {
+		return fallback;
+	}
+
+	return Math.max(1, Math.floor(numericValue));
+}
+
+export function normalizeStateCacheTrimThreshold(retainLimit: number, trimThreshold?: unknown): number {
+	if (trimThreshold !== undefined) {
+		const numericValue = typeof trimThreshold === "number" ? trimThreshold : Number.parseInt(String(trimThreshold || ""), 10);
+		if (Number.isFinite(numericValue)) {
+			return Math.max(retainLimit + 1, Math.floor(numericValue));
+		}
+	}
+
+	return Math.max(retainLimit + 1, Math.ceil(retainLimit * 1.5));
+}
+
+export function touchDocumentSyncState(state: DocumentSyncState): DocumentSyncState {
+	return {
+		...state,
+		updatedAt: new Date().toISOString()
+	};
+}
+
 export function removeLarkBinding(content: string): string {
 	if (!content.startsWith("---")) {
 		return content;
@@ -261,7 +361,6 @@ export function buildUpdateCommandArgs(command: LarkUpdateCommand): string[] {
 
 export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan> {
 	const contentHash = await createContentHash(input.markdown);
-	const units = await createMarkdownSyncUnits(input.markdown);
 	if (input.strategy === "overwrite") {
 		return {
 			mode: "overwrite",
@@ -278,7 +377,7 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		};
 	}
 
-	if (input.state && input.state.doc !== input.doc) {
+	if (input.state && getDocumentStateKey(input.state.doc) !== getDocumentStateKey(input.doc)) {
 		return {
 			mode: "blocked",
 			commands: [],
@@ -296,6 +395,7 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		};
 	}
 
+	const units = await createMarkdownSyncUnits(input.markdown);
 	if (!input.state || input.state.units.length === 0) {
 		return {
 			mode: "blocked",
@@ -474,6 +574,11 @@ function areSyncContentUnitsEquivalent(
 
 		return unit.kind === expectedUnit.kind && unit.hash === expectedUnit.hash;
 	});
+}
+
+function getDocumentStateUpdatedAt(state: DocumentSyncState): number {
+	const updatedAt = Date.parse(state.updatedAt);
+	return Number.isFinite(updatedAt) ? updatedAt : 0;
 }
 
 export function createEmptySyncStateFile(): LarkSyncStateFile {
@@ -737,7 +842,7 @@ async function buildPreciseMixedInsertReplacePlan(
 
 	const previousUnits = input.state.units;
 	const matches = findMappedContentMatches(previousUnits, units);
-	if (matches.length === 0 || matches.length === previousUnits.length) {
+	if (matches.length === 0) {
 		return null;
 	}
 
@@ -754,8 +859,9 @@ async function buildPreciseMixedInsertReplacePlan(
 		}
 
 		commands.push(...gapCommands);
-		if (match.previousIndex < previousUnits.length) {
-			anchorBlockId = previousUnits[match.previousIndex]?.blockId || "";
+		const matchedBlockId = previousUnits[match.previousIndex]?.blockId;
+		if (matchedBlockId) {
+			anchorBlockId = matchedBlockId;
 		}
 		previousCursor = match.previousIndex + 1;
 		nextCursor = match.nextIndex + 1;
@@ -786,7 +892,7 @@ function findMappedContentMatches(
 				continue;
 			}
 
-			row[nextIndex] = areEquivalentMappedUnits(previousUnits[previousIndex], nextUnits[nextIndex])
+			row[nextIndex] = areEquivalentContentUnits(previousUnits[previousIndex], nextUnits[nextIndex])
 				? readMatrixValue(lengths, previousIndex + 1, nextIndex + 1) + 1
 				: Math.max(
 					readMatrixValue(lengths, previousIndex + 1, nextIndex),
@@ -799,7 +905,7 @@ function findMappedContentMatches(
 	let previousIndex = 0;
 	let nextIndex = 0;
 	while (previousIndex < previousUnits.length && nextIndex < nextUnits.length) {
-		if (areEquivalentMappedUnits(previousUnits[previousIndex], nextUnits[nextIndex])) {
+		if (areEquivalentContentUnits(previousUnits[previousIndex], nextUnits[nextIndex])) {
 			matches.push({ previousIndex, nextIndex });
 			previousIndex += 1;
 			nextIndex += 1;
@@ -843,7 +949,7 @@ function buildMixedGapCommands(
 	const replaceUnits = nextGap.slice(0, replaceCount);
 	const replacedPreviousUnits = previousGap.slice(0, replaceCount);
 	if (!replacedPreviousUnits.every((unit, index) => unit.blockId && replaceUnits[index]?.kind === unit.kind)) {
-		return null;
+		return buildMixedUnalignedGapCommands(doc, contentFileName, previousGap, nextGap, anchorBlockId);
 	}
 
 	const commands: LarkUpdateCommand[] = [];
@@ -873,6 +979,92 @@ function buildMixedGapCommands(
 	const insertAnchorBlockId = previousGap[previousGap.length - 1]?.blockId || "";
 	const insertCommands = buildInsertAfterCommands(doc, contentFileName, insertedUnits, insertAnchorBlockId);
 	return insertCommands ? [...commands, ...insertCommands] : null;
+}
+
+function buildMixedUnalignedGapCommands(
+	doc: string,
+	contentFileName: string,
+	previousGap: SyncUnitState[],
+	nextGap: MarkdownSyncUnit[],
+	anchorBlockId: string
+): LarkUpdateCommand[] | null {
+	const matches = findGapKindMatches(previousGap, nextGap);
+	if (matches.length === 0) {
+		return null;
+	}
+
+	const commands: LarkUpdateCommand[] = [];
+	let previousCursor = 0;
+	let nextCursor = 0;
+	let currentAnchorBlockId = anchorBlockId;
+	for (const match of matches) {
+		const deleteCommands = buildDeleteCommands(doc, previousGap.slice(previousCursor, match.previousIndex));
+		if (!deleteCommands) {
+			return null;
+		}
+
+		commands.push(...deleteCommands);
+		const insertCommands = buildInsertAfterCommands(
+			doc,
+			contentFileName,
+			nextGap.slice(nextCursor, match.nextIndex),
+			currentAnchorBlockId
+		);
+		if (!insertCommands) {
+			return null;
+		}
+
+		commands.push(...insertCommands);
+		const previousUnit = previousGap[match.previousIndex];
+		const nextUnit = nextGap[match.nextIndex];
+		if (!previousUnit?.blockId || !nextUnit) {
+			return null;
+		}
+
+		if (previousUnit.hash !== nextUnit.hash) {
+			commands.push({
+				doc,
+				command: "block_replace",
+				docFormat: "markdown",
+				blockId: previousUnit.blockId,
+				contentFileName,
+				content: nextUnit.content
+			});
+		}
+
+		currentAnchorBlockId = previousUnit.blockId;
+		previousCursor = match.previousIndex + 1;
+		nextCursor = match.nextIndex + 1;
+	}
+
+	const deleteCommands = buildDeleteCommands(doc, previousGap.slice(previousCursor));
+	if (!deleteCommands) {
+		return null;
+	}
+
+	commands.push(...deleteCommands);
+	const insertCommands = buildInsertAfterCommands(doc, contentFileName, nextGap.slice(nextCursor), currentAnchorBlockId);
+	return insertCommands ? [...commands, ...insertCommands] : null;
+}
+
+function findGapKindMatches(
+	previousGap: SyncUnitState[],
+	nextGap: MarkdownSyncUnit[]
+): Array<{ previousIndex: number; nextIndex: number }> {
+	const matches: Array<{ previousIndex: number; nextIndex: number }> = [];
+	const usedNextIndexes = new Set<number>();
+	for (let previousIndex = 0; previousIndex < previousGap.length; previousIndex += 1) {
+		const previousUnit = previousGap[previousIndex];
+		const nextIndex = nextGap.findIndex((nextUnit, candidateIndex) => {
+			return !usedNextIndexes.has(candidateIndex) && nextUnit.kind === previousUnit?.kind;
+		});
+		if (nextIndex >= 0) {
+			usedNextIndexes.add(nextIndex);
+			matches.push({ previousIndex, nextIndex });
+		}
+	}
+
+	return matches;
 }
 
 function buildDeleteCommands(doc: string, deletedUnits: SyncUnitState[]): LarkUpdateCommand[] | null {
@@ -979,6 +1171,16 @@ function areEquivalentMappedUnits(
 		&& previousUnit?.kind === nextUnit?.kind
 		&& previousUnit?.hash === nextUnit?.hash
 		&& Boolean(previousUnit?.blockId);
+}
+
+function areEquivalentContentUnits(
+	previousUnit: SyncUnitState | undefined,
+	nextUnit: MarkdownSyncUnit | undefined
+): boolean {
+	return Boolean(previousUnit)
+		&& Boolean(nextUnit)
+		&& previousUnit?.kind === nextUnit?.kind
+		&& previousUnit?.hash === nextUnit?.hash;
 }
 
 async function createMarkdownSyncUnits(markdown: string): Promise<MarkdownSyncUnit[]> {

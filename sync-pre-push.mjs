@@ -12,12 +12,17 @@ import {
 	createContentHash,
 	createEmptySyncStateFile,
 	createSyncContentSignature,
+	getDocumentStateKey,
+	getDocumentStateKeys,
 	formatSyncFailureMessage,
 	isDocumentStateContentEquivalent,
 	isSyncContentSignatureEquivalent,
+	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
 	readBindingFromMarkdown,
-	removeLarkBinding
+	removeLarkBinding,
+	touchDocumentSyncState,
+	trimSyncStateCache
 } from "./lark-sync-core.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -27,6 +32,7 @@ const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const ZERO_REF = "0000000000000000000000000000000000000000";
 const MAX_STDERR_LENGTH = 1600;
 const MAX_PARALLEL_SYNCS = 4;
+const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
 const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
 const REMOTE_STATE_REFRESH_DELAY_MS = 600;
 const FALLBACK_PATH_ENTRIES = [
@@ -58,7 +64,7 @@ async function main() {
 			await syncMarkdownTask(task, settings, syncState);
 		}
 	});
-	await writeSyncState(repoRoot.trim(), syncState);
+	await writeSyncState(repoRoot.trim(), syncState, settings);
 	if (failure) {
 		throw failure;
 	}
@@ -127,7 +133,7 @@ async function collectSyncTasks(repoRoot, files) {
 			content,
 			binding,
 			doc: binding.token || binding.url,
-			docAliases: getDocumentAliases(binding)
+			stateKeys: getDocumentStateKeys([binding.token, binding.url])
 		};
 	}));
 
@@ -147,34 +153,14 @@ function groupTasksByDoc(tasks, syncState) {
 }
 
 function resolveDocumentGroupKey(task, syncState) {
-	for (const alias of task.docAliases) {
-		const state = syncState.documents[alias];
+	for (const key of task.stateKeys) {
+		const state = syncState.documents[key];
 		if (state?.doc) {
 			return state.doc;
 		}
 	}
 
-	return task.docAliases[0] || task.doc;
-}
-
-function getDocumentAliases(binding) {
-	const aliases = [binding.token, extractDocTokenFromUrl(binding.url), binding.url];
-	return uniquePathEntries(aliases);
-}
-
-function extractDocTokenFromUrl(url) {
-	if (!url) {
-		return "";
-	}
-
-	try {
-		const parsedUrl = new URL(url);
-		const match = parsedUrl.pathname.match(/\/(?:wiki|folder|docx|doc)\/([^/?#]+)/);
-		return match?.[1] || "";
-	} catch {
-		const match = url.match(/\/(?:wiki|folder|docx|doc)\/([^/?#]+)/);
-		return match?.[1] || "";
-	}
+	return getDocumentStateKey(task.doc);
 }
 
 async function syncMarkdownTask(task, settings, syncState) {
@@ -182,10 +168,11 @@ async function syncMarkdownTask(task, settings, syncState) {
 		const file = { basename: basename(task.filePath, ".md") };
 		const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(task.content), settings.titleSource);
 		const strategy = readSyncStrategy(settings);
-		let state = findDocumentState(syncState, task.docAliases);
-		const syncDoc = state?.doc || task.doc;
+		let state = findDocumentState(syncState, task.stateKeys);
+		let syncDoc = state?.doc || task.doc;
 		if (strategy === "precise" && (!state || state.units.length === 0)) {
-			state = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, task.docAliases);
+			state = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, task.stateKeys);
+			syncDoc = state?.doc || syncDoc;
 		}
 		const plan = await buildSyncPlan({
 			doc: syncDoc,
@@ -194,7 +181,7 @@ async function syncMarkdownTask(task, settings, syncState) {
 			strategy,
 			state
 		});
-		const stateKeys = task.docAliases;
+		const stateKeys = task.stateKeys;
 		if (strategy === "precise" && plan.mode === "blocked") {
 			const refreshedState = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, stateKeys);
 			if (refreshedState) {
@@ -286,8 +273,8 @@ class PrePushSyncError extends Error {
 }
 
 function findDocumentState(syncState, aliases) {
-	for (const alias of aliases) {
-		const state = syncState.documents[alias];
+	for (const key of getDocumentStateKeys(aliases)) {
+		const state = syncState.documents[key];
 		if (state) {
 			return state;
 		}
@@ -301,9 +288,11 @@ function savePlanState(syncState, docs, plan) {
 		return;
 	}
 
-	for (const doc of uniquePathEntries(docs)) {
-		syncState.documents[doc] = plan.nextState;
-	}
+	const stateKey = getDocumentStateKey(plan.nextState.doc || docs[0] || "");
+	syncState.documents[stateKey] = {
+		...touchDocumentSyncState(plan.nextState),
+		doc: stateKey
+	};
 }
 
 async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedMarkdown, path) {
@@ -316,8 +305,9 @@ async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedM
 			fetchLarkDocumentMarkdown(settings, doc),
 			fetchLarkDocumentWithIds(settings, doc)
 		]);
+		const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
 		const remoteState = await createDocumentSyncStateFromRemote(
-			doc,
+			remoteDoc,
 			remoteMarkdown.content,
 			remoteXml.content,
 			remoteXml.revisionId
@@ -341,12 +331,11 @@ async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedM
 		}));
 	}
 
-	for (const key of uniquePathEntries([doc, ...docs])) {
-		syncState.documents[key] = {
-			...state,
-			doc: key
-		};
-	}
+	const stateKey = getDocumentStateKey(state.doc);
+	syncState.documents[stateKey] = {
+		...touchDocumentSyncState(state),
+		doc: stateKey
+	};
 }
 
 async function sleep(ms) {
@@ -360,17 +349,19 @@ async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs) {
 		fetchLarkDocumentMarkdown(settings, doc),
 		fetchLarkDocumentWithIds(settings, doc)
 	]);
-	const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
-	if (state.units.length === 0) {
-		return undefined;
-	}
+	const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+	const state = await createDocumentSyncStateFromRemote(
+		remoteDoc,
+		remoteMarkdown.content,
+		remoteXml.content,
+		remoteXml.revisionId
+	);
 
-	for (const key of uniquePathEntries([doc, ...docs])) {
-		syncState.documents[key] = {
-			...state,
-			doc: key
-		};
-	}
+	const stateKey = getDocumentStateKey(remoteDoc);
+	syncState.documents[stateKey] = {
+		...touchDocumentSyncState(state),
+		doc: stateKey
+	};
 
 	return state;
 }
@@ -390,6 +381,7 @@ async function fetchLarkDocumentMarkdown(settings, doc) {
 		"--json"
 	]);
 	return {
+		doc: result.data?.document?.document_id,
 		content: result.data?.document?.content || "",
 		revisionId: result.data?.document?.revision_id
 	};
@@ -410,6 +402,7 @@ async function fetchLarkDocumentWithIds(settings, doc) {
 		"--json"
 	]);
 	return {
+		doc: result.data?.document?.document_id,
 		content: result.data?.document?.content || "",
 		revisionId: result.data?.document?.revision_id
 	};
@@ -517,12 +510,15 @@ async function readSyncState(repoRoot) {
 	return createEmptySyncStateFile();
 }
 
-async function writeSyncState(repoRoot, syncState) {
+async function writeSyncState(repoRoot, syncState, settings) {
 	const statePath = getSyncStatePath(repoRoot);
 	const tempPath = `${statePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
 	await mkdir(dirname(statePath), { recursive: true });
 	try {
-		await writeFile(tempPath, JSON.stringify(syncState, null, 2), "utf8");
+		const nextState = trimSyncStateCache(syncState, {
+			retainLimit: normalizeStateCacheRetainLimit(settings.stateCacheRetainLimit, DEFAULT_STATE_CACHE_RETAIN_LIMIT)
+		});
+		await writeFile(tempPath, JSON.stringify(nextState, null, 2), "utf8");
 		await rename(tempPath, statePath);
 	} catch (error) {
 		await rm(tempPath, { force: true });

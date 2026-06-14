@@ -18,11 +18,17 @@ const {
 	createContentHash,
 	createEmptySyncStateFile,
 	createSyncContentSignature,
+	extractDocumentToken,
 	formatSyncFailureMessage,
+	getDocumentStateKey,
+	getDocumentStateKeys,
 	isDocumentStateContentEquivalent,
+	normalizeStateCacheRetainLimit,
+	normalizeStateCacheTrimThreshold,
 	prepareNoteContentForLark,
 	readBindingFromMarkdown,
-	removeLarkBinding
+	removeLarkBinding,
+	trimSyncStateCache
 } = await import("./.tmp-lark-sync-core-test.mjs");
 
 const markdown = `---
@@ -103,6 +109,43 @@ assert.deepEqual(createEmptySyncStateFile(), {
 	version: 1,
 	documents: {}
 });
+
+assert.equal(extractDocumentToken("https://example.feishu.cn/docx/doc-token?from=copy"), "doc-token");
+assert.equal(getDocumentStateKey("https://example.feishu.cn/docx/doc-token"), "doc-token");
+assert.deepEqual(getDocumentStateKeys(["doc-token", "https://example.feishu.cn/docx/doc-token", ""]), ["doc-token"]);
+assert.equal(normalizeStateCacheRetainLimit("10"), 10);
+assert.equal(normalizeStateCacheRetainLimit("bad", 20), 20);
+assert.equal(normalizeStateCacheTrimThreshold(100), 150);
+assert.equal(normalizeStateCacheTrimThreshold(10), 15);
+assert.equal(normalizeStateCacheTrimThreshold(3), 5);
+const oversizedState = {
+	version: 1,
+	documents: Object.fromEntries(Array.from({ length: 151 }, (_, index) => {
+		const key = `doc-${String(index).padStart(3, "0")}`;
+		return [key, {
+			doc: key,
+			contentHash: `hash-${index}`,
+			units: [],
+			updatedAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString()
+		}];
+	}))
+};
+const trimmedState = trimSyncStateCache(oversizedState, {
+	retainLimit: 100,
+	trimThreshold: 150
+});
+assert.equal(Object.keys(trimmedState.documents).length, 100);
+assert.equal(trimmedState.documents["doc-050"], undefined);
+assert.ok(trimmedState.documents["doc-051"]);
+assert.ok(trimmedState.documents["doc-150"]);
+assert.equal(trimSyncStateCache(trimmedState, {
+	retainLimit: 100,
+	trimThreshold: 150
+}), trimmedState);
+const smallTrimmedState = trimSyncStateCache(oversizedState, {
+	retainLimit: 3
+});
+assert.deepEqual(Object.keys(smallTrimmedState.documents), ["doc-148", "doc-149", "doc-150"]);
 
 const contentHash = await createContentHash("# Note\n\nBody");
 assert.equal(contentHash, await createContentHash("# Note\n\nBody"));
@@ -239,6 +282,25 @@ assert.deepEqual(await buildSyncPlan({
 	commands: [],
 	contentHash,
 	nextState: state
+});
+
+assert.deepEqual(await buildSyncPlan({
+	doc: "doc-token",
+	markdown,
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: {
+		...state,
+		contentHash: await createContentHash(markdown)
+	}
+}), {
+	mode: "skipped",
+	commands: [],
+	contentHash: await createContentHash(markdown),
+	nextState: {
+		...state,
+		contentHash: await createContentHash(markdown)
+	}
 });
 
 const mismatchedStatePlan = await buildSyncPlan({
@@ -465,6 +527,137 @@ assert.deepEqual(leadingRestorePlan.commands, [{
 	blockId: "doc-title",
 	contentFileName: "sync.md",
 	content: "Inserted"
+}]);
+
+const rebuiltInsertState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# tasks-main\n\n## 实施任务清单（主功能）\n\n| 由 spec.md 6.2-6.5 章节生成 |\n| --- |\n| 分 6 批提交，每批是一个独立 review 单元 |\n| 核心原则: 自底向上 |\n\n## 分批总览\n\n| 批次 | 主题 |\n| --- | --- |\n| 1 | A |",
+	"<title id=\"doc-title\">tasks-main</title><h2 id=\"blk-1\">实施任务清单（主功能）</h2><table id=\"blk-2\"><tr><td>由 spec.md 6.2-6.5 章节生成</td></tr><tr><td>分 6 批提交，每批是一个独立 review 单元</td></tr><tr><td>核心原则: 自底向上</td></tr></table><h2 id=\"blk-3\">分批总览</h2><table id=\"blk-4\"><tr><th>批次</th><th>主题</th></tr><tr><td>1</td><td>A</td></tr></table>",
+	15
+);
+const rebuiltInsertPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# tasks-main\n\n## 实施任务清单（主功能）\n\n| 由 spec.md 6.2-6.5 章节生成 |\n| --- |\n| 分 6 批提交，每批是一个独立 review 单元 |\n| 核心原则: 自底向上 |\n\n## 分批总览\n\n212122\n\n| 批次 | 主题 |\n| --- | --- |\n| 1 | A |",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: rebuiltInsertState
+});
+assert.equal(rebuiltInsertPlan.mode, "precise");
+assert.deepEqual(rebuiltInsertPlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "blk-3",
+	contentFileName: "sync.md",
+	content: "212122"
+}]);
+
+const rebuiltReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# tasks-main\n\n## 实施任务清单（主功能）\n\n| 由 spec.md 6.2-6.5 章节生成 |\n| --- |\n| 分 6 批提交，每批是一个独立 review 单元 |\n| 核心原则: 自底向上 |\n\n## 分批总览更新\n\n| 批次 | 主题 |\n| --- | --- |\n| 1 | A |",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: rebuiltInsertState
+});
+assert.equal(rebuiltReplacePlan.mode, "precise");
+assert.deepEqual(rebuiltReplacePlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "markdown",
+	blockId: "blk-3",
+	contentFileName: "sync.md",
+	content: "## 分批总览更新"
+}]);
+
+const rebuiltDeletePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# tasks-main\n\n## 实施任务清单（主功能）\n\n| 由 spec.md 6.2-6.5 章节生成 |\n| --- |\n| 分 6 批提交，每批是一个独立 review 单元 |\n| 核心原则: 自底向上 |\n\n| 批次 | 主题 |\n| --- | --- |\n| 1 | A |",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: rebuiltInsertState
+});
+assert.equal(rebuiltDeletePlan.mode, "precise");
+assert.deepEqual(rebuiltDeletePlan.commands, [{
+	doc: "doc-token",
+	command: "block_delete",
+	blockId: "blk-3"
+}]);
+
+const rebuiltInsertReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# tasks-main\n\n## 实施任务清单（主功能）\n\n| 由 spec.md 6.2-6.5 章节生成 |\n| --- |\n| 分 6 批提交，每批是一个独立 review 单元 |\n| 核心原则: 自底向上 |\n\n## 分批总览更新\n\n212122\n\n| 批次 | 主题 |\n| --- | --- |\n| 1 | A |",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: rebuiltInsertState
+});
+assert.equal(rebuiltInsertReplacePlan.mode, "precise");
+assert.deepEqual(rebuiltInsertReplacePlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_replace",
+		docFormat: "markdown",
+		blockId: "blk-3",
+		contentFileName: "sync.md",
+		content: "## 分批总览更新"
+	},
+	{
+		doc: "doc-token",
+		command: "block_insert_after",
+		docFormat: "markdown",
+		blockId: "blk-3",
+		contentFileName: "sync.md",
+		content: "212122"
+	}
+]);
+
+const rebuiltDeleteReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# tasks-main\n\n## 实施任务清单（主功能）\n\n| 由 spec.md 6.2-6.5 章节生成 |\n| --- |\n| 分 6 批提交，每批是一个独立 review 单元 |\n| 核心原则: 自底向上 |\n\n| 批次 | 主题 |\n| --- | --- |\n| 1 | B |",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: rebuiltInsertState
+});
+assert.equal(rebuiltDeleteReplacePlan.mode, "precise");
+assert.deepEqual(rebuiltDeleteReplacePlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_delete",
+		blockId: "blk-3"
+	},
+	{
+		doc: "doc-token",
+		command: "block_replace",
+		docFormat: "markdown",
+		blockId: "blk-4",
+		contentFileName: "sync.md",
+		content: "| 批次 | 主题 |\n| --- | --- |\n| 1 | B |"
+	}
+]);
+
+const rebuiltTasksBackendState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# 实施任务清单（PC 后台接口）\n\n> 由 spec.md 04-api.md 第四节生成\n> 核心原则: jdx-titans 作为数据 owner 提供后台查询接口，pjt-partner-admin 对前端暴露统一入口并做模式分发\n\n## 依赖关系\n\n```\nBatch 1（模型基础层） ← Task 7.1, 7.3 依赖\nTask 7.1 (jdx-titans 后台 DTO) ← Task 7.2 依赖\n```\n\n## 变更影响概览\n\n### 文件变更清单\n\n| 文件 | 操作 | 涉及任务 | 说明 |\n| --- | --- | --- | --- |\n| jdx-titans-model/.../BackendAccountOptionReq.java | 新建 | Task 7.1 | 后台候选查询请求 |",
+	"<title id=\"doc-title\">实施任务清单（PC 后台接口）</title><blockquote id=\"blk-1\"><p>由 spec.md 04-api.md 第四节生成</p><p>核心原则: jdx-titans 作为数据 owner 提供后台查询接口，pjt-partner-admin 对前端暴露统一入口并做模式分发</p></blockquote><h2 id=\"blk-2\">依赖关系</h2><pre id=\"blk-3\"><code>Batch 1（模型基础层） ← Task 7.1, 7.3 依赖\nTask 7.1 (jdx-titans 后台 DTO) ← Task 7.2 依赖</code></pre><h2 id=\"blk-4\">变更影响概览</h2><p id=\"blk-extra\">远端结构化占位</p><h3 id=\"blk-5\">文件变更清单</h3><table id=\"blk-6\"><tr><th>文件</th><th>操作</th><th>涉及任务</th><th>说明</th></tr><tr><td>jdx-titans-model/.../BackendAccountOptionReq.java</td><td>新建</td><td>Task 7.1</td><td>后台候选查询请求</td></tr></table>",
+	16
+);
+assert.ok(rebuiltTasksBackendState.units.some((unit) => {
+	return !unit.blockId;
+}));
+const rebuiltTasksBackendInsertPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# 实施任务清单（PC 后台接口）\n\n> 由 spec.md 04-api.md 第四节生成\n> 核心原则: jdx-titans 作为数据 owner 提供后台查询接口，pjt-partner-admin 对前端暴露统一入口并做模式分发\n\n## 依赖关系\n\n```\nBatch 1（模型基础层） ← Task 7.1, 7.3 依赖\nTask 7.1 (jdx-titans 后台 DTO) ← Task 7.2 依赖\n```\n\n## 变更影响概览\n212dsa\n\n### 文件变更清单\n\n| 文件 | 操作 | 涉及任务 | 说明 |\n| --- | --- | --- | --- |\n| jdx-titans-model/.../BackendAccountOptionReq.java | 新建 | Task 7.1 | 后台候选查询请求 |",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: rebuiltTasksBackendState
+});
+assert.equal(rebuiltTasksBackendInsertPlan.mode, "precise");
+assert.deepEqual(rebuiltTasksBackendInsertPlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "blk-4",
+	contentFileName: "sync.md",
+	content: "212dsa"
 }]);
 
 assert.equal(
