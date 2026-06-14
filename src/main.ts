@@ -279,6 +279,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 	settings!: LarkCliSyncSettings;
 	private readonly autoSyncTimers = new Map<string, number>();
 	private readonly autoSyncRunningPaths = new Set<string>();
+	private readonly autoSyncPendingPaths = new Set<string>();
 	private readonly selfWrittenPaths = new Map<string, number>();
 	private syncState: LarkSyncStateFile = createEmptySyncStateFile();
 
@@ -415,7 +416,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 			stateKeys: [binding.token, binding.url]
 		});
 
-		if (options.updateFrontmatter || this.hasBindingChanged(binding, nextBinding)) {
+		if (this.shouldWriteBinding(binding, nextBinding, options.updateFrontmatter)) {
 			await this.writeBinding(file, nextBinding);
 		}
 
@@ -431,12 +432,17 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	private queueSaveAutoSync(file: TFile): void {
-		if (!this.getBinding(file)) {
+		const selfWrittenAt = this.selfWrittenPaths.get(file.path);
+		if (selfWrittenAt && Date.now() - selfWrittenAt < AUTO_SYNC_WRITE_IGNORE_MS) {
 			return;
 		}
 
-		const selfWrittenAt = this.selfWrittenPaths.get(file.path);
-		if (selfWrittenAt && Date.now() - selfWrittenAt < AUTO_SYNC_WRITE_IGNORE_MS) {
+		if (this.autoSyncRunningPaths.has(file.path)) {
+			this.autoSyncPendingPaths.add(file.path);
+			return;
+		}
+
+		if (!this.getBinding(file)) {
 			return;
 		}
 
@@ -455,11 +461,12 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	private async runSaveAutoSync(file: TFile): Promise<void> {
 		if (this.autoSyncRunningPaths.has(file.path)) {
-			this.queueSaveAutoSync(file);
+			this.autoSyncPendingPaths.add(file.path);
 			return;
 		}
 
 		this.autoSyncRunningPaths.add(file.path);
+		this.autoSyncPendingPaths.delete(file.path);
 		try {
 			await this.syncFileInternal(file, {
 				allowCreate: false,
@@ -475,6 +482,9 @@ export default class LarkCliSyncPlugin extends Plugin {
 			console.error("[Feishu Lark CLI Sync] auto sync failed", error);
 		} finally {
 			this.autoSyncRunningPaths.delete(file.path);
+			if (this.autoSyncPendingPaths.delete(file.path)) {
+				this.queueSaveAutoSync(file);
+			}
 		}
 	}
 
@@ -736,7 +746,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					isNewDocument: !binding || nextBinding.token !== binding.token || nextBinding.url !== binding.url
 				});
 
-				if (this.settings.updateFrontmatter || this.hasBindingChanged(binding, nextBindingWithParent)) {
+				if (this.shouldWriteBinding(binding, nextBindingWithParent, this.settings.updateFrontmatter)) {
 					await this.writeBinding(file, nextBindingWithParent);
 				}
 			}
@@ -809,7 +819,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				return true;
 			}
 
-			if (this.settings.updateFrontmatter) {
+			if (this.shouldWriteBinding(entry.binding, nextBindingWithParent, this.settings.updateFrontmatter)) {
 				await this.writeBinding(entry.file, nextBindingWithParent);
 			}
 
@@ -1270,6 +1280,26 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private hasBindingChanged(previous: BoundLarkDocument | null | undefined, next: BoundLarkDocument): boolean {
 		return Boolean(previous)
 			&& (previous?.token !== next.token || previous.url !== next.url);
+	}
+
+	private shouldWriteBinding(
+		previous: BoundLarkDocument | null | undefined,
+		next: BoundLarkDocument,
+		updateFrontmatter: boolean
+	): boolean {
+		if (this.hasBindingChanged(previous, next)) {
+			return true;
+		}
+
+		if (!updateFrontmatter) {
+			return false;
+		}
+
+		return !previous
+			|| previous.url !== next.url
+			|| Boolean(previous.token)
+			|| previous.remoteRoot !== next.remoteRoot
+			|| previous.remoteParentPath !== next.remoteParentPath;
 	}
 
 	private removeSyncStateForBinding(binding: BoundLarkDocument): void {
