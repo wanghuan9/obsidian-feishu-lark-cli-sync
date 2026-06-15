@@ -2389,7 +2389,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl("h2", { text: this.plugin.t("settingsTitle") });
+		new Setting(containerEl).setName(this.plugin.t("settingsTitle")).setHeading();
 
 		const generalSectionEl = this.createSection(containerEl, "settingsSectionGeneral");
 		new Setting(generalSectionEl)
@@ -2528,19 +2528,19 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 
 	private createSection(containerEl: HTMLElement, titleKey: MessageKey): HTMLElement {
 		const sectionEl = containerEl.createDiv({ cls: "feishu-lark-settings-section" });
-		sectionEl.createEl("h3", {
-			cls: "feishu-lark-settings-section-title",
-			text: this.plugin.t(titleKey)
-		});
+		new Setting(sectionEl).setName(this.plugin.t(titleKey)).setHeading();
 		return sectionEl;
 	}
 
 	private renderPrePushHookStatus(setting: Setting): void {
-		const statusEl = setting.descEl.createDiv({ text: this.plugin.t("prePushHookStatusChecking") });
-		statusEl.style.color = "var(--text-muted)";
+		const statusEl = setting.descEl.createDiv({
+			cls: "feishu-lark-pre-push-hook-status is-muted",
+			text: this.plugin.t("prePushHookStatusChecking")
+		});
 		void this.plugin.getPrePushHookStatus().then((status) => {
 			statusEl.setText(this.getPrePushHookStatusText(status));
-			statusEl.style.color = this.getPrePushHookStatusColor(status);
+			statusEl.removeClass("is-installed", "is-error", "is-warning", "is-muted");
+			statusEl.addClass(this.getPrePushHookStatusClass(status));
 		});
 	}
 
@@ -2564,19 +2564,19 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 		return this.plugin.t("prePushHookStatusMissing");
 	}
 
-	private getPrePushHookStatusColor(status: PrePushHookStatus): string {
+	private getPrePushHookStatusClass(status: PrePushHookStatus): string {
 		if (status === "installed") {
-			return "var(--text-success)";
+			return "is-installed";
 		}
 
 		if (status === "not-installed" && this.plugin.settings.autoSyncMode === "pre-push") {
-			return "var(--text-error)";
+			return "is-error";
 		}
 
 		if (status === "not-git-repository") {
-			return "var(--text-warning)";
+			return "is-warning";
 		}
 
-		return "var(--text-muted)";
+		return "is-muted";
 	}
 }

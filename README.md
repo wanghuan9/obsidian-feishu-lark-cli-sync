@@ -6,6 +6,8 @@
 
 适合把 Obsidian 作为本地写作源，再把内容同步给团队在飞书 / Lark 中阅读、协作、评论的工作流。
 
+Feishu Lark CLI Sync publishes and synchronizes Obsidian Markdown notes to Feishu / Lark cloud documents through the local `lark-cli`. It is designed for users who write in Obsidian and share the rendered result with their team in Feishu / Lark.
+
 ## 功能
 
 - **单篇同步**：将当前 Markdown 笔记创建或同步为飞书 / Lark Docx 文档。
