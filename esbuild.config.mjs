@@ -43,17 +43,6 @@ const context = await esbuild.context({
 
 if (prod) {
 	await context.rebuild();
-	await esbuild.build({
-		bundle: true,
-		entryPoints: ["src/lark-sync-core.ts"],
-		format: "esm",
-		logLevel: "info",
-		minify: prod,
-		outfile: "lark-sync-core.mjs",
-		platform: "node",
-		target: "node20",
-		treeShaking: true
-	});
 	process.exit(0);
 }
 

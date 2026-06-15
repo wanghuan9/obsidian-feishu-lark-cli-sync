@@ -40,6 +40,7 @@ import {
 	touchDocumentSyncState,
 	trimSyncStateCache
 } from "./lark-sync-core";
+import { EMBEDDED_PRE_PUSH_CORE_SCRIPT, EMBEDDED_PRE_PUSH_SCRIPT } from "./embedded-helpers";
 
 const execFileAsync = promisify(execFile);
 
@@ -711,9 +712,18 @@ export default class LarkCliSyncPlugin extends Plugin {
 		const sourceCoreScript = join(pluginDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
 		const targetScript = join(hooksDirectory, PRE_PUSH_SCRIPT_NAME);
 		const targetCoreScript = join(hooksDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
-		await copyFile(sourceScript, targetScript);
-		await copyFile(sourceCoreScript, targetCoreScript);
+		await this.copyOrWriteEmbeddedHelper(sourceScript, targetScript, EMBEDDED_PRE_PUSH_SCRIPT);
+		await this.copyOrWriteEmbeddedHelper(sourceCoreScript, targetCoreScript, EMBEDDED_PRE_PUSH_CORE_SCRIPT);
 		await chmod(targetScript, 0o755);
+	}
+
+	private async copyOrWriteEmbeddedHelper(sourcePath: string, targetPath: string, embeddedContent: string): Promise<void> {
+		if (await this.pathExists(sourcePath)) {
+			await copyFile(sourcePath, targetPath);
+			return;
+		}
+
+		await writeFile(targetPath, embeddedContent);
 	}
 
 	private getVaultBasePath(): string | null {
