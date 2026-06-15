@@ -32,7 +32,7 @@ fi
 PLUGIN_DIR="$VAULT_PATH/.obsidian/plugins/$PLUGIN_ID"
 mkdir -p "$PLUGIN_DIR"
 
-for file in manifest.json main.js lark-sync-core.mjs README.md README.en.md sync-pre-push.mjs; do
+for file in manifest.json main.js lark-sync-core.mjs README.md README.en.md sync-pre-push.mjs styles.css; do
   if [ ! -f "$REPO_DIR/$file" ]; then
     echo "缺少 $file，请先运行 npm install && npm run build / Missing $file, run npm install && npm run build first." >&2
     exit 1

@@ -15,11 +15,12 @@ async function run() {
 		await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: workspace });
 		await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: workspace });
 
-		await mkdir(join(workspace, ".obsidian", "plugins", "feishu-lark-cli-sync"), { recursive: true });
-		await mkdir(join(workspace, "bin"), { recursive: true });
-		await cp("sync-pre-push.mjs", join(workspace, "sync-pre-push.mjs"));
-		await cp("lark-sync-core.mjs", join(workspace, "lark-sync-core.mjs"));
-		await writeFakeLarkCli(workspace);
+			await mkdir(join(workspace, ".obsidian", "plugins", "feishu-lark-cli-sync"), { recursive: true });
+			await mkdir(join(workspace, "bin"), { recursive: true });
+			await cp("sync-pre-push.mjs", join(workspace, "sync-pre-push.mjs"));
+			await cp("lark-sync-core.mjs", join(workspace, "lark-sync-core.mjs"));
+			await writeFakeLarkCli(workspace);
+			await writeFakeSystemNotifiers(workspace);
 
 		await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Body"));
 		await writeFile(join(workspace, "unbound.md"), "Body");
@@ -40,12 +41,14 @@ async function run() {
 		await testPreciseRefreshAllowsNormalizedRemoteMarkdown(workspace);
 		await testPreciseSkipAllowsNormalizedRemoteMarkdown(workspace);
 		await testPreciseRefreshBeforeUpdateAvoidsDuplicateInsert(workspace);
-		await testOverwriteUpdates(workspace);
-		await testUnboundFilesDoNotBlock(workspace);
-		await testCanonicalStateKey(workspace);
-		await testStateCacheTrim(workspace);
-		await testSameDocumentAliasesRunSerially(workspace);
-		await testConcurrentFailureWaitsForStartedTasks(workspace);
+			await testOverwriteUpdates(workspace);
+			await testUnboundFilesDoNotBlock(workspace);
+			await testCanonicalStateKey(workspace);
+			await testStateCacheTrim(workspace);
+			await testSameDocumentAliasesRunSerially(workspace);
+			await testConcurrentFailureWaitsForStartedTasks(workspace);
+			await testMacSystemNotificationOnFailure(workspace);
+			await testWindowsSystemNotificationOnFailure(workspace);
 	} finally {
 		await rm(workspace, { recursive: true, force: true });
 	}
@@ -481,6 +484,54 @@ async function testConcurrentFailureWaitsForStartedTasks(workspace) {
 	assert.ok(state.documents["second-token"]);
 }
 
+async function testMacSystemNotificationOnFailure(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Changed"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	await clearNotificationLog(workspace);
+	const result = await runHook(workspace, {
+		reject: false,
+		env: {
+			FEISHU_LARK_CLI_SYNC_NOTIFY_PLATFORM: "darwin",
+			FEISHU_LARK_CLI_SYNC_OSASCRIPT_PATH: join(workspace, "bin", "osascript"),
+			LARK_CLI_NO_BLOCK_IDS: "1"
+		}
+	});
+	assert.notEqual(result.exitCode, 0);
+	const notificationLog = await readNotificationLog(workspace);
+	assert.match(notificationLog, /^osascript\n/);
+	assert.match(notificationLog, /display notification/);
+	assert.match(notificationLog, /pre-push sync failed: bound\.md/);
+	assert.match(notificationLog, /with title "Feishu Lark CLI Sync"/);
+}
+
+async function testWindowsSystemNotificationOnFailure(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Changed"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	await clearNotificationLog(workspace);
+	const result = await runHook(workspace, {
+		reject: false,
+		env: {
+			FEISHU_LARK_CLI_SYNC_NOTIFY_PLATFORM: "win32",
+			FEISHU_LARK_CLI_SYNC_POWERSHELL_PATH: join(workspace, "bin", "powershell.exe"),
+			LARK_CLI_NO_BLOCK_IDS: "1"
+		}
+	});
+	assert.notEqual(result.exitCode, 0);
+	const notificationLog = await readNotificationLog(workspace);
+	assert.match(notificationLog, /^powershell\.exe\n/);
+	assert.match(notificationLog, /System\.Windows\.Forms\.NotifyIcon/);
+	assert.match(notificationLog, /pre-push sync failed: bound\.md/);
+	assert.match(notificationLog, /Feishu Lark CLI Sync/);
+}
+
 async function testOverwriteUpdates(workspace) {
 	await resetWorkspaceFiles(workspace);
 	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "overwrite", language: "en" });
@@ -523,17 +574,19 @@ async function runHook(workspace, options = {}) {
 }
 
 async function spawnHook(workspace, stdin, envOverrides) {
-	return await new Promise((resolvePromise) => {
-		const child = spawn(process.execPath, ["sync-pre-push.mjs"], {
-			cwd: workspace,
-			env: {
-				...process.env,
-				PATH: `${join(workspace, "bin")}:${process.env.PATH || ""}`,
-				LARK_CLI_LOG: join(workspace, "lark-cli.log"),
-				...envOverrides
-			},
-			stdio: ["pipe", "pipe", "pipe"]
-		});
+		return await new Promise((resolvePromise) => {
+			const child = spawn(process.execPath, ["sync-pre-push.mjs"], {
+				cwd: workspace,
+				env: {
+					...process.env,
+					PATH: `${join(workspace, "bin")}:${process.env.PATH || ""}`,
+					FEISHU_LARK_CLI_SYNC_NOTIFY_PLATFORM: "test",
+					LARK_CLI_LOG: join(workspace, "lark-cli.log"),
+					SYSTEM_NOTIFICATION_LOG: join(workspace, "system-notification.log"),
+					...envOverrides
+				},
+				stdio: ["pipe", "pipe", "pipe"]
+			});
 		let stdout = "";
 		let stderr = "";
 		child.stdout.setEncoding("utf8");
@@ -688,6 +741,18 @@ if (args.includes("+fetch")) {
 	await chmod(path, 0o755);
 }
 
+async function writeFakeSystemNotifiers(workspace) {
+	const script = `#!/usr/bin/env node
+const fs = require("fs");
+fs.appendFileSync(process.env.SYSTEM_NOTIFICATION_LOG, process.argv[1].split(/[\\\\/]/).pop() + "\\n");
+fs.appendFileSync(process.env.SYSTEM_NOTIFICATION_LOG, process.argv.slice(2).join("\\n") + "\\n");
+`;
+	await writeFile(join(workspace, "bin", "osascript"), script, "utf8");
+	await chmod(join(workspace, "bin", "osascript"), 0o755);
+	await writeFile(join(workspace, "bin", "powershell.exe"), script, "utf8");
+	await chmod(join(workspace, "bin", "powershell.exe"), 0o755);
+}
+
 async function clearLog(workspace) {
 	const logPath = join(workspace, "lark-cli.log");
 	await writeFile(logPath, "", "utf8");
@@ -696,8 +761,16 @@ async function clearLog(workspace) {
 	await rm(`${logPath}.stale-markdown-count`, { force: true });
 }
 
+async function clearNotificationLog(workspace) {
+	await writeFile(join(workspace, "system-notification.log"), "", "utf8");
+}
+
 async function readLog(workspace) {
 	return await readFile(join(workspace, "lark-cli.log"), "utf8");
+}
+
+async function readNotificationLog(workspace) {
+	return await readFile(join(workspace, "system-notification.log"), "utf8");
 }
 
 async function readSyncState(workspace) {

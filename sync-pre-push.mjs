@@ -35,6 +35,10 @@ const MAX_PARALLEL_SYNCS = 4;
 const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
 const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
 const REMOTE_STATE_REFRESH_DELAY_MS = 600;
+const SYSTEM_NOTIFICATION_TITLE = "Feishu Lark CLI Sync";
+const SYSTEM_NOTIFICATION_TIMEOUT_MS = 3000;
+const MAC_NOTIFICATION_EXECUTABLE_ENV = "FEISHU_LARK_CLI_SYNC_OSASCRIPT_PATH";
+const WINDOWS_NOTIFICATION_EXECUTABLE_ENV = "FEISHU_LARK_CLI_SYNC_POWERSHELL_PATH";
 const FALLBACK_PATH_ENTRIES = [
 	"/opt/homebrew/bin",
 	"/opt/homebrew/sbin",
@@ -646,6 +650,78 @@ function readLanguage(settings) {
 	return settings.language === "en" ? "en" : "zh-CN";
 }
 
+async function notifySystemFailure(message) {
+	const command = buildSystemNotificationCommand(message);
+	if (!command) {
+		return;
+	}
+
+	try {
+		await execFileAsync(command.executable, command.args, {
+			env: buildCommandEnvironment(command.executable),
+			timeout: SYSTEM_NOTIFICATION_TIMEOUT_MS,
+			windowsHide: true
+		});
+	} catch {
+		// stderr is the reliable hook output; system notifications are best-effort only.
+	}
+}
+
+function buildSystemNotificationCommand(message) {
+	const platform = process.env.FEISHU_LARK_CLI_SYNC_NOTIFY_PLATFORM || process.platform;
+	const body = summarizeNotificationBody(message);
+	if (platform === "darwin") {
+		return {
+			executable: process.env[MAC_NOTIFICATION_EXECUTABLE_ENV] || "osascript",
+			args: [
+				"-e",
+				`display notification "${escapeAppleScriptString(body)}" with title "${escapeAppleScriptString(SYSTEM_NOTIFICATION_TITLE)}"`
+			]
+		};
+	}
+
+	if (platform === "win32") {
+		return {
+			executable: process.env[WINDOWS_NOTIFICATION_EXECUTABLE_ENV] || "powershell.exe",
+			args: [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				buildWindowsNotificationScript(body)
+			]
+		};
+	}
+
+	return null;
+}
+
+function summarizeNotificationBody(message) {
+	return message.split(/\r?\n/).filter(Boolean).slice(0, 3).join("\n");
+}
+
+function escapeAppleScriptString(value) {
+	return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function buildWindowsNotificationScript(body) {
+	return [
+		"Add-Type -AssemblyName System.Windows.Forms",
+		"$notification = New-Object System.Windows.Forms.NotifyIcon",
+		"$notification.Icon = [System.Drawing.SystemIcons]::Warning",
+		"$notification.Visible = $true",
+		`$notification.BalloonTipTitle = ${toPowerShellString(SYSTEM_NOTIFICATION_TITLE)}`,
+		`$notification.BalloonTipText = ${toPowerShellString(body)}`,
+		"$notification.ShowBalloonTip(10000)",
+		"Start-Sleep -Milliseconds 500",
+		"$notification.Dispose()"
+	].join("; ");
+}
+
+function toPowerShellString(value) {
+	return `'${value.replace(/'/g, "''")}'`;
+}
+
 async function git(args) {
 	const { stdout } = await execFileAsync("git", args, {
 		env: buildCommandEnvironment("git"),
@@ -668,7 +744,9 @@ async function readStdin() {
 	});
 }
 
-main().catch((error) => {
-	console.error(error.message || String(error));
+main().catch(async (error) => {
+	const message = error.message || String(error);
+	console.error(message);
+	await notifySystemFailure(message);
 	process.exit(1);
 });

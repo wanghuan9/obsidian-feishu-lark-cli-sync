@@ -1,4 +1,4 @@
-import { FileSystemAdapter, Menu, Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
+import { addIcon, FileSystemAdapter, Menu, Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
 import { execFile } from "child_process";
 import { constants } from "fs";
 import { access, chmod, copyFile, mkdir, readFile, rename } from "fs/promises";
@@ -67,6 +67,15 @@ const PRE_PUSH_SCRIPT_NAME = "sync-pre-push.mjs";
 const PRE_PUSH_CORE_SCRIPT_NAME = "lark-sync-core.mjs";
 const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const PRE_PUSH_HOOK_MARKER = "Feishu Lark CLI Sync";
+const LARK_RIBBON_ICON_ID = "feishu-lark-cli-sync-ribbon";
+const LARK_RIBBON_ICON_SVG = `
+<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"
+	stroke-linecap="round" stroke-linejoin="round">
+	<path d="M4 12.5 20 5l-5.2 14-3.3-5.1L4 12.5z"/>
+	<path d="m11.5 13.9 3.9-4.4"/>
+	<path d="M5 18h6"/>
+	<path d="M7 21h4"/>
+</svg>`;
 const AUTO_SYNC_WRITE_IGNORE_MS = 5000;
 const DEFAULT_AUTO_SYNC_DELAY_SECONDS = 15;
 const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
@@ -194,9 +203,9 @@ const MESSAGES = {
 	"zh-CN": {
 		commandSyncCurrentNote: "同步到飞书",
 		commandOverwriteCurrentNote: "覆盖同步到飞书",
-		menuSyncToLark: "同步到飞书",
-		menuOverwriteSyncToLark: "覆盖同步到飞书",
-		menuPublishFolderToLark: "同步目录到飞书",
+		menuSyncToLark: "Lark: 同步到飞书",
+		menuOverwriteSyncToLark: "Lark: 覆盖到飞书",
+		menuPublishFolderToLark: "Lark: 同步目录到飞书",
 		ribbonSyncCurrentNote: "同步到飞书",
 		noticeNoActiveMarkdownNote: "当前没有打开 Markdown 笔记。",
 		noticeSyncingToLark: "正在同步到飞书...",
@@ -218,6 +227,10 @@ const MESSAGES = {
 		errorNoDocumentToken: "lark-cli 没有返回文档 token 或 URL。",
 		errorInvalidDefaultTarget: "默认上传位置无效或当前飞书账号无权访问。\n请检查插件设置中的“默认上传位置”：{target}\n底层原因：{detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
+		settingsSectionGeneral: "常规",
+		settingsSectionContent: "内容",
+		settingsSectionSync: "同步",
+		settingsSectionGitHook: "Git Hook",
 		settingLanguageName: "语言",
 		settingLanguageDesc: "切换插件设置、菜单和通知的显示语言。",
 		languageChinese: "中文",
@@ -238,7 +251,7 @@ const MESSAGES = {
 		settingAutoSyncModeDesc: "自动同步只处理已绑定的 Markdown 文档。保存后同步依赖 Obsidian；pre-push hook 可脱离 Obsidian 独立运行。",
 		settingSyncStrategyName: "同步策略",
 		settingSyncStrategyDesc: "安全增量同步会尽量只修改变动块；无法安全更新时会失败并通知，不会自动全量覆盖。全量覆盖同步会清空并重写远端文档。",
-		syncStrategyPrecise: "安全增量同步（推荐）",
+		syncStrategyPrecise: "安全增量同步",
 		syncStrategyOverwrite: "全量覆盖同步",
 		autoSyncModeManual: "关闭",
 		autoSyncModeSave: "保存后同步",
@@ -260,9 +273,9 @@ const MESSAGES = {
 	en: {
 		commandSyncCurrentNote: "Sync to Feishu/Lark",
 		commandOverwriteCurrentNote: "Overwrite sync to Feishu/Lark",
-		menuSyncToLark: "Sync to Feishu/Lark",
-		menuOverwriteSyncToLark: "Overwrite sync to Feishu/Lark",
-		menuPublishFolderToLark: "Sync folder to Feishu/Lark",
+		menuSyncToLark: "Lark: Sync to Feishu/Lark",
+		menuOverwriteSyncToLark: "Lark: Overwrite to Feishu/Lark",
+		menuPublishFolderToLark: "Lark: Sync folder to Feishu/Lark",
 		ribbonSyncCurrentNote: "Sync to Feishu/Lark",
 		noticeNoActiveMarkdownNote: "No active Markdown note.",
 		noticeSyncingToLark: "Syncing to Lark...",
@@ -284,6 +297,10 @@ const MESSAGES = {
 		errorNoDocumentToken: "lark-cli did not return a document token or URL.",
 		errorInvalidDefaultTarget: "Default upload target is invalid or inaccessible.\nCheck the Default target setting: {target}\nCause: {detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
+		settingsSectionGeneral: "General",
+		settingsSectionContent: "Content",
+		settingsSectionSync: "Sync",
+		settingsSectionGitHook: "Git Hook",
 		settingLanguageName: "Language",
 		settingLanguageDesc: "Switch the display language for settings, menus, and notices.",
 		languageChinese: "中文",
@@ -304,7 +321,7 @@ const MESSAGES = {
 		settingAutoSyncModeDesc: "Auto sync only handles bound Markdown notes. Save sync depends on Obsidian; the pre-push hook can run without Obsidian.",
 		settingSyncStrategyName: "Sync strategy",
 		settingSyncStrategyDesc: "Safe precise sync updates only changed blocks when possible. If it cannot update safely, it fails with a notice instead of falling back to overwrite. Overwrite sync clears and rewrites the remote document.",
-		syncStrategyPrecise: "Safe precise sync (recommended)",
+		syncStrategyPrecise: "Safe precise sync",
 		syncStrategyOverwrite: "Overwrite sync",
 		autoSyncModeManual: "Off",
 		autoSyncModeSave: "Sync after save",
@@ -345,6 +362,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private syncState: LarkSyncStateFile = createEmptySyncStateFile();
 
 	override async onload(): Promise<void> {
+		addIcon(LARK_RIBBON_ICON_ID, LARK_RIBBON_ICON_SVG);
 		await this.loadSettings();
 		this.syncState = await this.loadLarkSyncState();
 		await this.tryEnsureLarkSyncStateFile();
@@ -373,7 +391,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 			}
 		});
 
-		this.addRibbonIcon("upload", this.t("ribbonSyncCurrentNote"), () => {
+		this.addRibbonIcon(LARK_RIBBON_ICON_ID, this.t("ribbonSyncCurrentNote"), () => {
 			void this.syncCurrentNote();
 		});
 
@@ -2363,7 +2381,8 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h2", { text: this.plugin.t("settingsTitle") });
 
-		new Setting(containerEl)
+		const generalSectionEl = this.createSection(containerEl, "settingsSectionGeneral");
+		new Setting(generalSectionEl)
 			.setName(this.plugin.t("settingLanguageName"))
 			.setDesc(this.plugin.t("settingLanguageDesc"))
 			.addDropdown((dropdown) => {
@@ -2375,7 +2394,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		new Setting(generalSectionEl)
 			.setName(this.plugin.t("settingLarkCliPathName"))
 			.setDesc(this.plugin.t("settingLarkCliPathDesc"))
 			.addText((text) => {
@@ -2385,7 +2404,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 				});
 			});
 
-		new Setting(containerEl)
+		new Setting(generalSectionEl)
 			.setName(this.plugin.t("settingDefaultTargetName"))
 			.setDesc(this.plugin.t("settingDefaultTargetDesc"))
 			.addText((text) => {
@@ -2396,7 +2415,8 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					});
 				});
 
-		new Setting(containerEl)
+		const contentSectionEl = this.createSection(containerEl, "settingsSectionContent");
+		new Setting(contentSectionEl)
 			.setName(this.plugin.t("settingTitleSourceName"))
 			.setDesc(this.plugin.t("settingTitleSourceDesc"))
 			.addDropdown((dropdown) => {
@@ -2408,7 +2428,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					});
 				});
 
-		new Setting(containerEl)
+		new Setting(contentSectionEl)
 			.setName(this.plugin.t("settingWriteBindingName"))
 			.setDesc(this.plugin.t("settingWriteBindingDesc"))
 			.addToggle((toggle) => {
@@ -2418,7 +2438,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 				});
 				});
 
-		new Setting(containerEl)
+		new Setting(contentSectionEl)
 			.setName(this.plugin.t("settingOpenAfterSyncName"))
 			.setDesc(this.plugin.t("settingOpenAfterSyncDesc"))
 			.addToggle((toggle) => {
@@ -2428,7 +2448,8 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 				});
 			});
 
-		new Setting(containerEl)
+		const syncSectionEl = this.createSection(containerEl, "settingsSectionSync");
+		new Setting(syncSectionEl)
 			.setName(this.plugin.t("settingSyncStrategyName"))
 			.setDesc(this.plugin.t("settingSyncStrategyDesc"))
 			.addDropdown((dropdown) => {
@@ -2440,7 +2461,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		new Setting(syncSectionEl)
 			.setName(this.plugin.t("settingAutoSyncModeName"))
 			.setDesc(this.plugin.t("settingAutoSyncModeDesc"))
 			.addDropdown((dropdown) => {
@@ -2454,7 +2475,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		new Setting(syncSectionEl)
 			.setName(this.plugin.t("settingAutoSyncDelayName"))
 			.setDesc(this.plugin.t("settingAutoSyncDelayDesc"))
 			.addText((text) => {
@@ -2468,7 +2489,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		new Setting(syncSectionEl)
 			.setName(this.plugin.t("settingStateCacheName"))
 			.setDesc(this.plugin.t("settingStateCacheDesc"))
 			.addText((text) => {
@@ -2482,7 +2503,8 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					});
 			});
 
-		const installPrePushHookSetting = new Setting(containerEl)
+		const gitHookSectionEl = this.createSection(containerEl, "settingsSectionGitHook");
+		const installPrePushHookSetting = new Setting(gitHookSectionEl)
 			.setName(this.plugin.t("settingInstallPrePushHookName"))
 			.setDesc(this.plugin.t("settingInstallPrePushHookDesc"))
 			.addButton((button) => {
@@ -2492,6 +2514,15 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 				});
 			});
 		this.renderPrePushHookStatus(installPrePushHookSetting);
+	}
+
+	private createSection(containerEl: HTMLElement, titleKey: MessageKey): HTMLElement {
+		const sectionEl = containerEl.createDiv({ cls: "feishu-lark-settings-section" });
+		sectionEl.createEl("h3", {
+			cls: "feishu-lark-settings-section-title",
+			text: this.plugin.t(titleKey)
+		});
+		return sectionEl;
 	}
 
 	private renderPrePushHookStatus(setting: Setting): void {
