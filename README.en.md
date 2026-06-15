@@ -4,116 +4,81 @@
 
 An Obsidian desktop plugin that publishes and syncs Markdown notes to Feishu/Lark Docs through the local `lark-cli`.
 
+It is useful when Obsidian is your local source of truth and Feishu/Lark is where the team reads, comments, and collaborates.
+
 ## Features
 
-- Single-note publish: publish the current Markdown note as a Feishu/Lark Docx document
-- Single-note sync: overwrite-sync an already published note, using Obsidian as the source
-- Auto sync: choose sync-after-save, or install a Git `pre-push` hook to sync before push
-- Folder publish: right-click a folder and publish all Markdown files in one action
-- Folder sync: publishing the same folder again updates bound documents and creates remote documents for new local Markdown files
-- Folder hierarchy: preserve the selected folder and its subfolders
-- Link rewriting: rewrite local Markdown/Obsidian internal links into Feishu/Lark document references
-- Chinese and English UI
-- No App ID, App Secret, access token, or OAuth setup inside the plugin; it reuses the local `lark-cli` login state
-- Optional frontmatter binding:
+- **Single-note sync**: publish or update the current Markdown note as a Feishu/Lark Docx document.
+- **Overwrite to Feishu/Lark**: force the remote document to match the local Markdown content.
+- **Folder sync**: right-click a folder and sync all Markdown files while preserving the folder hierarchy.
+- **Auto sync**: sync after save, or sync bound notes before `git push` through a Git `pre-push` hook.
+- **Safe precise sync**: updates changed blocks by default; if it cannot update safely, it stops and notifies you.
+- **Internal link rewriting**: uploaded content rewrites Markdown and Obsidian internal links into Feishu/Lark document references.
 
-```yaml
----
-lark_doc_url: "https://atrenew.feishu.cn/docx/YTi3dFxPEodFKXxl8J3c2PWGn07"
----
+## Installation
+
+### Obsidian Community Plugins (Recommended)
+
+After the plugin is published to the community plugin browser:
+
+1. Open Obsidian → Settings → Community plugins → Browse.
+2. Search for `Feishu Lark CLI Sync`.
+3. Click Install and enable the plugin.
+
+### Manual Installation
+
+If the plugin is not available from the community plugin browser, install it from source with the install script:
+
+```bash
+git clone https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync.git
+cd obsidian-feishu-lark-cli-sync
+./install.sh "/path/to/your/vault"
 ```
 
-## Requirements
+Replace `/path/to/your/vault` with your Obsidian vault path. If no path is provided, the script will prompt for it.
 
-- Obsidian desktop
-- Installed and authenticated `lark-cli`
-- Permission to create documents in the target Wiki node, folder, or personal library
+After installation, restart Obsidian and enable `Feishu Lark CLI Sync` in Settings → Community plugins.
 
-### Install and Login to lark-cli
+## Prerequisites
 
-This plugin does not handle Feishu/Lark API credentials itself. All API calls are delegated to the local `lark-cli`.
-
-`lark-cli` is the official CLI for the Lark/Feishu Open Platform:
-
-- GitHub: <https://github.com/larksuite/cli>
-- npm: <https://www.npmjs.com/package/@larksuite/cli>
-
-Install:
+Install and log in to `lark-cli` first:
 
 ```bash
 npm install -g @larksuite/cli
-```
-
-Login:
-
-```bash
 lark-cli auth login
-```
-
-Check:
-
-```bash
-lark-cli --version
 lark-cli auth status
 ```
 
-If Obsidian cannot find `lark-cli`, set the absolute command path in the plugin settings. You can locate it with:
+If Obsidian cannot find `lark-cli`, set the absolute path in the plugin settings:
 
 ```bash
 which lark-cli
 ```
 
-## Settings
+## Usage
 
-- `Language`: switch plugin settings, context menus, commands, and notices
-- `lark-cli path`: command name or absolute path; keep `lark-cli` for automatic detection
-- `Default target`: Wiki URL, Wiki node token, folder token, or blank for personal library
-- `Title source`: first Markdown H1 or file name
-- `Write binding to frontmatter`: store the Feishu/Lark document URL after publishing
-- `Open after sync`: open the remote document after publish or sync
-- `Sync strategy`: use safe precise sync by default, or switch to overwrite sync. Safe precise sync fails with a notice when it cannot update safely and does not fall back to overwrite automatically.
-- `Auto sync mode`: choose off, sync after save, or Git `pre-push` hook. Auto sync only handles bound Markdown notes and never auto-publishes unbound notes.
-- `Save sync delay`: wait a few seconds after save before syncing, used to merge continuous edits.
+### Single-note Sync
 
-## Single-Note Sync
+Open a Markdown file, then click the ribbon icon or use the file context menu:
 
-Right-click a Markdown file, or open the command palette while a note is active:
+- `Lark: Sync to Feishu/Lark`: create a document when no binding exists, or update the bound remote document.
+- `Lark: Overwrite to Feishu/Lark`: clear and rewrite the remote document with the local Markdown content.
 
-- `Sync to Feishu/Lark`: create a document when no binding exists, update it when the binding is valid, or recreate it and refresh the URL when the binding is invalid
+Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source.
 
-Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source, and the remote document is updated to match it.
+Default binding example:
 
-## Auto Sync
+```yaml
+---
+lark_doc_url: "https://example.feishu.cn/docx/xxxx"
+---
+```
 
-The plugin supports two mutually exclusive auto sync modes:
+### Folder Sync
 
-- `Sync after save`: when a bound Markdown file is saved in Obsidian, the plugin syncs it to the bound remote document after a short delay. This mode requires Obsidian to be running.
-- `Git pre-push hook`: click `Install hook` in plugin settings to install a hook into `.git/hooks/pre-push` of the current vault. After that, even when Obsidian is closed, `git push` from that repository syncs bound Markdown notes first.
+Right-click a folder and choose `Lark: Sync folder to Feishu/Lark`. The plugin creates the matching remote hierarchy, syncs Markdown files, and rewrites internal links in the uploaded content.
 
-When `Sync after save` or `Off` is selected, an installed hook reads the plugin settings and exits without syncing. Git hooks are installed per repository, so another Obsidian vault needs its own hook installation.
-
-The plugin does not write sync timestamps, so auto sync and Git hooks do not create extra local note changes.
-
-Safe precise sync keeps its private index at `.obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.json`. The file stores remote revision and block mapping metadata only; it is not written into Markdown content. If safe precise sync cannot run safely, it stops with a notice; switch to `Overwrite sync` in settings to keep the previous overwrite behavior.
-
-## Folder Publishing
-
-Right-click a folder and choose `Publish folder to Feishu/Lark`.
-
-The plugin does three things:
-
-1. Creates the matching remote hierarchy in Feishu/Lark
-2. Publishes or syncs each Markdown file under its matching remote parent
-3. Overwrites the remote documents again after rewriting internal links into Feishu/Lark document references
-
-Running folder publish again works as folder sync: bound documents are overwritten, and new local Markdown files are created remotely.
-
-The remote hierarchy starts from the selected folder only:
-
-- Publishing `Project-Alpha` creates `Project-Alpha/docs/...`
-- Publishing `docs` directly creates `docs/...` and does not include its local parent folder `Project-Alpha`
-
-Supported internal link forms:
+Supported link forms:
 
 ```md
 Detailed design: 02-database.md
@@ -121,34 +86,54 @@ Detailed design: 02-database.md
 [[04-api|API design]]
 ```
 
-Local notes remain unchanged. Only the uploaded remote documents are rewritten with Feishu/Lark document references.
+Local notes remain unchanged.
 
-## lark-cli Detection
+### Auto Sync
 
-When `lark-cli path` is left as the default value, the plugin resolves the command in this order:
+Choose one mode in settings:
 
-1. Run the user's login shell and execute `command -v lark-cli`
-2. Check `$HOME/.npm-global/bin/lark-cli`, `$HOME/.local/bin/lark-cli`, and `$HOME/bin/lark-cli`
-3. Check `/opt/homebrew/bin/lark-cli` and `/usr/local/bin/lark-cli`
-4. Fall back to `lark-cli`
+- `Off`: manual sync only.
+- `Sync after save`: sync bound Markdown notes after save.
+- `Git pre-push hook`: sync bound Markdown notes before `git push`.
 
-The plugin also reconstructs `PATH` for the child process so `lark-cli` can find `node` when Obsidian was launched outside a terminal.
+For Git hook mode, click `Install hook` in the `Git Hook` settings section. If sync fails, the current `git push` is blocked.
 
-## Manual Installation
+## Settings
 
-Before the plugin is available in the community plugin browser, download this project and run the install script. Replace `/path/to/your/vault` with your Obsidian vault path:
+- `Default target`: Wiki URL, wiki node token, folder token, or blank for the personal library.
+- `Title source`: use the first Markdown heading or the file name.
+- `Write binding to frontmatter`: store the remote document URL in note frontmatter.
+- `Sync strategy`: safe precise sync by default, or overwrite sync.
+- `Sync state cache`: controls how many document states are kept for safe precise sync.
+
+Safe precise sync state is stored at:
+
+```text
+.obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.json
+```
+
+## Notes
+
+- The plugin uses the local `lark-cli` and does not store App Secret, access token, or OAuth configuration.
+- Auto sync only handles already bound notes and never auto-publishes unbound files.
+- If the remote Feishu/Lark document was edited manually, merge those edits back into the local Markdown file first. This plugin treats local Markdown as the source of truth.
+
+## Development
+
+```bash
+npm install
+npm run build
+npm test
+```
+
+After changing source files, run `npm run build` again to regenerate `main.js` and `lark-sync-core.mjs`.
+
+Install to a local vault:
 
 ```bash
 ./install.sh "/path/to/your/vault"
 ```
 
-If no path is provided, the script will prompt for your Obsidian vault path.
+## License
 
-Then enable `Feishu Lark CLI Sync` in Obsidian settings.
-
-Local development:
-
-```bash
-npm install
-npm run build
-```
+MIT License

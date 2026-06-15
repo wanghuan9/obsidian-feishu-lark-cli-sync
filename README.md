@@ -2,120 +2,83 @@
 
 [简体中文](./README.md) | [English](./README.en.md)
 
-通过本地 `lark-cli` 将 Obsidian Markdown 笔记一键同步到飞书 / Lark 云文档的桌面端插件。
+通过本机 `lark-cli` 将 Obsidian Markdown 笔记发布、同步到飞书 / Lark 云文档的桌面端插件。
 
-> 中文用户可以直接理解为“Obsidian 飞书同步插件”。海外用户通常使用 Lark，因此 README 同时保留 Feishu / Lark 关键词。
+适合把 Obsidian 作为本地写作源，再把内容同步给团队在飞书 / Lark 中阅读、协作、评论的工作流。
 
 ## 功能
 
-- 单文件发布：将当前 Markdown 笔记发布为飞书 / Lark Docx 文档
-- 单文件同步：对已发布笔记执行覆盖同步，保持 Obsidian 内容作为源
-- 自动同步：可选择保存后同步，或安装 Git `pre-push` hook 后在推送前同步
-- 整个目录发布：右键目录，一键发布该目录下所有 Markdown 文件
-- 整个目录同步：再次右键同一目录发布时，会同步已绑定文档，并为新增文件创建新文档
-- 目录结构保持：发布目录时保留“所选目录”及其子目录结构
-- 引用改写：将目录内 Markdown / Obsidian 内部引用改写为飞书文档引用
-- 支持中文 / English 设置、菜单和通知
-- 不需要在插件里填写 App ID、App Secret、access token 或 OAuth 配置，直接复用本机 `lark-cli` 登录态
-- 可选写入 frontmatter 绑定信息：
+- **单篇同步**：将当前 Markdown 笔记创建或同步为飞书 / Lark Docx 文档。
+- **覆盖到飞书**：需要完全以本地 Markdown 为准时，可手动执行全量覆盖。
+- **目录同步**：右键目录同步全部 Markdown 文件，并在飞书 / Lark 中保留目录层级。
+- **自动同步**：支持保存后同步，也支持 Git `pre-push` hook 在推送代码前同步已绑定文档。
+- **安全增量同步**：默认只更新变动块；无法安全更新时停止并通知，不会悄悄全量覆盖。
+- **内部链接改写**：上传到飞书 / Lark 的内容会把目录内 Markdown 链接、Obsidian Wiki 链接改写成远端文档引用。
 
-```yaml
----
-lark_doc_url: "https://atrenew.feishu.cn/docx/YTi3dFxPEodFKXxl8J3c2PWGn07"
----
+## 安装
+
+### Obsidian 社区插件市场（推荐）
+
+插件发布到社区插件市场后，推荐通过 Obsidian 直接安装：
+
+1. 打开 Obsidian → 设置 → 社区插件 → 浏览。
+2. 搜索 `Feishu Lark CLI Sync`。
+3. 点击安装并启用。
+
+### 手动安装
+
+如果暂时无法通过社区插件市场安装，可以下载源码后使用一键安装脚本：
+
+```bash
+git clone https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync.git
+cd obsidian-feishu-lark-cli-sync
+./install.sh "/path/to/your/vault"
 ```
 
-## 使用要求
+把 `/path/to/your/vault` 替换成你的 Obsidian 仓库路径。不传路径时，脚本会提示你输入。
 
-- Obsidian 桌面端
-- 已安装并完成登录的 `lark-cli`
-- 当前 `lark-cli` 用户有权限在目标 Wiki 节点、目录或个人文档库中创建文档
+安装完成后，重启 Obsidian，在设置 → 社区插件中启用 `Feishu Lark CLI Sync`。
 
-### 安装和登录 lark-cli
+## 使用前准备
 
-本插件不直接调用飞书开放平台认证，也不会要求你在插件里填写密钥。所有飞书 / Lark API 调用都通过本机的 `lark-cli` 完成。
-
-`lark-cli` 是 Lark/Feishu Open Platform 的官方 CLI：
-
-- GitHub: <https://github.com/larksuite/cli>
-- npm: <https://www.npmjs.com/package/@larksuite/cli>
-
-安装：
+先安装并登录 `lark-cli`：
 
 ```bash
 npm install -g @larksuite/cli
-```
-
-登录：
-
-```bash
 lark-cli auth login
-```
-
-检查是否可用：
-
-```bash
-lark-cli --version
 lark-cli auth status
 ```
 
-如果 Obsidian 中提示找不到 `lark-cli`，可以在插件设置里的 `lark-cli 路径` 填写命令绝对路径。常见检查方式：
+如果 Obsidian 找不到 `lark-cli`，在插件设置里的 `lark-cli 路径` 填写绝对路径：
 
 ```bash
 which lark-cli
 ```
 
-## 设置
+## 使用
 
-- `语言`：切换插件设置、右键菜单、命令和通知语言
-- `lark-cli 路径`：可填写命令名或绝对路径；保持 `lark-cli` 时自动探测
-- `默认上传位置`：可填写 Wiki URL、Wiki 节点 token、文件夹 token；留空则发布到个人文档库
-- `标题来源`：使用第一个 Markdown 一级标题，或使用文件名
-- `写入 frontmatter 绑定信息`：发布后记录飞书文档 URL，后续可直接同步
-- `同步后打开文档`：发布或同步成功后在浏览器中打开飞书文档
-- `同步策略`：默认使用安全增量同步；也可切换为全量覆盖同步。安全增量同步无法安全更新时会失败并通知，不会自动全量覆盖。
-- `自动同步方式`：可选择关闭、保存后同步、Git `pre-push` hook。自动同步只处理已绑定 Markdown 文档，不会自动发布未绑定文档。
-- `保存后同步延迟`：保存后等待一段时间再同步，用于合并连续编辑。
+### 单篇同步
 
-## 单文件同步
+打开 Markdown 文件后，可以点击左侧栏图标，或在文件右键菜单中选择：
 
-在 Markdown 文件上右键，或打开当前笔记后使用命令面板：
+- `Lark: 同步到飞书`：没有绑定时创建新文档；已有绑定时更新远端文档。
+- `Lark: 覆盖到飞书`：强制以本地 Markdown 为准，清空并重写远端文档。
 
-- `同步到飞书` / `Sync to Feishu/Lark`：没有绑定时创建新文档；绑定有效时更新远端文档；绑定失效时重新创建并更新 URL
+同步方向是单向的：**Obsidian Markdown 是源内容，飞书 / Lark 文档是输出结果**。
 
-同步是从 Obsidian 到飞书 / Lark 的单向同步。本地 Markdown 是源内容，远端文档会被更新为本地内容。
+默认绑定信息示例：
 
-## 自动同步
+```yaml
+---
+lark_doc_url: "https://example.feishu.cn/docx/xxxx"
+---
+```
 
-插件支持两种互斥的自动同步方式：
+### 目录同步
 
-- `保存后同步`：Obsidian 中已绑定的 Markdown 文件保存后，延迟同步到对应飞书文档。该模式依赖 Obsidian 正在运行。
-- `Git pre-push hook`：在插件设置中点击 `安装 hook` 后，会把 hook 安装到当前仓库的 `.git/hooks/pre-push`。之后即使 Obsidian 未打开，只要在该仓库执行 `git push`，hook 也会同步已绑定 Markdown 文档。
+对目录右键，选择 `Lark: 同步目录到飞书`。插件会在飞书 / Lark 中创建对应目录层级，同步目录下的 Markdown 文件，并把目录内链接改写成远端文档引用。
 
-选择 `保存后同步` 或 `关闭` 时，已安装的 hook 会读取插件设置并直接退出，不会执行同步。Git hook 是按仓库安装的，换一个 Obsidian 仓库需要重新安装。
-
-插件不会写入同步时间，避免自动同步或 Git hook 在本地笔记中制造额外变更。
-
-安全增量同步使用插件目录下的私有状态文件 `.obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.json` 保存远端文档版本和 block 映射等同步索引，不会写入 Markdown 正文。安全增量同步未能安全执行时会停止并通知；如需保留旧的全量覆盖行为，请在设置中切换为 `全量覆盖同步`。
-
-## 目录发布
-
-右键一个目录，选择 `发布整个目录到飞书` / `Publish folder to Feishu/Lark`。
-
-插件会执行三步：
-
-1. 在飞书 / Lark 中创建和所选目录一致的远端层级
-2. 将每个 Markdown 文件发布或同步到对应远端父目录下
-3. 二次覆盖远端文档，把内部链接改写为飞书文档引用
-
-再次对同一个目录执行发布时，插件会根据 frontmatter 绑定信息同步已有文档；目录中新增的 Markdown 文件会被创建为新的远端文档。
-
-路径规则只从“你右键点击的目录”开始：
-
-- 发布 `Project-Alpha`：远端创建 `Project-Alpha/docs/...`
-- 直接发布 `docs`：远端只创建 `docs/...`，不会带上本地上级目录 `Project-Alpha`
-
-支持的内部引用形式：
+支持的链接形式：
 
 ```md
 详细设计见 02-database.md。
@@ -123,34 +86,54 @@ which lark-cli
 [[04-api|接口设计]]
 ```
 
-本地笔记内容不会被改写。只有上传到飞书 / Lark 的远端文档会被改写为文档引用。
+本地 Markdown 不会因为链接改写而被修改。
 
-## lark-cli 探测
+### 自动同步
 
-当 `lark-cli 路径` 保持默认值时，插件按以下顺序查找命令：
+在设置中可选择：
 
-1. 通过用户登录 shell 执行 `command -v lark-cli`
-2. 检查 `$HOME/.npm-global/bin/lark-cli`、`$HOME/.local/bin/lark-cli`、`$HOME/bin/lark-cli`
-3. 检查 `/opt/homebrew/bin/lark-cli`、`/usr/local/bin/lark-cli`
-4. 回退为直接执行 `lark-cli`
+- `关闭`：只手动同步。
+- `保存后同步`：已绑定 Markdown 文件保存后自动同步。
+- `Git pre-push hook`：执行 `git push` 前同步已绑定 Markdown 文件。
 
-插件也会重建子进程 `PATH`，避免从 Obsidian 启动时 `lark-cli` 找不到 `node`。
+使用 Git hook 时，在设置页 `Git Hook` 区域点击 `安装 hook`。如果同步失败，本次 `git push` 会被阻断。
 
-## 手动安装
+## 设置
 
-社区插件市场上架前，可以下载本项目后执行安装脚本。把 `/path/to/your/vault` 改成你的 Obsidian 仓库路径：
+- `默认上传位置`：Wiki URL、Wiki 节点 token、文件夹 token；留空则上传到个人文档库。
+- `标题来源`：使用第一个 Markdown 标题，或使用文件名。
+- `写入 frontmatter 绑定信息`：发布后把飞书文档 URL 写入笔记 frontmatter。
+- `同步策略`：默认安全增量同步；也可切换为全量覆盖同步。
+- `同步状态缓存`：控制安全增量同步状态最多保留多少篇文档。
+
+安全增量同步状态保存在：
+
+```text
+.obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.json
+```
+
+## 说明
+
+- 插件通过本机 `lark-cli` 调用飞书 / Lark，不保存 App Secret、access token 或 OAuth 配置。
+- 自动同步只处理已绑定文档，不会自动发布未绑定笔记。
+- 如果飞书 / Lark 上有人工修改，请先合并回本地 Markdown；本插件以本地内容为准。
+
+## 开发
+
+```bash
+npm install
+npm run build
+npm test
+```
+
+修改源码后，需要重新执行 `npm run build` 生成 `main.js` 和 `lark-sync-core.mjs`。
+
+本地安装到指定 vault：
 
 ```bash
 ./install.sh "/path/to/your/vault"
 ```
 
-不传路径时，脚本会提示你输入 Obsidian 仓库路径。
+## 许可
 
-然后在 Obsidian 设置中启用 `Feishu Lark CLI Sync`。
-
-开发者本地构建：
-
-```bash
-npm install
-npm run build
-```
+MIT License
