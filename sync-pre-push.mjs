@@ -167,7 +167,7 @@ async function syncMarkdownTask(task, settings, syncState) {
 	try {
 		const file = { basename: basename(task.filePath, ".md") };
 		const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(task.content), settings.titleSource);
-		const strategy = readSyncStrategy(settings);
+		const strategy = settings.syncStrategy || "precise";
 		let state = findDocumentState(syncState, task.stateKeys);
 		let syncDoc = state?.doc || task.doc;
 		if (strategy === "precise" && (!state || state.units.length === 0)) {
@@ -644,10 +644,6 @@ function formatCommandError(error) {
 
 function readLanguage(settings) {
 	return settings.language === "en" ? "en" : "zh-CN";
-}
-
-function readSyncStrategy(settings) {
-	return settings.syncStrategy === "overwrite" ? "overwrite" : "precise";
 }
 
 async function git(args) {

@@ -60,6 +60,14 @@ assert.equal(
 	prepareNoteContentForLark({ basename: "Note" }, "Body", "file-name"),
 	"# Note\n\nBody"
 );
+assert.equal(
+	prepareNoteContentForLark({ basename: "Note" }, "# Heading\n\nBody", "file-name"),
+	"# Note\n\nBody"
+);
+assert.equal(
+	prepareNoteContentForLark({ basename: "Note" }, "# Heading\n\nBody", "first-heading"),
+	"# Heading\n\nBody"
+);
 
 assert.deepEqual(buildUpdateDocumentArgs("doc-token", "sync.md"), [
 	"docs",
@@ -240,6 +248,42 @@ const indentedCodeState = await createDocumentSyncStateFromRemote(
 assert.equal(indentedCodeState.units.length, 3);
 assert.deepEqual(indentedCodeState.units.map((unit) => unit.kind), ["list", "code", "heading"]);
 
+const richBlockRemoteXml = [
+	"<doc id=\"container\">",
+	"<title block-id=\"doc-title\">Note</title>",
+	"<ul><li id=\"blk-list-1\">A</li><li id=\"blk-list-2\">B</li></ul>",
+	"<table id=\"blk-table\"><tr><th>K</th><th>V</th></tr><tr><td>x</td><td>y</td></tr></table>",
+	"<pre block_id=\"blk-code\" lang=\"ts\"><code>const a = 1;<br/>const b = 2;</code></pre>",
+	"<hr id=\"blk-hr\"/>",
+	"</doc>"
+].join("");
+const richBlockState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n- A\n- B\n\n| K | V |\n| --- | --- |\n| x | y |\n\n```ts\nconst a = 1;\nconst b = 2;\n```\n\n---",
+	richBlockRemoteXml,
+	10
+);
+assert.equal(richBlockState.titleBlockId, "doc-title");
+assert.deepEqual(richBlockState.units.map((unit) => unit.kind), ["list", "list", "table", "code", "hr"]);
+assert.deepEqual(richBlockState.units.map((unit) => unit.blockId), ["blk-list-1", "blk-list-2", "blk-table", "blk-code", "blk-hr"]);
+
+const looseListState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n- A\n- B",
+	"<title id=\"doc-title\">Note</title><ul id=\"blk-list\"><li>A</li><li>B</li></ul>",
+	11
+);
+assert.deepEqual(looseListState.units, []);
+
+const duplicatedHeadingRemoteXml = "<title id=\"doc-token\">Note</title><h2 id=\"blk-1\">Inserted</h2><p id=\"blk-2\">Inserted</p>";
+const duplicatedHeadingState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n## Inserted",
+	duplicatedHeadingRemoteXml,
+	12
+);
+assert.deepEqual(duplicatedHeadingState.units.map((unit) => unit.kind), ["heading"]);
+
 const replacePlan = await buildSyncPlan({
 	doc: "doc-token",
 	markdown: "# Note\n\nChanged\n\n## Next",
@@ -350,10 +394,27 @@ assert.equal(headingInsertPlan.mode, "precise");
 assert.deepEqual(headingInsertPlan.commands, [{
 	doc: "doc-token",
 	command: "block_insert_after",
-	docFormat: "markdown",
+	docFormat: "xml",
 	blockId: "blk-1",
 	contentFileName: "sync.md",
-	content: "## Inserted"
+	content: "<h2>Inserted</h2>"
+}]);
+
+const headingReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody\n\n## Updated",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: mappedState
+});
+assert.equal(headingReplacePlan.mode, "precise");
+assert.deepEqual(headingReplacePlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "xml",
+	blockId: "blk-2",
+	contentFileName: "sync.md",
+	content: "<h2>Updated</h2>"
 }]);
 
 const paragraphLabelState = await createDocumentSyncStateFromRemote(
@@ -563,10 +624,10 @@ assert.equal(rebuiltReplacePlan.mode, "precise");
 assert.deepEqual(rebuiltReplacePlan.commands, [{
 	doc: "doc-token",
 	command: "block_replace",
-	docFormat: "markdown",
+	docFormat: "xml",
 	blockId: "blk-3",
 	contentFileName: "sync.md",
-	content: "## 分批总览更新"
+	content: "<h2>分批总览更新</h2>"
 }]);
 
 const rebuiltDeletePlan = await buildSyncPlan({
@@ -595,10 +656,10 @@ assert.deepEqual(rebuiltInsertReplacePlan.commands, [
 	{
 		doc: "doc-token",
 		command: "block_replace",
-		docFormat: "markdown",
+		docFormat: "xml",
 		blockId: "blk-3",
 		contentFileName: "sync.md",
-		content: "## 分批总览更新"
+		content: "<h2>分批总览更新</h2>"
 	},
 	{
 		doc: "doc-token",
@@ -607,6 +668,69 @@ assert.deepEqual(rebuiltInsertReplacePlan.commands, [
 		blockId: "blk-3",
 		contentFileName: "sync.md",
 		content: "212122"
+	}
+]);
+
+const headingInsertAroundHrState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# spec\n\n## 三、用户角色\n\n| 角色 | 说明 |\n| --- | --- |\n| 主账号 | 可管理子账号 |\n| 子账号 | 无法管理其他子账号 |\n\n---\n\n## 四、功能需求\n\n### 4.1 账号管理",
+	"<title id=\"doc-title\">spec</title><h2 id=\"blk-role\">三、用户角色</h2><table id=\"blk-table\"><tr><th>角色</th><th>说明</th></tr><tr><td>主账号</td><td>可管理子账号</td></tr><tr><td>子账号</td><td>无法管理其他子账号</td></tr></table><hr id=\"blk-hr\"/><h2 id=\"blk-feature\">四、功能需求</h2><h3 id=\"blk-account\">4.1 账号管理</h3>",
+	17
+);
+const headingInsertAroundHrPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# spec\n\n## 三、用户角色\n\n| 角色 | 说明 |\n| --- | --- |\n| 主账号 | 可管理子账号 |\n| 子账号 | 无法管理其他子账号 |\n\n### 测试githook修改11\n\n---\n\n## 四、功能需求 测试修改\n\n### 4.1 账号管理",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: headingInsertAroundHrState
+});
+assert.equal(headingInsertAroundHrPlan.mode, "precise");
+assert.deepEqual(headingInsertAroundHrPlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_insert_after",
+		docFormat: "xml",
+		blockId: "blk-table",
+		contentFileName: "sync.md",
+		content: "<h3>测试githook修改11</h3>"
+	},
+	{
+		doc: "doc-token",
+		command: "block_replace",
+		docFormat: "xml",
+		blockId: "blk-feature",
+		contentFileName: "sync.md",
+		content: "<h2>四、功能需求 测试修改</h2>"
+	}
+]);
+
+const kindChangedGapState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n## Before\n\nBody\n\n## After",
+	"<title id=\"doc-title\">Note</title><h2 id=\"blk-before\">Before</h2><p id=\"blk-body\">Body</p><h2 id=\"blk-after\">After</h2>",
+	18
+);
+const kindChangedGapPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n## Before\n\n- Body\n- Extra\n\n## After",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: kindChangedGapState
+});
+assert.equal(kindChangedGapPlan.mode, "precise");
+assert.deepEqual(kindChangedGapPlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_delete",
+		blockId: "blk-body"
+	},
+	{
+		doc: "doc-token",
+		command: "block_insert_after",
+		docFormat: "markdown",
+		blockId: "blk-before",
+		contentFileName: "sync.md",
+		content: "- Body\n- Extra"
 	}
 ]);
 

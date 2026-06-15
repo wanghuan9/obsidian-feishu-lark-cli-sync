@@ -33,6 +33,7 @@ async function run() {
 		await testPreciseBlockedWhenBootstrapFails(workspace);
 		await testPreciseReplaceRefreshesState(workspace);
 		await testPreciseInsertRefreshesState(workspace);
+		await testPreciseHeadingInsertUsesXml(workspace);
 		await testPreciseDeleteRefreshesState(workspace);
 		await testPreciseRefreshRetriesStaleRemote(workspace);
 		await testPreciseRefreshFailsOnStaleRemote(workspace);
@@ -200,6 +201,28 @@ async function testPreciseInsertRefreshesState(workspace) {
 		"blk-1",
 		"blk-2"
 	]);
+}
+
+async function testPreciseHeadingInsertUsesXml(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Body\n\n## Inserted"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateWithUnits(workspace, "https://example.feishu.cn/docx/doc-token", "# bound\n\nBody", [{
+		stableId: "0:paragraph",
+		kind: "paragraph",
+		hash: await createContentHash("Body"),
+		blockId: "blk-1"
+	}]);
+	await clearLog(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_FETCH_INSERTED_AFTER_UPDATE: "1"
+		}
+	});
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+update .*--command block_insert_after .*--doc-format xml .*--block-id blk-1/);
+	await clearLog(workspace);
 }
 
 async function testPreciseDeleteRefreshesState(workspace) {

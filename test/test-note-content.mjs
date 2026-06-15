@@ -16,7 +16,7 @@ const file = { basename: "File Name Title" };
 
 assert.equal(
 	prepareNoteContentForLark(file, "# Markdown Title\n\nBody", "file-name"),
-	"# Markdown Title\n\nBody"
+	"# File Name Title\n\nBody"
 );
 
 assert.equal(

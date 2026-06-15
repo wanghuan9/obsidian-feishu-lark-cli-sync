@@ -72,11 +72,13 @@ const DEFAULT_AUTO_SYNC_DELAY_SECONDS = 15;
 const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
 const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
 const REMOTE_STATE_REFRESH_DELAY_MS = 600;
+const FOLDER_SYNC_PARALLEL_LIMIT = 3;
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
 const FALLBACK_PATH_ENTRIES = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 type Language = "zh-CN" | "en";
 type AutoSyncMode = "manual" | "save" | "pre-push";
+type PrePushHookStatus = "installed" | "not-installed" | "not-git-repository" | "unavailable" | "unknown";
 type RemoteParentKind = "wiki" | "drive" | "my_library" | "unknown";
 
 interface LarkCliSyncSettings {
@@ -148,6 +150,18 @@ interface FolderPublishEntry {
 	isNewDocument: boolean;
 }
 
+interface FolderPreparedFile {
+	file: TFile;
+	content: string;
+	binding: BoundLarkDocument | null;
+	remoteParentPath: string;
+}
+
+interface IndexedFolderPreparedFile {
+	preparedFile: FolderPreparedFile;
+	index: number;
+}
+
 interface RemoteParent {
 	token: string;
 	kind: RemoteParentKind;
@@ -160,6 +174,8 @@ interface SyncFileOptions {
 	showRemoteDeletedNotice: boolean;
 	updateFrontmatter: boolean;
 	mode: SyncMode;
+	strategy?: SyncStrategy;
+	successMessageKey?: MessageKey;
 }
 
 interface SyncOrRecreateOptions {
@@ -177,15 +193,19 @@ class LocalizedSyncError extends Error {
 const MESSAGES = {
 	"zh-CN": {
 		commandSyncCurrentNote: "同步到飞书",
+		commandOverwriteCurrentNote: "覆盖同步到飞书",
 		menuSyncToLark: "同步到飞书",
+		menuOverwriteSyncToLark: "覆盖同步到飞书",
 		menuPublishFolderToLark: "同步目录到飞书",
 		ribbonSyncCurrentNote: "同步到飞书",
 		noticeNoActiveMarkdownNote: "当前没有打开 Markdown 笔记。",
 		noticeSyncingToLark: "正在同步到飞书...",
+		noticeOverwriteSyncingToLark: "正在覆盖同步到飞书...",
 		noticePublishingFolderToLark: "正在发布目录到飞书...",
 		noticeNoMarkdownFilesInFolder: "该目录下没有 Markdown 文件。",
 		noticePublishedToLark: "已发布到飞书",
 		noticeSyncedToLark: "已同步到飞书",
+		noticeOverwriteSyncedToLark: "已覆盖同步到飞书",
 		noticePublishedFolderToLark: "已发布 {count} 篇笔记到飞书。",
 		noticeSyncFailed: "飞书同步失败：{message}",
 		noticeRemoteDeletedRecreate: "远端文档已删除，正在重新创建...",
@@ -229,19 +249,29 @@ const MESSAGES = {
 		settingStateCacheDesc: "设置最多保留多少篇文档状态；超过保留数的 1.5 倍时自动裁剪旧状态。老文档下次同步会重新建立块映射。",
 		settingInstallPrePushHookName: "安装 Git pre-push hook",
 		settingInstallPrePushHookDesc: "把 hook 安装到当前 Obsidian 仓库的 .git/hooks/pre-push。hook 会读取插件设置，只有选择 Git pre-push hook 时才同步。",
+		prePushHookStatusInstalled: "状态：hook 已安装。",
+		prePushHookStatusMissing: "状态：已选择 Git pre-push hook，但当前仓库尚未安装 hook。",
+		prePushHookStatusMissingInactive: "状态：当前仓库尚未安装 hook。",
+		prePushHookStatusUnavailable: "状态：当前环境无法检查本地 Git hook。",
+		prePushHookStatusNotGitRepository: "状态：当前 Obsidian 仓库不是 Git 仓库，无法安装 hook。",
+		prePushHookStatusChecking: "状态：正在检查 hook 安装状态...",
 		installPrePushHookButton: "安装 hook"
 	},
 	en: {
 		commandSyncCurrentNote: "Sync to Feishu/Lark",
+		commandOverwriteCurrentNote: "Overwrite sync to Feishu/Lark",
 		menuSyncToLark: "Sync to Feishu/Lark",
+		menuOverwriteSyncToLark: "Overwrite sync to Feishu/Lark",
 		menuPublishFolderToLark: "Sync folder to Feishu/Lark",
 		ribbonSyncCurrentNote: "Sync to Feishu/Lark",
 		noticeNoActiveMarkdownNote: "No active Markdown note.",
 		noticeSyncingToLark: "Syncing to Lark...",
+		noticeOverwriteSyncingToLark: "Overwriting to Lark...",
 		noticePublishingFolderToLark: "Publishing folder to Lark...",
 		noticeNoMarkdownFilesInFolder: "No Markdown files found in this folder.",
 		noticePublishedToLark: "Published to Feishu/Lark",
 		noticeSyncedToLark: "Synced to Feishu/Lark",
+		noticeOverwriteSyncedToLark: "Overwritten to Feishu/Lark",
 		noticePublishedFolderToLark: "Published {count} notes to Feishu/Lark.",
 		noticeSyncFailed: "Feishu/Lark sync failed: {message}",
 		noticeRemoteDeletedRecreate: "Remote document was deleted. Creating a new document...",
@@ -285,6 +315,12 @@ const MESSAGES = {
 		settingStateCacheDesc: "Maximum document states to keep. Old states are trimmed after the cache exceeds 1.5x this value. Old documents rebuild block mapping on next sync.",
 		settingInstallPrePushHookName: "Install Git pre-push hook",
 		settingInstallPrePushHookDesc: "Install the hook into .git/hooks/pre-push of the current Obsidian vault. The hook reads plugin settings and syncs only when Git pre-push hook mode is selected.",
+		prePushHookStatusInstalled: "Status: hook is installed.",
+		prePushHookStatusMissing: "Status: Git pre-push hook is selected, but this repository has no installed hook yet.",
+		prePushHookStatusMissingInactive: "Status: this repository has no installed hook yet.",
+		prePushHookStatusUnavailable: "Status: cannot check the local Git hook in this environment.",
+		prePushHookStatusNotGitRepository: "Status: the current Obsidian vault is not a Git repository, so hook cannot be installed.",
+		prePushHookStatusChecking: "Status: checking hook installation...",
 		installPrePushHookButton: "Install hook"
 	}
 } as const;
@@ -297,6 +333,15 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private readonly autoSyncRunningPaths = new Set<string>();
 	private readonly autoSyncPendingPaths = new Set<string>();
 	private readonly selfWrittenPaths = new Map<string, number>();
+	private syncStateSaveQueue: Promise<void> = Promise.resolve();
+	private cachedLarkCliPath: string | null = null;
+	private cachedLarkCliPathSetting = "";
+	private pendingLarkCliPath: Promise<string> | null = null;
+	private cachedCommandEnvironment: NodeJS.ProcessEnv | null = null;
+	private cachedCommandEnvironmentExecutable = "";
+	private cachedCommandEnvironmentShellPath = "";
+	private cachedLoginShellPath: string | null = null;
+	private pendingLoginShellPath: Promise<string> | null = null;
 	private syncState: LarkSyncStateFile = createEmptySyncStateFile();
 
 	override async onload(): Promise<void> {
@@ -320,6 +365,14 @@ export default class LarkCliSyncPlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: "overwrite-sync-current-note-to-lark",
+			name: this.t("commandOverwriteCurrentNote"),
+			callback: () => {
+				void this.overwriteSyncCurrentNote();
+			}
+		});
+
 		this.addRibbonIcon("upload", this.t("ribbonSyncCurrentNote"), () => {
 			void this.syncCurrentNote();
 		});
@@ -329,6 +382,11 @@ export default class LarkCliSyncPlugin extends Plugin {
 				menu.addItem((item) => {
 					item.setTitle(this.t("menuSyncToLark")).setIcon("refresh-cw").onClick(() => {
 						void this.syncFile(file);
+					});
+				});
+				menu.addItem((item) => {
+					item.setTitle(this.t("menuOverwriteSyncToLark")).setIcon("replace").onClick(() => {
+						void this.overwriteSyncFile(file);
 					});
 				});
 			}
@@ -366,6 +424,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	async saveSettings(): Promise<void> {
+		this.clearLarkCliCommandCache();
 		await this.saveData(this.settings);
 	}
 
@@ -393,6 +452,16 @@ export default class LarkCliSyncPlugin extends Plugin {
 		await this.syncFile(file);
 	}
 
+	private async overwriteSyncCurrentNote(): Promise<void> {
+		const file = this.getActiveMarkdownFile();
+		if (!file) {
+			new Notice(this.t("noticeNoActiveMarkdownNote"));
+			return;
+		}
+
+		await this.overwriteSyncFile(file);
+	}
+
 	private async syncFile(file: TFile): Promise<void> {
 		await this.runWithNotice(this.t("noticeSyncingToLark"), async () => {
 			await this.syncFileInternal(file, {
@@ -402,6 +471,21 @@ export default class LarkCliSyncPlugin extends Plugin {
 				showRemoteDeletedNotice: true,
 				updateFrontmatter: this.settings.updateFrontmatter,
 				mode: "manual"
+			});
+		});
+	}
+
+	private async overwriteSyncFile(file: TFile): Promise<void> {
+		await this.runWithNotice(this.t("noticeOverwriteSyncingToLark"), async () => {
+			await this.syncFileInternal(file, {
+				allowCreate: true,
+				openAfterSync: true,
+				showSuccess: true,
+				showRemoteDeletedNotice: true,
+				updateFrontmatter: this.settings.updateFrontmatter,
+				mode: "manual",
+				strategy: "overwrite",
+				successMessageKey: "noticeOverwriteSyncedToLark"
 			});
 		});
 	}
@@ -438,6 +522,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 			showRemoteDeletedNotice: options.showRemoteDeletedNotice,
 			mode: options.mode,
 			path: file.path,
+			strategy: options.strategy,
 			stateKeys: [binding.token, binding.url]
 		});
 
@@ -446,7 +531,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}
 
 		if (options.showSuccess) {
-			this.showSuccess(this.t("noticeSyncedToLark"), nextBinding.url);
+			this.showSuccess(this.t(options.successMessageKey || "noticeSyncedToLark"), nextBinding.url);
 		}
 
 		if (options.openAfterSync) {
@@ -556,26 +641,50 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	private async tryRefreshInstalledPrePushHook(): Promise<void> {
 		try {
-			const vaultPath = this.getVaultBasePath();
-			if (!vaultPath) {
+			const hookInfo = await this.getPrePushHookInfo();
+			if (hookInfo.status !== "installed" || !hookInfo.hooksDirectory) {
 				return;
 			}
 
-			const hooksDirectory = join(vaultPath, ".git", "hooks");
-			const hookPath = join(hooksDirectory, "pre-push");
-			if (!await this.pathExists(hookPath)) {
-				return;
-			}
-
-			const hookContent = await readFile(hookPath, "utf8");
-			if (!hookContent.includes(PRE_PUSH_HOOK_MARKER)) {
-				return;
-			}
-
-			await this.refreshPrePushHookHelpers(hooksDirectory);
+			await this.refreshPrePushHookHelpers(hookInfo.hooksDirectory);
 		} catch (error) {
 			console.warn("[Feishu Lark CLI Sync] failed to refresh pre-push hook helpers", error);
 		}
+	}
+
+	async getPrePushHookStatus(): Promise<PrePushHookStatus> {
+		try {
+			const hookInfo = await this.getPrePushHookInfo();
+			return hookInfo.status;
+		} catch (error) {
+			console.warn("[Feishu Lark CLI Sync] failed to check pre-push hook status", error);
+			return "unknown";
+		}
+	}
+
+	private async getPrePushHookInfo(): Promise<{ status: PrePushHookStatus; hooksDirectory?: string }> {
+		const vaultPath = this.getVaultBasePath();
+		if (!vaultPath) {
+			return { status: "unavailable" };
+		}
+
+		const gitDirectory = join(vaultPath, ".git");
+		if (!await this.pathExists(gitDirectory)) {
+			return { status: "not-git-repository" };
+		}
+
+		const hooksDirectory = join(gitDirectory, "hooks");
+		const hookPath = join(hooksDirectory, "pre-push");
+		if (!await this.pathExists(hookPath)) {
+			return { status: "not-installed", hooksDirectory };
+		}
+
+		const hookContent = await readFile(hookPath, "utf8");
+		if (!hookContent.includes(PRE_PUSH_HOOK_MARKER)) {
+			return { status: "not-installed", hooksDirectory };
+		}
+
+		return { status: "installed", hooksDirectory };
 	}
 
 	private async refreshPrePushHookHelpers(hooksDirectory: string): Promise<void> {
@@ -643,6 +752,14 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	private async saveLarkSyncState(): Promise<void> {
+		const saveTask = this.syncStateSaveQueue.then(() => {
+			return this.writeLarkSyncState();
+		});
+		this.syncStateSaveQueue = saveTask.catch(() => {});
+		await saveTask;
+	}
+
+	private async writeLarkSyncState(): Promise<void> {
 		const statePath = this.getLarkSyncStatePath();
 		if (!statePath) {
 			return;
@@ -797,40 +914,109 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			const entries: FolderPublishEntry[] = [];
 			const folderRoot = this.getSelectedFolderName(folderPath);
 			const rootParent = await this.resolveRemoteRootParent();
-
-			for (const file of files) {
+			const preparedFiles = await Promise.all(files.map(async (file) => {
 				const content = await this.readNoteForLark(file);
 				const binding = this.getBinding(file);
 				const documentParentPath = this.getRemoteParentPath(folderPath, file, folderRoot);
-				const documentParent = await this.ensureRemoteFolderPath(rootParent, documentParentPath);
-				const nextBinding = binding
-					? await this.resolveFolderBinding(file, binding, content, documentParent)
-					: await this.createLarkDocument(file, content, documentParent);
-				const nextBindingWithParent = this.withRemoteParentMetadata(
-					nextBinding,
-					folderRoot,
-					documentParentPath,
-					documentParent
-				);
-
-				entries.push({
+				return {
 					file,
 					content,
-					binding: nextBindingWithParent,
-					parent: documentParent,
-					remoteParentPath: documentParentPath,
-					isNewDocument: !binding || nextBinding.token !== binding.token || nextBinding.url !== binding.url
-				});
+					binding,
+					remoteParentPath: documentParentPath
+				};
+			}));
+			const parentsByPath = await this.resolveFolderParents(rootParent, preparedFiles);
+			const indexedPreparedFiles = preparedFiles.map((preparedFile, index) => {
+				return {
+					preparedFile,
+					index
+				};
+			});
 
-				if (this.shouldWriteBinding(binding, nextBindingWithParent, this.settings.updateFrontmatter)) {
-					await this.writeBinding(file, nextBindingWithParent);
+			const preparedFileGroups = this.groupPreparedFilesByDocument(indexedPreparedFiles);
+			await this.runWithConcurrency(preparedFileGroups, FOLDER_SYNC_PARALLEL_LIMIT, async (preparedFileGroup) => {
+				for (const item of preparedFileGroup) {
+					await this.prepareFolderEntry(item, entries, folderRoot, rootParent, parentsByPath);
 				}
-			}
+			});
 
 			await this.syncFolderEntries(folderPath, folderRoot, entries);
 
 			new Notice(this.t("noticePublishedFolderToLark", { count: String(entries.length) }), 8000);
 		});
+	}
+
+	private async resolveFolderParents(
+		rootParent: RemoteParent,
+		preparedFiles: FolderPreparedFile[]
+	): Promise<Map<string, RemoteParent>> {
+		const parentsByPath = new Map<string, RemoteParent>();
+		const parentPaths = this.uniquePathEntries(preparedFiles.map((preparedFile) => {
+			return preparedFile.remoteParentPath;
+		})).sort((left, right) => {
+			return this.countPathSegments(left) - this.countPathSegments(right) || left.localeCompare(right);
+		});
+
+		for (const parentPath of parentPaths) {
+			parentsByPath.set(parentPath, await this.ensureRemoteFolderPath(rootParent, parentPath));
+		}
+
+		return parentsByPath;
+	}
+
+	private groupPreparedFilesByDocument(
+		preparedFiles: IndexedFolderPreparedFile[]
+	): IndexedFolderPreparedFile[][] {
+		const groups = new Map<string, IndexedFolderPreparedFile[]>();
+		for (const preparedFile of preparedFiles) {
+			const binding = preparedFile.preparedFile.binding;
+			const groupKey = binding ? getDocumentStateKey(binding.token || binding.url) : `new:${preparedFile.index}`;
+			const group = groups.get(groupKey) || [];
+			group.push(preparedFile);
+			groups.set(groupKey, group);
+		}
+
+		return Array.from(groups.values());
+	}
+
+	private async prepareFolderEntry(
+		item: IndexedFolderPreparedFile,
+		entries: FolderPublishEntry[],
+		folderRoot: string,
+		rootParent: RemoteParent,
+		parentsByPath: Map<string, RemoteParent>
+	): Promise<void> {
+		const { preparedFile, index } = item;
+		const documentParent = parentsByPath.get(preparedFile.remoteParentPath) || rootParent;
+		const nextBinding = preparedFile.binding
+			? await this.resolveFolderBinding(
+				preparedFile.file,
+				preparedFile.binding,
+				preparedFile.content,
+				documentParent
+			)
+			: await this.createLarkDocument(preparedFile.file, preparedFile.content, documentParent);
+		const nextBindingWithParent = this.withRemoteParentMetadata(
+			nextBinding,
+			folderRoot,
+			preparedFile.remoteParentPath,
+			documentParent
+		);
+
+		entries[index] = {
+			file: preparedFile.file,
+			content: preparedFile.content,
+			binding: nextBindingWithParent,
+			parent: documentParent,
+			remoteParentPath: preparedFile.remoteParentPath,
+			isNewDocument: !preparedFile.binding
+				|| nextBinding.token !== preparedFile.binding.token
+				|| nextBinding.url !== preparedFile.binding.url
+		};
+
+		if (this.shouldWriteBinding(preparedFile.binding, nextBindingWithParent, this.settings.updateFrontmatter)) {
+			await this.writeBinding(preparedFile.file, nextBindingWithParent);
+		}
 	}
 
 	private async syncFolderEntries(folderPath: string, folderRoot: string, entries: FolderPublishEntry[]): Promise<void> {
@@ -857,6 +1043,37 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async syncFolderEntriesOnce(
+		folderRoot: string,
+		entries: FolderPublishEntry[],
+		linkMap: Map<string, LinkTarget>
+	): Promise<boolean> {
+		const entryGroups = this.groupFolderEntriesByDocument(entries);
+		let hasBindingChanged = false;
+		await this.runWithConcurrency(entryGroups, FOLDER_SYNC_PARALLEL_LIMIT, async (entryGroup) => {
+			const groupBindingChanged = await this.syncFolderEntryGroupOnce(folderRoot, entryGroup, linkMap);
+			hasBindingChanged = hasBindingChanged || groupBindingChanged;
+		});
+
+		return hasBindingChanged;
+	}
+
+	private groupFolderEntriesByDocument(entries: FolderPublishEntry[]): FolderPublishEntry[][] {
+		const groups = new Map<string, FolderPublishEntry[]>();
+		for (const entry of entries) {
+			if (!entry.binding) {
+				continue;
+			}
+
+			const groupKey = getDocumentStateKey(entry.binding.token || entry.binding.url);
+			const group = groups.get(groupKey) || [];
+			group.push(entry);
+			groups.set(groupKey, group);
+		}
+
+		return Array.from(groups.values());
+	}
+
+	private async syncFolderEntryGroupOnce(
 		folderRoot: string,
 		entries: FolderPublishEntry[],
 		linkMap: Map<string, LinkTarget>
@@ -905,6 +1122,34 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return false;
+	}
+
+	private async runWithConcurrency<T>(
+		items: T[],
+		limit: number,
+		worker: (item: T) => Promise<void>
+	): Promise<void> {
+		const executing = new Set<Promise<void>>();
+		let firstError: unknown;
+		for (const item of items) {
+			let task: Promise<void>;
+			task = Promise.resolve().then(() => {
+				return worker(item);
+			}).catch((error) => {
+				firstError = firstError || error;
+			}).finally(() => {
+				executing.delete(task);
+			});
+			executing.add(task);
+			if (executing.size >= limit) {
+				await Promise.race(executing);
+			}
+		}
+
+		await Promise.all(executing);
+		if (firstError) {
+			throw firstError;
+		}
 	}
 
 	private getActiveMarkdownFile(): TFile | null {
@@ -1009,7 +1254,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					state: refreshedState
 				});
 				if (refreshedPlan.mode !== "blocked") {
-					return await this.executeSyncPlan(refreshedState.doc, content, refreshedPlan, context);
+					return await this.executeSyncPlan(refreshedState.doc, content, refreshedPlan, {
+						...context,
+						previousRevisionId: refreshedState.revisionId
+					});
 				}
 			}
 		}
@@ -1025,11 +1273,17 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					strategy,
 					state: refreshedState
 				});
-				return await this.executeSyncPlan(refreshedState.doc, content, refreshedPlan, context);
+				return await this.executeSyncPlan(refreshedState.doc, content, refreshedPlan, {
+					...context,
+					previousRevisionId: refreshedState.revisionId
+				});
 			}
 		}
 
-		return await this.executeSyncPlan(syncDoc, content, plan, context);
+		return await this.executeSyncPlan(syncDoc, content, plan, {
+			...context,
+			previousRevisionId: state?.revisionId
+		});
 	}
 
 	private findDocumentState(docs: string[]): LarkSyncStateFile["documents"][string] | undefined {
@@ -1047,7 +1301,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		doc: string,
 		content: string,
 		plan: SyncPlan,
-		context: { mode: SyncMode; path: string; stateKeys?: string[] }
+		context: { mode: SyncMode; path: string; stateKeys?: string[]; previousRevisionId?: number }
 	): Promise<Partial<BoundLarkDocument>> {
 		if (plan.mode === "skipped") {
 			await this.ensureRemoteDocumentMatches(doc, content, context);
@@ -1062,6 +1316,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		return await this.withTempMarkdown("sync", content, async (tempFile) => {
 			let latestDocument: Partial<BoundLarkDocument> = {};
+			if (plan.mode === "overwrite") {
+				this.removeSyncStateKeys([doc, ...(context.stateKeys || [])], doc);
+				await this.saveLarkSyncState();
+			}
 			for (const [index, command] of plan.commands.entries()) {
 				const contentFileName = "content" in command && command.content
 					? await this.writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
@@ -1082,7 +1340,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			if (plan.mode === "precise") {
-				await this.saveRemoteDocumentState(doc, context.stateKeys || [], content, context);
+				await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
+					expectedMarkdown: content,
+					context
+				});
+			} else if (plan.mode === "overwrite") {
+				await this.saveOverwrittenDocumentState(doc, latestDocument, content, context);
 			} else {
 				await this.saveSyncPlanStateForDocument(doc, latestDocument, plan, context.stateKeys || []);
 			}
@@ -1097,6 +1360,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		extraKeys: string[]
 	): Promise<void> {
 		await this.saveSyncPlanState(doc, plan);
+		if (document.token || document.url) {
+			this.removeSyncStateKeys([doc, document.token || "", document.url || "", ...extraKeys], doc);
+			await this.saveLarkSyncState();
+		}
 	}
 
 	private async saveSyncPlanState(doc: string, plan: SyncPlan): Promise<void> {
@@ -1116,13 +1383,33 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		await this.saveLarkSyncState();
 	}
 
+	private async saveOverwrittenDocumentState(
+		doc: string,
+		document: Partial<BoundLarkDocument>,
+		expectedMarkdown: string,
+		context: { mode: SyncMode; path: string; stateKeys?: string[] }
+	): Promise<void> {
+		const resolvedDoc = document.token || document.url || doc;
+		const stateKeys = [doc, document.token || "", document.url || "", ...(context.stateKeys || [])];
+		await this.saveRemoteDocumentState(resolvedDoc, stateKeys, {
+			expectedMarkdown,
+			context
+		});
+	}
+
 	private async saveCreatedDocumentState(binding: BoundLarkDocument): Promise<void> {
 		const doc = binding.token || binding.url;
 		const [remoteMarkdown, remoteXml] = await Promise.all([
 			this.fetchLarkDocumentMarkdown(doc),
 			this.fetchLarkDocumentWithIds(doc)
 		]);
-		const state = await createDocumentSyncStateFromRemote(doc, remoteMarkdown.content, remoteXml.content, remoteXml.revisionId);
+		const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+		const state = await createDocumentSyncStateFromRemote(
+			remoteDoc,
+			remoteMarkdown.content,
+			remoteXml.content,
+			remoteXml.revisionId
+		);
 		const stateKey = getDocumentStateKey(state.doc);
 		this.syncState.documents[stateKey] = {
 			...touchDocumentSyncState(state),
@@ -1131,16 +1418,30 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		await this.saveLarkSyncState();
 	}
 
+	private removeSyncStateKeys(docs: string[], keepDoc: string): void {
+		const keepKey = getDocumentStateKey(keepDoc);
+		for (const key of getDocumentStateKeys(docs)) {
+			if (key !== keepKey) {
+				delete this.syncState.documents[key];
+			}
+		}
+	}
+
 	private async saveRemoteDocumentState(
 		doc: string,
 		stateKeys: string[],
-		expectedMarkdown?: string,
-		context?: { mode: SyncMode; path: string }
+		options: {
+			expectedMarkdown?: string;
+			previousRevisionId?: number;
+			useLatestStateOnTimeout?: boolean;
+			context?: { mode: SyncMode; path: string };
+		} = {}
 	): Promise<void> {
-		const expectedSignature = expectedMarkdown
-			? await createSyncContentSignature(expectedMarkdown)
+		const expectedSignature = options.expectedMarkdown
+			? await createSyncContentSignature(options.expectedMarkdown)
 			: undefined;
 		let state: LarkSyncStateFile["documents"][string] | undefined;
+		let latestState: LarkSyncStateFile["documents"][string] | undefined;
 		for (let attempt = 0; attempt < REMOTE_STATE_REFRESH_ATTEMPTS; attempt += 1) {
 			const [remoteMarkdown, remoteXml] = await Promise.all([
 				this.fetchLarkDocumentMarkdown(doc),
@@ -1153,7 +1454,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				remoteXml.content,
 				remoteXml.revisionId
 			);
-			if (!expectedSignature || isDocumentStateContentEquivalent(remoteState, expectedSignature)) {
+			latestState = remoteState;
+			if (this.isRemoteDocumentStateRefreshAccepted(remoteState, expectedSignature, options.previousRevisionId)) {
 				state = remoteState;
 				break;
 			}
@@ -1163,19 +1465,42 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 		}
 
+		if (!state && options.useLatestStateOnTimeout) {
+			state = latestState;
+		}
+
 		if (!state) {
-			if (context) {
-				throw new LocalizedSyncError(this.formatSyncFailure(context.mode, context.path, "remote-update-not-visible"));
+			if (options.context) {
+				throw new LocalizedSyncError(
+					this.formatSyncFailure(options.context.mode, options.context.path, "remote-update-not-visible")
+				);
 			}
 			return;
 		}
 
-		const stateKey = getDocumentStateKey(doc);
+		const stateKey = getDocumentStateKey(state.doc);
 		this.syncState.documents[stateKey] = {
 			...touchDocumentSyncState(state),
 			doc: stateKey
 		};
+		this.removeSyncStateKeys([doc, ...stateKeys], stateKey);
 		await this.saveLarkSyncState();
+	}
+
+	private isRemoteDocumentStateRefreshAccepted(
+		remoteState: LarkSyncStateFile["documents"][string],
+		expectedSignature: Awaited<ReturnType<typeof createSyncContentSignature>> | undefined,
+		previousRevisionId: number | undefined
+	): boolean {
+		if (expectedSignature) {
+			return isDocumentStateContentEquivalent(remoteState, expectedSignature);
+		}
+
+		if (previousRevisionId !== undefined) {
+			return remoteState.revisionId !== undefined && remoteState.revisionId !== previousRevisionId;
+		}
+
+		return true;
 	}
 
 	private async tryBootstrapPreciseSyncState(
@@ -1243,6 +1568,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			content: result.data?.document?.content || "",
 			revisionId: result.data?.document?.revision_id
 		};
+	}
+
+	private async fetchLarkDocumentRevisionId(doc: string): Promise<number | undefined> {
+		const remoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
+		return remoteMarkdown.revisionId;
 	}
 
 	private async sleep(ms: number): Promise<void> {
@@ -1441,6 +1771,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private normalizeLinkPath(path: string): string {
 		return normalizeLinkPath(path);
+	}
+
+	private countPathSegments(path: string): number {
+		return this.normalizeLinkPath(path).split("/").filter(Boolean).length;
 	}
 
 	private parentPath(path: string): string {
@@ -1738,12 +2072,18 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async buildCommandEnvironment(executable: string): Promise<NodeJS.ProcessEnv> {
+		const shellPath = await this.getLoginShellPath();
+		if (this.cachedCommandEnvironment
+			&& this.cachedCommandEnvironmentExecutable === executable
+			&& this.cachedCommandEnvironmentShellPath === shellPath) {
+			return this.cachedCommandEnvironment;
+		}
+
 		const pathEntries = this.getDefaultPathEntries();
 		if (executable.startsWith("/")) {
 			pathEntries.unshift(dirname(executable));
 		}
 
-		const shellPath = await this.getLoginShellPath();
 		if (shellPath) {
 			pathEntries.unshift(...shellPath.split(":").filter(Boolean));
 		}
@@ -1753,21 +2093,42 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			pathEntries.push(currentPath);
 		}
 
-		return {
+		const env = {
 			...process.env,
 			PATH: this.uniquePathEntries(pathEntries).join(":")
 		};
+		this.cachedCommandEnvironment = env;
+		this.cachedCommandEnvironmentExecutable = executable;
+		this.cachedCommandEnvironmentShellPath = shellPath;
+		return env;
 	}
 
 	private async resolveLarkCliPath(): Promise<string> {
 		const configuredPath = this.settings.larkCliPath.trim();
+		if (this.cachedLarkCliPathSetting === configuredPath && this.cachedLarkCliPath) {
+			return this.cachedLarkCliPath;
+		}
+
+		if (this.pendingLarkCliPath) {
+			return await this.pendingLarkCliPath;
+		}
+
+		this.pendingLarkCliPath = this.resolveLarkCliPathUncached(configuredPath);
+		try {
+			return await this.pendingLarkCliPath;
+		} finally {
+			this.pendingLarkCliPath = null;
+		}
+	}
+
+	private async resolveLarkCliPathUncached(configuredPath: string): Promise<string> {
 		if (configuredPath && configuredPath !== LARK_CLI_COMMAND) {
-			return configuredPath;
+			return this.cacheResolvedLarkCliPath(configuredPath, configuredPath);
 		}
 
 		const shellPath = await this.resolveCommandFromLoginShell(LARK_CLI_COMMAND);
 		if (shellPath) {
-			return shellPath;
+			return this.cacheResolvedLarkCliPath(configuredPath, shellPath);
 		}
 
 		const candidates = [
@@ -1781,15 +2142,24 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		for (const candidate of candidates) {
 			if (candidate === LARK_CLI_COMMAND) {
-				return candidate;
+				return this.cacheResolvedLarkCliPath(configuredPath, candidate);
 			}
 
 			if (await this.canExecute(candidate)) {
-				return candidate;
+				return this.cacheResolvedLarkCliPath(configuredPath, candidate);
 			}
 		}
 
-		return LARK_CLI_COMMAND;
+		return this.cacheResolvedLarkCliPath(configuredPath, LARK_CLI_COMMAND);
+	}
+
+	private cacheResolvedLarkCliPath(setting: string, resolvedPath: string): string {
+		this.cachedLarkCliPathSetting = setting;
+		this.cachedLarkCliPath = resolvedPath;
+		this.cachedCommandEnvironment = null;
+		this.cachedCommandEnvironmentExecutable = "";
+		this.cachedCommandEnvironmentShellPath = "";
+		return resolvedPath;
 	}
 
 	private getDefaultPathEntries(): string[] {
@@ -1820,6 +2190,24 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async getLoginShellPath(): Promise<string> {
+		if (this.cachedLoginShellPath !== null) {
+			return this.cachedLoginShellPath;
+		}
+
+		if (this.pendingLoginShellPath) {
+			return await this.pendingLoginShellPath;
+		}
+
+		this.pendingLoginShellPath = this.resolveLoginShellPathUncached();
+		try {
+			this.cachedLoginShellPath = await this.pendingLoginShellPath;
+			return this.cachedLoginShellPath;
+		} finally {
+			this.pendingLoginShellPath = null;
+		}
+	}
+
+	private async resolveLoginShellPathUncached(): Promise<string> {
 		for (const shell of this.getShellCandidates()) {
 			try {
 				const { stdout } = await execFileAsync(shell, ["-lc", "printf %s \"$PATH\""], {
@@ -1835,6 +2223,17 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return "";
+	}
+
+	private clearLarkCliCommandCache(): void {
+		this.cachedLarkCliPath = null;
+		this.cachedLarkCliPathSetting = "";
+		this.cachedCommandEnvironment = null;
+		this.cachedCommandEnvironmentExecutable = "";
+		this.cachedCommandEnvironmentShellPath = "";
+		this.cachedLoginShellPath = null;
+		this.pendingLarkCliPath = null;
+		this.pendingLoginShellPath = null;
 	}
 
 	private getShellCandidates(): string[] {
@@ -2051,6 +2450,7 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.autoSyncMode).onChange(async (value) => {
 						this.plugin.settings.autoSyncMode = value as AutoSyncMode;
 						await this.plugin.saveSettings();
+						this.display();
 					});
 			});
 
@@ -2082,13 +2482,60 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		const installPrePushHookSetting = new Setting(containerEl)
 			.setName(this.plugin.t("settingInstallPrePushHookName"))
 			.setDesc(this.plugin.t("settingInstallPrePushHookDesc"))
 			.addButton((button) => {
-				button.setButtonText(this.plugin.t("installPrePushHookButton")).onClick(() => {
-					void this.plugin.installPrePushHook();
+				button.setButtonText(this.plugin.t("installPrePushHookButton")).onClick(async () => {
+					await this.plugin.installPrePushHook();
+					this.display();
 				});
 			});
+		this.renderPrePushHookStatus(installPrePushHookSetting);
+	}
+
+	private renderPrePushHookStatus(setting: Setting): void {
+		const statusEl = setting.descEl.createDiv({ text: this.plugin.t("prePushHookStatusChecking") });
+		statusEl.style.color = "var(--text-muted)";
+		void this.plugin.getPrePushHookStatus().then((status) => {
+			statusEl.setText(this.getPrePushHookStatusText(status));
+			statusEl.style.color = this.getPrePushHookStatusColor(status);
+		});
+	}
+
+	private getPrePushHookStatusText(status: PrePushHookStatus): string {
+		if (status === "installed") {
+			return this.plugin.t("prePushHookStatusInstalled");
+		}
+
+		if (status === "not-git-repository") {
+			return this.plugin.t("prePushHookStatusNotGitRepository");
+		}
+
+		if (status === "unavailable" || status === "unknown") {
+			return this.plugin.t("prePushHookStatusUnavailable");
+		}
+
+		if (this.plugin.settings.autoSyncMode !== "pre-push") {
+			return this.plugin.t("prePushHookStatusMissingInactive");
+		}
+
+		return this.plugin.t("prePushHookStatusMissing");
+	}
+
+	private getPrePushHookStatusColor(status: PrePushHookStatus): string {
+		if (status === "installed") {
+			return "var(--text-success)";
+		}
+
+		if (status === "not-installed" && this.plugin.settings.autoSyncMode === "pre-push") {
+			return "var(--text-error)";
+		}
+
+		if (status === "not-git-repository") {
+			return "var(--text-warning)";
+		}
+
+		return "var(--text-muted)";
 	}
 }

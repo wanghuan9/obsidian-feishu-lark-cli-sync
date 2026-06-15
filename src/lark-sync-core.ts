@@ -160,6 +160,10 @@ export const FRONTMATTER_BINDING_KEYS = [
 
 export function prepareNoteContentForLark(file: NoteFile, content: string, titleSource: TitleSource): string {
 	const title = extractTitle(file, content, titleSource);
+	if (titleSource === "file-name") {
+		return withMarkdownTitle(content, title);
+	}
+
 	if (/^\s*#\s+/m.test(content)) {
 		return content;
 	}
@@ -720,14 +724,12 @@ async function buildPreciseReplacePlan(
 				};
 			}
 
-			commands.push({
-				doc: input.doc,
-				command: "block_replace",
-				docFormat: "markdown",
-				blockId: previousUnit.blockId,
-				contentFileName: input.contentFileName,
-				content: nextUnit.content
-			});
+			commands.push(createReplaceCommand(
+				input.doc,
+				input.contentFileName,
+				previousUnit.blockId,
+				nextUnit
+			));
 		}
 	}
 
@@ -801,18 +803,60 @@ async function buildPreciseInsertPlan(
 		return null;
 	}
 
+	const insertedContent = createInsertedContent(insertedUnits);
 	return {
 		mode: "precise",
 		commands: [{
 			doc: input.doc,
 			command: "block_insert_after",
-			docFormat: "markdown",
+			docFormat: insertedContent.docFormat,
 			blockId: anchorBlockId,
 			contentFileName: input.contentFileName,
-			content: joinInsertedUnitContent(insertedUnits)
+			content: insertedContent.content
 		}],
 		contentHash
 	};
+}
+
+function createInsertedContent(units: MarkdownSyncUnit[]): { docFormat: "markdown" | "xml"; content: string } {
+	if (units.length === 1 && units[0]?.kind === "heading") {
+		return {
+			docFormat: "xml",
+			content: createHeadingXmlContent(units[0].content)
+		};
+	}
+
+	return {
+		docFormat: "markdown",
+		content: joinInsertedUnitContent(units)
+	};
+}
+
+function createReplaceCommand(
+	doc: string,
+	contentFileName: string,
+	blockId: string,
+	nextUnit: MarkdownSyncUnit
+): LarkUpdateCommand {
+	const content = createInsertedContent([nextUnit]);
+	return {
+		doc,
+		command: "block_replace",
+		docFormat: content.docFormat,
+		blockId,
+		contentFileName,
+		content: content.content
+	};
+}
+
+function createHeadingXmlContent(markdown: string): string {
+	const match = markdown.match(/^(#{2,6})\s+(.+)$/);
+	if (!match) {
+		return `<p>${escapeXmlText(markdown)}</p>`;
+	}
+
+	const level = Math.min(9, Math.max(2, match[1]!.length));
+	return `<h${level}>${escapeXmlText(match[2]!.trim())}</h${level}>`;
 }
 
 function joinInsertedUnitContent(units: MarkdownSyncUnit[]): string {
@@ -825,6 +869,13 @@ function joinInsertedUnitContent(units: MarkdownSyncUnit[]): string {
 		const separator = previousUnit?.kind === "list" && unit.kind === "list" ? "\n" : "\n\n";
 		return `${content}${separator}${unit.content}`;
 	}, "");
+}
+
+function escapeXmlText(content: string): string {
+	return content
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
 }
 
 async function buildPreciseMixedInsertReplacePlan(
@@ -956,14 +1007,7 @@ function buildMixedGapCommands(
 			continue;
 		}
 
-		commands.push({
-			doc,
-			command: "block_replace",
-			docFormat: "markdown",
-			blockId: previousUnit.blockId,
-			contentFileName,
-			content: nextUnit.content
-		});
+		commands.push(createReplaceCommand(doc, contentFileName, previousUnit.blockId, nextUnit));
 	}
 
 	if (previousGap.length > nextGap.length) {
@@ -984,8 +1028,122 @@ function buildMixedUnalignedGapCommands(
 	nextGap: MarkdownSyncUnit[],
 	anchorBlockId: string
 ): LarkUpdateCommand[] | null {
-	const matches = findGapKindMatches(previousGap, nextGap);
-	if (matches.length === 0) {
+	const commands: LarkUpdateCommand[] = [];
+	let previousCursor = 0;
+	let nextCursor = 0;
+	let currentAnchorBlockId = anchorBlockId;
+	const anchors = findReliableGapAnchors(previousGap, nextGap);
+	for (const anchor of anchors) {
+		const gapCommands = buildGapEditCommands(
+			doc,
+			contentFileName,
+			previousGap.slice(previousCursor, anchor.previousIndex),
+			nextGap.slice(nextCursor, anchor.nextIndex),
+			currentAnchorBlockId
+		);
+		if (!gapCommands) {
+			return null;
+		}
+
+		commands.push(...gapCommands);
+		const previousUnit = previousGap[anchor.previousIndex];
+		if (!previousUnit?.blockId) {
+			return null;
+		}
+		currentAnchorBlockId = previousUnit.blockId;
+		previousCursor = anchor.previousIndex + 1;
+		nextCursor = anchor.nextIndex + 1;
+	}
+
+	const tailCommands = buildGapEditCommands(
+		doc,
+		contentFileName,
+		previousGap.slice(previousCursor),
+		nextGap.slice(nextCursor),
+		currentAnchorBlockId
+	);
+	if (!tailCommands) {
+		return null;
+	}
+
+	return [...commands, ...tailCommands];
+}
+
+function buildGapEditCommands(
+	doc: string,
+	contentFileName: string,
+	previousGap: SyncUnitState[],
+	nextGap: MarkdownSyncUnit[],
+	anchorBlockId: string
+): LarkUpdateCommand[] | null {
+	if (previousGap.length === 0) {
+		return buildInsertAfterCommands(doc, contentFileName, nextGap, anchorBlockId);
+	}
+
+	if (nextGap.length === 0) {
+		return buildDeleteCommands(doc, previousGap);
+	}
+
+	if (previousGap.length === nextGap.length) {
+		const replaceCommands = buildAlignedReplaceCommands(doc, contentFileName, previousGap, nextGap);
+		if (replaceCommands) {
+			return replaceCommands;
+		}
+	}
+
+	const kindAnchoredCommands = buildKindAnchoredGapCommands(
+		doc,
+		contentFileName,
+		previousGap,
+		nextGap,
+		anchorBlockId
+	);
+	if (kindAnchoredCommands) {
+		return kindAnchoredCommands;
+	}
+
+	const deleteCommands = buildDeleteCommands(doc, previousGap);
+	if (!deleteCommands) {
+		return null;
+	}
+
+	const insertCommands = buildInsertAfterCommands(doc, contentFileName, nextGap, anchorBlockId);
+	return insertCommands ? [...deleteCommands, ...insertCommands] : null;
+}
+
+function buildAlignedReplaceCommands(
+	doc: string,
+	contentFileName: string,
+	previousGap: SyncUnitState[],
+	nextGap: MarkdownSyncUnit[]
+): LarkUpdateCommand[] | null {
+	if (!previousGap.every((unit, index) => unit.blockId && nextGap[index]?.kind === unit.kind)) {
+		return null;
+	}
+
+	const commands: LarkUpdateCommand[] = [];
+	for (let index = 0; index < previousGap.length; index += 1) {
+		const previousUnit = previousGap[index];
+		const nextUnit = nextGap[index];
+		if (!previousUnit || !nextUnit || previousUnit.hash === nextUnit.hash) {
+			continue;
+		}
+
+		commands.push(createReplaceCommand(doc, contentFileName, previousUnit.blockId, nextUnit));
+	}
+
+	return commands;
+}
+
+function buildKindAnchoredGapCommands(
+	doc: string,
+	contentFileName: string,
+	previousGap: SyncUnitState[],
+	nextGap: MarkdownSyncUnit[],
+	anchorBlockId: string
+): LarkUpdateCommand[] | null {
+	const anchors = findReliableKindGapAnchors(previousGap, nextGap);
+	if (anchors.length === 0) {
 		return null;
 	}
 
@@ -993,74 +1151,162 @@ function buildMixedUnalignedGapCommands(
 	let previousCursor = 0;
 	let nextCursor = 0;
 	let currentAnchorBlockId = anchorBlockId;
-	for (const match of matches) {
-		const deleteCommands = buildDeleteCommands(doc, previousGap.slice(previousCursor, match.previousIndex));
-		if (!deleteCommands) {
-			return null;
-		}
-
-		commands.push(...deleteCommands);
-		const insertCommands = buildInsertAfterCommands(
+	for (const anchor of anchors) {
+		const gapCommands = buildGapEditCommands(
 			doc,
 			contentFileName,
-			nextGap.slice(nextCursor, match.nextIndex),
+			previousGap.slice(previousCursor, anchor.previousIndex),
+			nextGap.slice(nextCursor, anchor.nextIndex),
 			currentAnchorBlockId
 		);
-		if (!insertCommands) {
+		if (!gapCommands) {
 			return null;
 		}
 
-		commands.push(...insertCommands);
-		const previousUnit = previousGap[match.previousIndex];
-		const nextUnit = nextGap[match.nextIndex];
+		commands.push(...gapCommands);
+		const previousUnit = previousGap[anchor.previousIndex];
+		const nextUnit = nextGap[anchor.nextIndex];
 		if (!previousUnit?.blockId || !nextUnit) {
 			return null;
 		}
 
 		if (previousUnit.hash !== nextUnit.hash) {
-			commands.push({
-				doc,
-				command: "block_replace",
-				docFormat: "markdown",
-				blockId: previousUnit.blockId,
-				contentFileName,
-				content: nextUnit.content
-			});
+			commands.push(createReplaceCommand(doc, contentFileName, previousUnit.blockId, nextUnit));
 		}
 
 		currentAnchorBlockId = previousUnit.blockId;
-		previousCursor = match.previousIndex + 1;
-		nextCursor = match.nextIndex + 1;
+		previousCursor = anchor.previousIndex + 1;
+		nextCursor = anchor.nextIndex + 1;
 	}
 
-	const deleteCommands = buildDeleteCommands(doc, previousGap.slice(previousCursor));
-	if (!deleteCommands) {
+	const tailCommands = buildGapEditCommands(
+		doc,
+		contentFileName,
+		previousGap.slice(previousCursor),
+		nextGap.slice(nextCursor),
+		currentAnchorBlockId
+	);
+	if (!tailCommands) {
 		return null;
 	}
 
-	commands.push(...deleteCommands);
-	const insertCommands = buildInsertAfterCommands(doc, contentFileName, nextGap.slice(nextCursor), currentAnchorBlockId);
-	return insertCommands ? [...commands, ...insertCommands] : null;
+	return [...commands, ...tailCommands];
 }
 
-function findGapKindMatches(
+function findReliableGapAnchors(
 	previousGap: SyncUnitState[],
 	nextGap: MarkdownSyncUnit[]
 ): Array<{ previousIndex: number; nextIndex: number }> {
+	const previousCounts = countContentUnitKeys(previousGap);
+	const nextCounts = countContentUnitKeys(nextGap);
+	const lengths = Array.from({ length: previousGap.length + 1 }, () => {
+		return new Array<number>(nextGap.length + 1).fill(0);
+	});
+	for (let previousIndex = previousGap.length - 1; previousIndex >= 0; previousIndex -= 1) {
+		for (let nextIndex = nextGap.length - 1; nextIndex >= 0; nextIndex -= 1) {
+			const row = lengths[previousIndex];
+			if (!row) {
+				continue;
+			}
+
+			row[nextIndex] = areReliableGapAnchors(
+				previousGap[previousIndex],
+				nextGap[nextIndex],
+				previousCounts,
+				nextCounts
+			)
+				? readMatrixValue(lengths, previousIndex + 1, nextIndex + 1) + 1
+				: Math.max(
+					readMatrixValue(lengths, previousIndex + 1, nextIndex),
+					readMatrixValue(lengths, previousIndex, nextIndex + 1)
+				);
+		}
+	}
+
 	const matches: Array<{ previousIndex: number; nextIndex: number }> = [];
-	const usedNextIndexes = new Set<number>();
-	for (let previousIndex = 0; previousIndex < previousGap.length; previousIndex += 1) {
-		const previousUnit = previousGap[previousIndex];
-		const nextIndex = nextGap.findIndex((nextUnit, candidateIndex) => {
-			return !usedNextIndexes.has(candidateIndex) && nextUnit.kind === previousUnit?.kind;
-		});
-		if (nextIndex >= 0) {
-			usedNextIndexes.add(nextIndex);
+	let previousIndex = 0;
+	let nextIndex = 0;
+	while (previousIndex < previousGap.length && nextIndex < nextGap.length) {
+		if (areReliableGapAnchors(previousGap[previousIndex], nextGap[nextIndex], previousCounts, nextCounts)) {
 			matches.push({ previousIndex, nextIndex });
+			previousIndex += 1;
+			nextIndex += 1;
+		} else if (
+			readMatrixValue(lengths, previousIndex + 1, nextIndex)
+			>= readMatrixValue(lengths, previousIndex, nextIndex + 1)
+		) {
+			previousIndex += 1;
+		} else {
+			nextIndex += 1;
 		}
 	}
 
 	return matches;
+}
+
+function findReliableKindGapAnchors(
+	previousGap: SyncUnitState[],
+	nextGap: MarkdownSyncUnit[]
+): Array<{ previousIndex: number; nextIndex: number }> {
+	const previousCounts = countUnitKinds(previousGap);
+	const nextCounts = countUnitKinds(nextGap);
+	const matches: Array<{ previousIndex: number; nextIndex: number }> = [];
+	let nextCursor = 0;
+	for (let previousIndex = 0; previousIndex < previousGap.length; previousIndex += 1) {
+		const previousUnit = previousGap[previousIndex];
+		if (!previousUnit?.blockId || previousCounts.get(previousUnit.kind) !== 1) {
+			continue;
+		}
+
+		const nextIndex = nextGap.findIndex((nextUnit, candidateIndex) => {
+			return candidateIndex >= nextCursor
+				&& nextUnit.kind === previousUnit.kind
+				&& nextCounts.get(nextUnit.kind) === 1;
+		});
+		if (nextIndex >= 0) {
+			matches.push({ previousIndex, nextIndex });
+			nextCursor = nextIndex + 1;
+		}
+	}
+
+	return matches;
+}
+
+function areReliableGapAnchors(
+	previousUnit: SyncUnitState | undefined,
+	nextUnit: MarkdownSyncUnit | undefined,
+	previousCounts: Map<string, number>,
+	nextCounts: Map<string, number>
+): boolean {
+	if (!previousUnit?.blockId || !nextUnit || !areEquivalentContentUnits(previousUnit, nextUnit)) {
+		return false;
+	}
+
+	const key = createContentUnitKey(previousUnit);
+	return previousCounts.get(key) === 1 && nextCounts.get(key) === 1;
+}
+
+function countContentUnitKeys(units: Array<{ kind: string; hash: string }>): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const unit of units) {
+		const key = createContentUnitKey(unit);
+		counts.set(key, (counts.get(key) || 0) + 1);
+	}
+
+	return counts;
+}
+
+function countUnitKinds(units: Array<{ kind: string }>): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const unit of units) {
+		counts.set(unit.kind, (counts.get(unit.kind) || 0) + 1);
+	}
+
+	return counts;
+}
+
+function createContentUnitKey(unit: { kind: string; hash: string }): string {
+	return `${unit.kind}\0${unit.hash}`;
 }
 
 function buildDeleteCommands(doc: string, deletedUnits: SyncUnitState[]): LarkUpdateCommand[] | null {
@@ -1094,13 +1340,14 @@ function buildInsertAfterCommands(
 		return null;
 	}
 
+	const insertedContent = createInsertedContent(insertedUnits);
 	return [{
 		doc,
 		command: "block_insert_after",
-		docFormat: "markdown",
+		docFormat: insertedContent.docFormat,
 		blockId: anchorBlockId,
 		contentFileName,
-		content: joinInsertedUnitContent(insertedUnits)
+		content: insertedContent.content
 	}];
 }
 
@@ -1330,12 +1577,18 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 		}
 
 		const depth = stack.length;
-		const parentTagName = stack[0]?.tagName;
-		const blockId = readXmlAttribute(attributes, "id");
-		const isTopLevelBlock = depth === 0 && tagName !== "title" && tagName !== "ul" && tagName !== "ol" && blockId;
-		const isTopLevelListItem = depth === 1 && tagName === "li" && (parentTagName === "ul" || parentTagName === "ol")
-			&& blockId;
-		const kind = isTopLevelBlock ? normalizeRemoteBlockKind(tagName) : isTopLevelListItem ? "list" : "";
+		const parentTagName = stack[depth - 1]?.tagName;
+		const grandparentTagName = stack[depth - 2]?.tagName;
+		const blockId = readRemoteBlockId(attributes);
+		const hasTopLevelListParent = tagName === "li"
+			&& (parentTagName === "ul" || parentTagName === "ol")
+			&& (depth === 1 || depth === 2 && isRemoteDocumentContainer(grandparentTagName || ""));
+		const normalizedKind = normalizeRemoteBlockKind(tagName);
+		const isTopLevelBlock = blockId
+			&& normalizedKind
+			&& !isRemoteListContainer(tagName)
+			&& stack.every((frame) => isRemoteDocumentContainer(frame.tagName));
+		const kind = isTopLevelBlock ? normalizedKind : hasTopLevelListParent && blockId ? "list" : "";
 		if (isSelfClosing) {
 			if (kind) {
 				units.push({
@@ -1355,12 +1608,37 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 		});
 	}
 
-	return units;
+	return removeDuplicatedHeadingTextUnits(units);
+}
+
+function removeDuplicatedHeadingTextUnits(units: RemoteSyncUnit[]): RemoteSyncUnit[] {
+	return units.filter((unit, index) => {
+		const previousUnit = units[index - 1];
+		return !(previousUnit?.kind === "heading"
+			&& unit.kind === "paragraph"
+			&& previousUnit.fingerprint === unit.fingerprint);
+	});
 }
 
 function readRemoteTitleBlockId(xml: string): string | undefined {
 	const titleMatch = xml.match(/<title\b([^>]*)>/i);
-	return titleMatch ? readXmlAttribute(titleMatch[1] || "", "id") || undefined : undefined;
+	return titleMatch ? readRemoteBlockId(titleMatch[1] || "") || undefined : undefined;
+}
+
+function readRemoteBlockId(attributes: string): string {
+	return readXmlAttribute(attributes, "id")
+		|| readXmlAttribute(attributes, "block-id")
+		|| readXmlAttribute(attributes, "block_id")
+		|| readXmlAttribute(attributes, "blockId")
+		|| readXmlAttribute(attributes, "data-block-id");
+}
+
+function isRemoteDocumentContainer(tagName: string): boolean {
+	return tagName === "doc" || tagName === "document" || tagName === "body" || tagName === "root" || tagName === "page";
+}
+
+function isRemoteListContainer(tagName: string): boolean {
+	return tagName === "ul" || tagName === "ol";
 }
 
 function countUnitFingerprintKeys(units: MarkdownSyncUnit[]): Map<string, number> {
@@ -1397,18 +1675,26 @@ function createUnitFingerprintKey(unit: { kind: string; fingerprint: string }): 
 }
 
 function createMarkdownFingerprint(kind: string, content: string): string {
+	if (kind === "hr") {
+		return "";
+	}
+
 	if (kind === "table") {
 		return createMarkdownTableFingerprint(content);
+	}
+
+	if (kind === "code") {
+		return createMarkdownCodeFingerprint(content);
+	}
+
+	if (kind === "list") {
+		return createMarkdownListFingerprint(content);
 	}
 
 	const lines = content.replace(/\r\n/g, "\n").split("\n");
 	const normalizedLines = lines.map((line) => {
 		if (kind === "heading") {
 			return line.replace(/^#{2,6}\s+/, "");
-		}
-
-		if (kind === "list") {
-			return line.replace(/^\s*(?:[-+*]|\d+\.)\s+/, "");
 		}
 
 		if (kind === "blockquote") {
@@ -1433,6 +1719,22 @@ function createMarkdownTableFingerprint(content: string): string {
 		.map((line) => line.trim())
 		.filter((line) => line && !isMarkdownTableSeparatorLine(line))
 		.map((line) => line.split("|").map((cell) => normalizeFingerprintText(cell)).join("|"))
+		.join("\n");
+}
+
+function createMarkdownCodeFingerprint(content: string): string {
+	const lines = content.replace(/\r\n/g, "\n").split("\n");
+	if (lines.length >= 2 && /^\s{0,3}```/.test(lines[0] || "") && /^\s{0,3}```\s*$/.test(lines[lines.length - 1] || "")) {
+		return normalizeFingerprintText(lines.slice(1, -1).join("\n"));
+	}
+
+	return normalizeFingerprintText(content);
+}
+
+function createMarkdownListFingerprint(content: string): string {
+	return content.replace(/\r\n/g, "\n").split("\n")
+		.map((line) => normalizeFingerprintText(line.replace(/^\s*(?:[-+*]|\d+\.)\s+/, "")))
+		.filter((line) => line)
 		.join("\n");
 }
 
@@ -1505,6 +1807,18 @@ function normalizeRemoteBlockKind(tagName: string): string {
 
 	if (tagName === "pre") {
 		return "code";
+	}
+
+	if (tagName === "table") {
+		return "table";
+	}
+
+	if (tagName === "hr") {
+		return "hr";
+	}
+
+	if (tagName === "title" || isRemoteDocumentContainer(tagName)) {
+		return "";
 	}
 
 	return tagName;
