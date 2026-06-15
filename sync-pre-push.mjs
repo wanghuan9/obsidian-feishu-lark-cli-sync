@@ -31,10 +31,13 @@ const PLUGIN_ID = "feishu-lark-cli-sync";
 const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const ZERO_REF = "0000000000000000000000000000000000000000";
 const MAX_STDERR_LENGTH = 1600;
-const MAX_PARALLEL_SYNCS = 4;
+const MAX_PARALLEL_SYNCS = 3;
 const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
 const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
 const REMOTE_STATE_REFRESH_DELAY_MS = 600;
+const LARK_CLI_MAX_CONCURRENT_REQUESTS = 3;
+const LARK_CLI_REQUEST_INTERVAL_MS = 350;
+const LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
 const SYSTEM_NOTIFICATION_TITLE = "Feishu Lark CLI Sync";
 const SYSTEM_NOTIFICATION_TIMEOUT_MS = 3000;
 const MAC_NOTIFICATION_EXECUTABLE_ENV = "FEISHU_LARK_CLI_SYNC_OSASCRIPT_PATH";
@@ -48,6 +51,10 @@ const FALLBACK_PATH_ENTRIES = [
 	"/usr/sbin",
 	"/sbin"
 ];
+
+let larkCliRequestQueue = Promise.resolve();
+let larkCliActiveRequestCount = 0;
+let lastLarkCliRequestAt = 0;
 
 async function main() {
 	const repoRoot = await git(["rev-parse", "--show-toplevel"]);
@@ -543,22 +550,82 @@ function isValidSyncState(state) {
 }
 
 async function runLarkCli(settings, args, cwd) {
-	const executable = await resolveLarkCliPath(settings);
+	return await runLarkCliQueued(settings, args, cwd);
+}
+
+async function runLarkCliQueued(settings, args, cwd) {
+	const previousRequest = larkCliRequestQueue;
+	let releaseRequestSlot = () => {};
+	larkCliRequestQueue = new Promise((resolveRequestSlot) => {
+		releaseRequestSlot = resolveRequestSlot;
+	});
+
+	await previousRequest;
 	try {
-		const env = buildCommandEnvironment(executable);
-		const { stdout } = await execFileAsync(executable, args, {
-			cwd,
-			env,
-			maxBuffer: 20 * 1024 * 1024
-		});
-		const result = JSON.parse(stdout);
-		if (!result.ok) {
-			throw new Error(formatLarkError(result));
+		while (larkCliActiveRequestCount >= LARK_CLI_MAX_CONCURRENT_REQUESTS) {
+			await sleep(LARK_CLI_REQUEST_INTERVAL_MS);
 		}
-		return result;
+		await waitForLarkCliStartInterval();
+		larkCliActiveRequestCount += 1;
+	} finally {
+		releaseRequestSlot();
+	}
+
+	try {
+		return await runLarkCliWithRetry(settings, args, cwd);
 	} catch (error) {
 		throw new Error(formatCommandError(error));
+	} finally {
+		larkCliActiveRequestCount = Math.max(0, larkCliActiveRequestCount - 1);
 	}
+}
+
+async function waitForLarkCliStartInterval() {
+	const elapsedMs = Date.now() - lastLarkCliRequestAt;
+	if (elapsedMs < LARK_CLI_REQUEST_INTERVAL_MS) {
+		await sleep(LARK_CLI_REQUEST_INTERVAL_MS - elapsedMs);
+	}
+	lastLarkCliRequestAt = Date.now();
+}
+
+async function runLarkCliWithRetry(settings, args, cwd) {
+	for (let attempt = 0; attempt <= LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS.length; attempt += 1) {
+		try {
+			return await runLarkCliOnce(settings, args, cwd);
+		} catch (error) {
+			if (!isLarkRateLimitError(error) || attempt >= LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS.length) {
+				throw error;
+			}
+
+			await sleep(LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS[attempt]);
+		}
+	}
+
+	throw new Error("lark-cli request failed.");
+}
+
+async function runLarkCliOnce(settings, args, cwd) {
+	const executable = await resolveLarkCliPath(settings);
+	const env = buildCommandEnvironment(executable);
+	const { stdout } = await execFileAsync(executable, args, {
+		cwd,
+		env,
+		maxBuffer: 20 * 1024 * 1024
+	});
+	const result = JSON.parse(stdout);
+	if (!result.ok) {
+		throw new Error(formatLarkError(result));
+	}
+	return result;
+}
+
+function isLarkRateLimitError(error) {
+	const message = error instanceof Error ? error.message : String(error);
+	const normalizedMessage = message.toLowerCase();
+	return normalizedMessage.includes("request trigger frequency limit")
+		|| normalizedMessage.includes("frequency limit")
+		|| normalizedMessage.includes("rate limit")
+		|| normalizedMessage.includes("too many requests");
 }
 
 function buildCommandEnvironment(executable) {

@@ -83,6 +83,9 @@ const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
 const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
 const REMOTE_STATE_REFRESH_DELAY_MS = 600;
 const FOLDER_SYNC_PARALLEL_LIMIT = 3;
+const LARK_CLI_MAX_CONCURRENT_REQUESTS = 3;
+const LARK_CLI_REQUEST_INTERVAL_MS = 350;
+const LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
 const FALLBACK_PATH_ENTRIES = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
@@ -360,6 +363,9 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private cachedCommandEnvironmentShellPath = "";
 	private cachedLoginShellPath: string | null = null;
 	private pendingLoginShellPath: Promise<string> | null = null;
+	private larkCliRequestQueue: Promise<void> = Promise.resolve();
+	private larkCliActiveRequestCount = 0;
+	private lastLarkCliRequestAt = 0;
 	private syncState: LarkSyncStateFile = createEmptySyncStateFile();
 
 	override async onload(): Promise<void> {
@@ -2007,24 +2013,88 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async runLarkCli(args: string[], options: LarkCommandOptions = {}): Promise<LarkCommandResult> {
+		return await this.runLarkCliQueued(args, options);
+	}
+
+	private async runLarkCliQueued(args: string[], options: LarkCommandOptions): Promise<LarkCommandResult> {
+		const previousRequest = this.larkCliRequestQueue;
+		let releaseRequestSlot: () => void = () => {};
+		this.larkCliRequestQueue = new Promise((resolveRequestSlot) => {
+			releaseRequestSlot = resolveRequestSlot;
+		});
+
+		await previousRequest;
 		try {
-			const executable = await this.resolveLarkCliPath();
-			const env = await this.buildCommandEnvironment(executable);
-			const { stdout } = await execFileAsync(executable, args, {
-				cwd: options.cwd,
-				env,
-				maxBuffer: 20 * 1024 * 1024
-			});
-			const result = JSON.parse(stdout) as LarkCommandResult;
-
-			if (!result.ok) {
-				throw new Error(this.formatLarkError(result));
+			while (this.larkCliActiveRequestCount >= LARK_CLI_MAX_CONCURRENT_REQUESTS) {
+				await this.sleep(LARK_CLI_REQUEST_INTERVAL_MS);
 			}
+			await this.waitForLarkCliStartInterval();
+			this.larkCliActiveRequestCount += 1;
+		} finally {
+			releaseRequestSlot();
+		}
 
-			return result;
+		try {
+			return await this.runLarkCliWithRetry(args, options);
 		} catch (error) {
 			throw new Error(this.formatCommandError(error));
+		} finally {
+			this.larkCliActiveRequestCount = Math.max(0, this.larkCliActiveRequestCount - 1);
 		}
+	}
+
+	private async waitForLarkCliStartInterval(): Promise<void> {
+		const elapsedMs = Date.now() - this.lastLarkCliRequestAt;
+		if (elapsedMs < LARK_CLI_REQUEST_INTERVAL_MS) {
+			await this.sleep(LARK_CLI_REQUEST_INTERVAL_MS - elapsedMs);
+		}
+		this.lastLarkCliRequestAt = Date.now();
+	}
+
+	private async runLarkCliWithRetry(args: string[], options: LarkCommandOptions): Promise<LarkCommandResult> {
+		for (let attempt = 0; attempt <= LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS.length; attempt += 1) {
+			try {
+				return await this.runLarkCliOnce(args, options);
+			} catch (error) {
+				if (!this.isLarkRateLimitError(error) || attempt >= LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS.length) {
+					throw error;
+				}
+
+				const retryDelayMs = LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+				if (retryDelayMs === undefined) {
+					throw error;
+				}
+				await this.sleep(retryDelayMs);
+			}
+		}
+
+		throw new Error("lark-cli request failed.");
+	}
+
+	private async runLarkCliOnce(args: string[], options: LarkCommandOptions): Promise<LarkCommandResult> {
+		const executable = await this.resolveLarkCliPath();
+		const env = await this.buildCommandEnvironment(executable);
+		const { stdout } = await execFileAsync(executable, args, {
+			cwd: options.cwd,
+			env,
+			maxBuffer: 20 * 1024 * 1024
+		});
+		const result = JSON.parse(stdout) as LarkCommandResult;
+
+		if (!result.ok) {
+			throw new Error(this.formatLarkError(result));
+		}
+
+		return result;
+	}
+
+	private isLarkRateLimitError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error);
+		const normalizedMessage = message.toLowerCase();
+		return normalizedMessage.includes("request trigger frequency limit")
+			|| normalizedMessage.includes("frequency limit")
+			|| normalizedMessage.includes("rate limit")
+			|| normalizedMessage.includes("too many requests");
 	}
 
 	private formatLarkError(result: LarkCommandResult): string {
