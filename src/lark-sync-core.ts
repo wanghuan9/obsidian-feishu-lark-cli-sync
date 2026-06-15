@@ -157,6 +157,10 @@ export const FRONTMATTER_BINDING_KEYS = [
 	FRONTMATTER_REMOTE_ROOT_KEY,
 	FRONTMATTER_REMOTE_PARENT_PATH_KEY
 ];
+const LARGE_CHANGE_COMMAND_LIMIT = 8;
+const LARGE_CHANGE_REPLACE_RATIO = 0.6;
+const LARGE_CHANGE_MIN_REPLACE_COUNT = 4;
+const MIN_REPLACE_RUN_LENGTH_TO_COMPACT = 3;
 
 export function prepareNoteContentForLark(file: NoteFile, content: string, titleSource: TitleSource): string {
 	const title = extractTitle(file, content, titleSource);
@@ -405,22 +409,26 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		};
 	}
 
-	const precisePlan = await buildPreciseReplacePlan(input, contentHash, units);
+	const precisePlan = optimizeSyncPlan(input, await buildPreciseReplacePlan(input, contentHash, units), units);
 	if (precisePlan) {
 		return precisePlan;
 	}
 
-	const insertPlan = await buildPreciseInsertPlan(input, contentHash, units);
+	const insertPlan = optimizeSyncPlan(input, await buildPreciseInsertPlan(input, contentHash, units), units);
 	if (insertPlan) {
 		return insertPlan;
 	}
 
-	const mixedInsertReplacePlan = await buildPreciseMixedInsertReplacePlan(input, contentHash, units);
+	const mixedInsertReplacePlan = optimizeSyncPlan(
+		input,
+		await buildPreciseMixedInsertReplacePlan(input, contentHash, units),
+		units
+	);
 	if (mixedInsertReplacePlan) {
 		return mixedInsertReplacePlan;
 	}
 
-	const deletePlan = await buildPreciseDeletePlan(input, contentHash, units);
+	const deletePlan = optimizeSyncPlan(input, await buildPreciseDeletePlan(input, contentHash, units), units);
 	if (deletePlan) {
 		return deletePlan;
 	}
@@ -430,6 +438,174 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		commands: [],
 		contentHash,
 		reason: "diff-too-complex"
+	};
+}
+
+function optimizeSyncPlan(
+	input: BuildSyncPlanInput,
+	plan: SyncPlan | null,
+	units: MarkdownSyncUnit[]
+): SyncPlan | null {
+	if (!plan || plan.mode !== "precise") {
+		return plan;
+	}
+
+	const optimizedCommands = compactPreciseCommands(plan.commands, input);
+	if (!shouldDowngradeLargePreciseChange(plan.commands, units.length)
+		&& !shouldDowngradeLargePreciseChange(optimizedCommands, units.length)) {
+		return optimizedCommands === plan.commands ? plan : {
+			...plan,
+			commands: optimizedCommands
+		};
+	}
+
+	return {
+		mode: "overwrite",
+		commands: [{
+			doc: input.doc,
+			command: "overwrite",
+			docFormat: "markdown",
+			contentFileName: input.contentFileName
+		}],
+		contentHash: plan.contentHash,
+		nextState: createDocumentSyncState(input.doc, plan.contentHash)
+	};
+}
+
+function shouldDowngradeLargePreciseChange(commands: LarkUpdateCommand[], unitCount: number): boolean {
+	if (commands.length > LARGE_CHANGE_COMMAND_LIMIT) {
+		return true;
+	}
+
+	if (unitCount === 0) {
+		return false;
+	}
+
+	const replaceCount = commands.filter((command) => command.command === "block_replace").length;
+	return replaceCount >= LARGE_CHANGE_MIN_REPLACE_COUNT && replaceCount / unitCount >= LARGE_CHANGE_REPLACE_RATIO;
+}
+
+function compactPreciseCommands(
+	commands: LarkUpdateCommand[],
+	input: BuildSyncPlanInput
+): LarkUpdateCommand[] {
+	const previousUnitIndexes = createPreviousUnitIndexByBlockId(input.state?.units || []);
+	const compactedCommands: LarkUpdateCommand[] = [];
+	let run: LarkBlockReplaceCommand[] = [];
+	for (const command of commands) {
+		if (command.command === "block_replace") {
+			run.push(command);
+			continue;
+		}
+
+		appendCompactedReplaceRun(compactedCommands, run, input, previousUnitIndexes);
+		run = [];
+		compactedCommands.push(command);
+	}
+
+	appendCompactedReplaceRun(compactedCommands, run, input, previousUnitIndexes);
+	return compactedCommands;
+}
+
+function appendCompactedReplaceRun(
+	commands: LarkUpdateCommand[],
+	run: LarkBlockReplaceCommand[],
+	input: BuildSyncPlanInput,
+	previousUnitIndexes: Map<string, number>
+): void {
+	if (run.length < MIN_REPLACE_RUN_LENGTH_TO_COMPACT) {
+		commands.push(...run);
+		return;
+	}
+
+	const anchorBlockId = findCompactedReplaceRunAnchor(run, input.state, previousUnitIndexes);
+	if (!anchorBlockId) {
+		commands.push(...run);
+		return;
+	}
+
+	const insertedContent = joinCompactedReplaceRun(run);
+	if (!insertedContent) {
+		commands.push(...run);
+		return;
+	}
+
+	commands.push({
+		doc: input.doc,
+		command: "block_insert_after",
+		docFormat: insertedContent.docFormat,
+		blockId: anchorBlockId,
+		contentFileName: input.contentFileName,
+		content: insertedContent.content
+	});
+	commands.push({
+		doc: input.doc,
+		command: "block_delete",
+		blockId: run.map((command) => command.blockId).join(",")
+	});
+}
+
+function createPreviousUnitIndexByBlockId(units: SyncUnitState[]): Map<string, number> {
+	const indexes = new Map<string, number>();
+	for (const [index, unit] of units.entries()) {
+		if (unit.blockId) {
+			indexes.set(unit.blockId, index);
+		}
+	}
+
+	return indexes;
+}
+
+function findCompactedReplaceRunAnchor(
+	run: LarkBlockReplaceCommand[],
+	state: DocumentSyncState | undefined,
+	previousUnitIndexes: Map<string, number>
+): string {
+	if (!state || run.length === 0) {
+		return "";
+	}
+
+	const firstIndex = previousUnitIndexes.get(run[0]!.blockId);
+	if (firstIndex === undefined) {
+		return "";
+	}
+
+	for (let index = 1; index < run.length; index += 1) {
+		if (previousUnitIndexes.get(run[index]!.blockId) !== firstIndex + index) {
+			return "";
+		}
+	}
+
+	return firstIndex === 0 ? state.titleBlockId || "" : state.units[firstIndex - 1]?.blockId || "";
+}
+
+function joinCompactedReplaceRun(
+	run: LarkBlockReplaceCommand[]
+): { docFormat: "markdown" | "xml"; content: string } | null {
+	if (run.some((command) => !command.content || command.docFormat !== "markdown" && command.docFormat !== "xml")) {
+		return null;
+	}
+
+	const contents = run.map((command) => command.content as string);
+	if (contents.length === 0) {
+		return null;
+	}
+
+	const docFormats = new Set(run.map((command) => command.docFormat));
+	if (docFormats.size === 1 && docFormats.has("xml") && contents.length === 1) {
+		return {
+			docFormat: "xml",
+			content: contents[0]!
+		};
+	}
+
+	if (docFormats.size !== 1 || !docFormats.has("markdown")) {
+		return null;
+	}
+
+	return {
+		docFormat: "markdown",
+		content: contents.join("\n\n")
 	};
 }
 

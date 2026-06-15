@@ -304,6 +304,151 @@ assert.deepEqual(replacePlan.commands[0], {
 assert.equal(replacePlan.nextState.units[0].blockId, "blk-1");
 assert.notEqual(replacePlan.nextState.units[0].hash, mappedState.units[0].hash);
 
+const compactReplaceState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\nOne\n\nTwo\n\nThree\n\nFour\n\nFive\n\nSix\n\nSeven\n\nEight\n\nNine\n\nTen\n\nEleven\n\nTwelve",
+	[
+		"<title id=\"doc-title\">Note</title>",
+		"<p id=\"blk-1\">One</p>",
+		"<p id=\"blk-2\">Two</p>",
+		"<p id=\"blk-3\">Three</p>",
+		"<p id=\"blk-4\">Four</p>",
+		"<p id=\"blk-5\">Five</p>",
+		"<p id=\"blk-6\">Six</p>",
+		"<p id=\"blk-7\">Seven</p>",
+		"<p id=\"blk-8\">Eight</p>",
+		"<p id=\"blk-9\">Nine</p>",
+		"<p id=\"blk-10\">Ten</p>",
+		"<p id=\"blk-11\">Eleven</p>",
+		"<p id=\"blk-12\">Twelve</p>"
+	].join(""),
+	20
+);
+const compactReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nOne\n\nTwo changed\n\nThree changed\n\nFour changed\n\nFive\n\nSix\n\nSeven\n\nEight\n\nNine\n\nTen\n\nEleven\n\nTwelve",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: compactReplaceState
+});
+assert.equal(compactReplacePlan.mode, "precise");
+assert.deepEqual(compactReplacePlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_insert_after",
+		docFormat: "markdown",
+		blockId: "blk-1",
+		contentFileName: "sync.md",
+		content: "Two changed\n\nThree changed\n\nFour changed"
+	},
+	{
+		doc: "doc-token",
+		command: "block_delete",
+		blockId: "blk-2,blk-3,blk-4"
+	}
+]);
+
+const leadingCompactReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nOne changed\n\nTwo changed\n\nThree changed\n\nFour\n\nFive\n\nSix\n\nSeven\n\nEight\n\nNine\n\nTen\n\nEleven\n\nTwelve",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: compactReplaceState
+});
+assert.equal(leadingCompactReplacePlan.mode, "precise");
+assert.deepEqual(leadingCompactReplacePlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_insert_after",
+		docFormat: "markdown",
+		blockId: "doc-title",
+		contentFileName: "sync.md",
+		content: "One changed\n\nTwo changed\n\nThree changed"
+	},
+	{
+		doc: "doc-token",
+		command: "block_delete",
+		blockId: "blk-1,blk-2,blk-3"
+	}
+]);
+
+const largeChangeState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"One",
+		"",
+		"Two",
+		"",
+		"Three",
+		"",
+		"Four",
+		"",
+		"Five",
+		"",
+		"Six",
+		"",
+		"Seven",
+		"",
+		"Eight",
+		"",
+		"Nine",
+		"",
+		"Ten"
+	].join("\n"),
+	[
+		"<title id=\"doc-title\">Note</title>",
+		"<p id=\"blk-1\">One</p>",
+		"<p id=\"blk-2\">Two</p>",
+		"<p id=\"blk-3\">Three</p>",
+		"<p id=\"blk-4\">Four</p>",
+		"<p id=\"blk-5\">Five</p>",
+		"<p id=\"blk-6\">Six</p>",
+		"<p id=\"blk-7\">Seven</p>",
+		"<p id=\"blk-8\">Eight</p>",
+		"<p id=\"blk-9\">Nine</p>",
+		"<p id=\"blk-10\">Ten</p>"
+	].join(""),
+	21
+);
+const largeChangePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: [
+		"# Note",
+		"",
+		"One changed",
+		"",
+		"Two changed",
+		"",
+		"Three changed",
+		"",
+		"Four changed",
+		"",
+		"Five changed",
+		"",
+		"Six changed",
+		"",
+		"Seven changed",
+		"",
+		"Eight changed",
+		"",
+		"Nine changed",
+		"",
+		"Ten changed"
+	].join("\n"),
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: largeChangeState
+});
+assert.equal(largeChangePlan.mode, "overwrite");
+assert.deepEqual(largeChangePlan.commands, [{
+	doc: "doc-token",
+	command: "overwrite",
+	docFormat: "markdown",
+	contentFileName: "sync.md"
+}]);
+
 const state = {
 	doc: "doc-token",
 	contentHash,
