@@ -54,7 +54,7 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	updateFrontmatter: true,
 	autoSyncMode: "manual",
 	autoSyncDelaySeconds: 15,
-	syncStrategy: "precise",
+	syncStrategy: "auto",
 	stateCacheRetainLimit: 100
 };
 
@@ -115,6 +115,10 @@ interface BoundLarkDocument {
 	containerKind?: RemoteParentKind;
 	remoteParentPath?: string;
 	remoteRoot?: string;
+}
+
+interface LarkDocumentUpdateResult extends Partial<BoundLarkDocument> {
+	revisionId?: number;
 }
 
 interface LarkCommandResult {
@@ -254,7 +258,8 @@ const MESSAGES = {
 		settingAutoSyncModeName: "自动同步方式",
 		settingAutoSyncModeDesc: "自动同步只处理已绑定的 Markdown 文档。保存后同步依赖 Obsidian；pre-push hook 可脱离 Obsidian 独立运行。",
 		settingSyncStrategyName: "同步策略",
-		settingSyncStrategyDesc: "安全增量同步会尽量只修改变动块；无法安全更新时会失败并通知，不会自动全量覆盖。全量覆盖同步会清空并重写远端文档。",
+		settingSyncStrategyDesc: "自动：小改动增量，大改动/复杂改动覆盖；安全增量：不覆盖；全量覆盖：重写远端。",
+		syncStrategyAuto: "自动（推荐）",
 		syncStrategyPrecise: "安全增量同步",
 		syncStrategyOverwrite: "全量覆盖同步",
 		autoSyncModeManual: "关闭",
@@ -324,7 +329,8 @@ const MESSAGES = {
 		settingAutoSyncModeName: "Auto sync mode",
 		settingAutoSyncModeDesc: "Auto sync only handles bound Markdown notes. Save sync depends on Obsidian; the pre-push hook can run without Obsidian.",
 		settingSyncStrategyName: "Sync strategy",
-		settingSyncStrategyDesc: "Safe precise sync updates only changed blocks when possible. If it cannot update safely, it fails with a notice instead of falling back to overwrite. Overwrite sync clears and rewrites the remote document.",
+		settingSyncStrategyDesc: "Auto: precise for small edits, overwrite for large or complex changes. Safe precise never overwrites. Overwrite rewrites the remote doc.",
+		syncStrategyAuto: "Auto (recommended)",
 		syncStrategyPrecise: "Safe precise sync",
 		syncStrategyOverwrite: "Overwrite sync",
 		autoSyncModeManual: "Off",
@@ -355,6 +361,8 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private readonly autoSyncPendingPaths = new Set<string>();
 	private readonly selfWrittenPaths = new Map<string, number>();
 	private syncStateSaveQueue: Promise<void> = Promise.resolve();
+	private deferredSyncStateSaveDepth = 0;
+	private hasDeferredSyncStateSave = false;
 	private cachedLarkCliPath: string | null = null;
 	private cachedLarkCliPathSetting = "";
 	private pendingLarkCliPath: Promise<string> | null = null;
@@ -786,11 +794,55 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	private async saveLarkSyncState(): Promise<void> {
+		if (this.deferredSyncStateSaveDepth > 0) {
+			this.hasDeferredSyncStateSave = true;
+			return;
+		}
+
+		await this.writeLarkSyncStateQueued();
+	}
+
+	private async flushDeferredLarkSyncStateSave(): Promise<void> {
+		if (!this.hasDeferredSyncStateSave) {
+			return;
+		}
+
+		this.hasDeferredSyncStateSave = false;
+		await this.writeLarkSyncStateQueued();
+	}
+
+	private async writeLarkSyncStateQueued(): Promise<void> {
 		const saveTask = this.syncStateSaveQueue.then(() => {
 			return this.writeLarkSyncState();
 		});
 		this.syncStateSaveQueue = saveTask.catch(() => {});
 		await saveTask;
+	}
+
+	private async withDeferredLarkSyncStateSave(callback: () => Promise<void>): Promise<void> {
+		this.deferredSyncStateSaveDepth += 1;
+		let callbackError: unknown;
+		try {
+			await callback();
+		} catch (error) {
+			callbackError = error;
+		}
+
+		try {
+			this.deferredSyncStateSaveDepth -= 1;
+			if (this.deferredSyncStateSaveDepth === 0) {
+				await this.flushDeferredLarkSyncStateSave();
+			}
+		} catch (error) {
+			if (!callbackError) {
+				throw error;
+			}
+			console.warn("[Feishu Lark CLI Sync] failed to flush deferred sync state", error);
+		}
+
+		if (callbackError) {
+			throw callbackError;
+		}
 	}
 
 	private async writeLarkSyncState(): Promise<void> {
@@ -939,44 +991,46 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private async publishFolder(folderPath: string): Promise<void> {
 		await this.runWithNotice(this.t("noticePublishingFolderToLark"), async () => {
-			const files = this.collectMarkdownFiles(folderPath);
-			if (files.length === 0) {
-				new Notice(this.t("noticeNoMarkdownFilesInFolder"));
-				return;
-			}
-
-			const entries: FolderPublishEntry[] = [];
-			const folderRoot = this.getSelectedFolderName(folderPath);
-			const rootParent = await this.resolveRemoteRootParent();
-			const preparedFiles = await Promise.all(files.map(async (file) => {
-				const content = await this.readNoteForLark(file);
-				const binding = this.getBinding(file);
-				const documentParentPath = this.getRemoteParentPath(folderPath, file, folderRoot);
-				return {
-					file,
-					content,
-					binding,
-					remoteParentPath: documentParentPath
-				};
-			}));
-			const parentsByPath = await this.resolveFolderParents(rootParent, preparedFiles);
-			const indexedPreparedFiles = preparedFiles.map((preparedFile, index) => {
-				return {
-					preparedFile,
-					index
-				};
-			});
-
-			const preparedFileGroups = this.groupPreparedFilesByDocument(indexedPreparedFiles);
-			await this.runWithConcurrency(preparedFileGroups, FOLDER_SYNC_PARALLEL_LIMIT, async (preparedFileGroup) => {
-				for (const item of preparedFileGroup) {
-					await this.prepareFolderEntry(item, entries, folderRoot, rootParent, parentsByPath);
+			await this.withDeferredLarkSyncStateSave(async () => {
+				const files = this.collectMarkdownFiles(folderPath);
+				if (files.length === 0) {
+					new Notice(this.t("noticeNoMarkdownFilesInFolder"));
+					return;
 				}
+
+				const entries: FolderPublishEntry[] = [];
+				const folderRoot = this.getSelectedFolderName(folderPath);
+				const rootParent = await this.resolveRemoteRootParent();
+				const preparedFiles = await Promise.all(files.map(async (file) => {
+					const content = await this.readNoteForLark(file);
+					const binding = this.getBinding(file);
+					const documentParentPath = this.getRemoteParentPath(folderPath, file, folderRoot);
+					return {
+						file,
+						content,
+						binding,
+						remoteParentPath: documentParentPath
+					};
+				}));
+				const parentsByPath = await this.resolveFolderParents(rootParent, preparedFiles);
+				const indexedPreparedFiles = preparedFiles.map((preparedFile, index) => {
+					return {
+						preparedFile,
+						index
+					};
+				});
+
+				const preparedFileGroups = this.groupPreparedFilesByDocument(indexedPreparedFiles);
+				await this.runWithConcurrency(preparedFileGroups, FOLDER_SYNC_PARALLEL_LIMIT, async (preparedFileGroup) => {
+					for (const item of preparedFileGroup) {
+						await this.prepareFolderEntry(item, entries, folderRoot, rootParent, parentsByPath);
+					}
+				});
+
+				await this.syncFolderEntries(folderPath, folderRoot, entries);
+
+				new Notice(this.t("noticePublishedFolderToLark", { count: String(entries.length) }), 8000);
 			});
-
-			await this.syncFolderEntries(folderPath, folderRoot, entries);
-
-			new Notice(this.t("noticePublishedFolderToLark", { count: String(entries.length) }), 8000);
 		});
 	}
 
@@ -1265,7 +1319,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const strategy = context.strategy || this.settings.syncStrategy;
 		let state = this.findDocumentState([doc, ...(context.stateKeys || [])]);
 		let syncDoc = state?.doc || doc;
-		if (strategy === "precise" && (!state || state.units.length === 0)) {
+		if (strategy !== "overwrite" && (!state || state.units.length === 0)) {
 			state = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
 			syncDoc = state?.doc || syncDoc;
 		}
@@ -1277,7 +1331,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			strategy,
 			state
 		});
-		if (strategy === "precise" && plan.mode === "blocked") {
+		if (strategy !== "overwrite" && plan.mode === "blocked") {
 			const refreshedState = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
 			if (refreshedState) {
 				const refreshedPlan = await buildSyncPlan({
@@ -1295,7 +1349,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				}
 			}
 		}
-		if (strategy === "precise" && plan.mode === "precise" && plan.commands.some((command) => {
+		if (strategy !== "overwrite" && plan.mode === "precise" && plan.commands.some((command) => {
 			return command.command === "block_insert_after";
 		})) {
 			const refreshedState = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
@@ -1349,7 +1403,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return await this.withTempMarkdown("sync", content, async (tempFile) => {
-			let latestDocument: Partial<BoundLarkDocument> = {};
+			let latestDocument: LarkDocumentUpdateResult = {};
 			if (plan.mode === "overwrite") {
 				this.removeSyncStateKeys([doc, ...(context.stateKeys || [])], doc);
 				await this.saveLarkSyncState();
@@ -1369,13 +1423,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				const document = result.data?.document;
 				latestDocument = {
 					token: document?.document_id || latestDocument.token,
-					url: document?.url || latestDocument.url
+					url: document?.url || latestDocument.url,
+					revisionId: document?.revision_id ?? latestDocument.revisionId
 				};
 			}
 
 			if (plan.mode === "precise") {
 				await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
 					expectedMarkdown: content,
+					expectedRevisionId: latestDocument.revisionId,
 					context
 				});
 			} else if (plan.mode === "overwrite") {
@@ -1419,7 +1475,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private async saveOverwrittenDocumentState(
 		doc: string,
-		document: Partial<BoundLarkDocument>,
+		document: LarkDocumentUpdateResult,
 		expectedMarkdown: string,
 		context: { mode: SyncMode; path: string; stateKeys?: string[] }
 	): Promise<void> {
@@ -1427,6 +1483,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const stateKeys = [doc, document.token || "", document.url || "", ...(context.stateKeys || [])];
 		await this.saveRemoteDocumentState(resolvedDoc, stateKeys, {
 			expectedMarkdown,
+			expectedRevisionId: document.revisionId,
 			context
 		});
 	}
@@ -1466,6 +1523,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		stateKeys: string[],
 		options: {
 			expectedMarkdown?: string;
+			expectedRevisionId?: number;
 			previousRevisionId?: number;
 			useLatestStateOnTimeout?: boolean;
 			context?: { mode: SyncMode; path: string };
@@ -1477,19 +1535,16 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		let state: LarkSyncStateFile["documents"][string] | undefined;
 		let latestState: LarkSyncStateFile["documents"][string] | undefined;
 		for (let attempt = 0; attempt < REMOTE_STATE_REFRESH_ATTEMPTS; attempt += 1) {
-			const [remoteMarkdown, remoteXml] = await Promise.all([
-				this.fetchLarkDocumentMarkdown(doc),
-				this.fetchLarkDocumentWithIds(doc)
-			]);
-			const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
-			const remoteState = await createDocumentSyncStateFromRemote(
-				remoteDoc,
-				remoteMarkdown.content,
-				remoteXml.content,
-				remoteXml.revisionId
-			);
+			const remoteState = options.expectedRevisionId !== undefined
+				? await this.fetchRemoteDocumentStateAfterExpectedRevision(
+					doc,
+					options.expectedRevisionId,
+					expectedSignature
+				)
+				: await this.fetchRemoteDocumentState(doc);
 			latestState = remoteState;
-			if (this.isRemoteDocumentStateRefreshAccepted(remoteState, expectedSignature, options.previousRevisionId)) {
+			if (remoteState
+				&& this.isRemoteDocumentStateRefreshAccepted(remoteState, expectedSignature, options.previousRevisionId)) {
 				state = remoteState;
 				break;
 			}
@@ -1519,6 +1574,63 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		};
 		this.removeSyncStateKeys([doc, ...stateKeys], stateKey);
 		await this.saveLarkSyncState();
+	}
+
+	private async fetchRemoteDocumentStateAfterExpectedRevision(
+		doc: string,
+		expectedRevisionId: number,
+		expectedSignature: Awaited<ReturnType<typeof createSyncContentSignature>> | undefined
+	): Promise<LarkSyncStateFile["documents"][string] | undefined> {
+		const remoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
+		if (!await this.isRemoteMarkdownRefreshAccepted(remoteMarkdown, expectedRevisionId, expectedSignature)) {
+			return undefined;
+		}
+
+		const remoteXml = await this.fetchLarkDocumentWithIds(doc);
+		if (remoteXml.revisionId === undefined || remoteXml.revisionId < expectedRevisionId) {
+			return undefined;
+		}
+
+		return await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+	}
+
+	private async isRemoteMarkdownRefreshAccepted(
+		remoteMarkdown: { content: string; revisionId?: number },
+		expectedRevisionId: number,
+		expectedSignature: Awaited<ReturnType<typeof createSyncContentSignature>> | undefined
+	): Promise<boolean> {
+		if (remoteMarkdown.revisionId === undefined || remoteMarkdown.revisionId < expectedRevisionId) {
+			return false;
+		}
+
+		if (!expectedSignature) {
+			return true;
+		}
+
+		const remoteSignature = await createSyncContentSignature(remoteMarkdown.content);
+		return isSyncContentSignatureEquivalent(remoteSignature, expectedSignature);
+	}
+
+	private async fetchRemoteDocumentState(doc: string): Promise<LarkSyncStateFile["documents"][string]> {
+		const [remoteMarkdown, remoteXml] = await Promise.all([
+			this.fetchLarkDocumentMarkdown(doc),
+			this.fetchLarkDocumentWithIds(doc)
+		]);
+		return await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+	}
+
+	private async createRemoteDocumentState(
+		doc: string,
+		remoteMarkdown: { doc?: string; content: string; revisionId?: number },
+		remoteXml: { doc?: string; content: string; revisionId?: number }
+	): Promise<LarkSyncStateFile["documents"][string]> {
+		const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+		return await createDocumentSyncStateFromRemote(
+			remoteDoc,
+			remoteMarkdown.content,
+			remoteXml.content,
+			remoteXml.revisionId ?? remoteMarkdown.revisionId
+		);
 	}
 
 	private isRemoteDocumentStateRefreshAccepted(
@@ -2533,7 +2645,8 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 			.setName(this.plugin.t("settingSyncStrategyName"))
 			.setDesc(this.plugin.t("settingSyncStrategyDesc"))
 			.addDropdown((dropdown) => {
-				dropdown.addOption("precise", this.plugin.t("syncStrategyPrecise"))
+				dropdown.addOption("auto", this.plugin.t("syncStrategyAuto"))
+					.addOption("precise", this.plugin.t("syncStrategyPrecise"))
 					.addOption("overwrite", this.plugin.t("syncStrategyOverwrite"))
 					.setValue(this.plugin.settings.syncStrategy).onChange(async (value) => {
 						this.plugin.settings.syncStrategy = value as SyncStrategy;

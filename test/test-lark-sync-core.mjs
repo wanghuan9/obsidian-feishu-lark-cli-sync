@@ -226,6 +226,15 @@ const unmappedReplacePlan = await buildSyncPlan({
 assert.equal(unmappedReplacePlan.mode, "blocked");
 assert.equal(unmappedReplacePlan.reason, "block-mapping-missing");
 
+const autoUnmappedReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody\n\n1. Changed",
+	contentFileName: "sync.md",
+	strategy: "auto",
+	state: partialState
+});
+assert.equal(autoUnmappedReplacePlan.mode, "overwrite");
+
 const tableRemoteXml = "<title id=\"doc-token\">Note</title><table id=\"blk-1\"><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>";
 const tableState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\n| A | B |\n|-|-|\n| 1 | 2 |", tableRemoteXml, 9);
 assert.equal(tableState.units.length, 1);
@@ -412,33 +421,34 @@ const largeChangeState = await createDocumentSyncStateFromRemote(
 	].join(""),
 	21
 );
+const largeChangeMarkdown = [
+	"# Note",
+	"",
+	"One changed",
+	"",
+	"Two changed",
+	"",
+	"Three changed",
+	"",
+	"Four changed",
+	"",
+	"Five changed",
+	"",
+	"Six changed",
+	"",
+	"Seven changed",
+	"",
+	"Eight changed",
+	"",
+	"Nine changed",
+	"",
+	"Ten changed"
+].join("\n");
 const largeChangePlan = await buildSyncPlan({
 	doc: "doc-token",
-	markdown: [
-		"# Note",
-		"",
-		"One changed",
-		"",
-		"Two changed",
-		"",
-		"Three changed",
-		"",
-		"Four changed",
-		"",
-		"Five changed",
-		"",
-		"Six changed",
-		"",
-		"Seven changed",
-		"",
-		"Eight changed",
-		"",
-		"Nine changed",
-		"",
-		"Ten changed"
-	].join("\n"),
+	markdown: largeChangeMarkdown,
 	contentFileName: "sync.md",
-	strategy: "precise",
+	strategy: "auto",
 	state: largeChangeState
 });
 assert.equal(largeChangePlan.mode, "overwrite");
@@ -448,6 +458,14 @@ assert.deepEqual(largeChangePlan.commands, [{
 	docFormat: "markdown",
 	contentFileName: "sync.md"
 }]);
+const preciseLargeChangePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: largeChangeMarkdown,
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: largeChangeState
+});
+assert.equal(preciseLargeChangePlan.mode, "precise");
 
 const state = {
 	doc: "doc-token",
@@ -510,6 +528,14 @@ const missingMappingPlan = await buildSyncPlan({
 });
 assert.equal(missingMappingPlan.mode, "blocked");
 assert.equal(missingMappingPlan.reason, "block-mapping-missing");
+
+const autoMissingMappingPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "auto"
+});
+assert.equal(autoMissingMappingPlan.mode, "overwrite");
 
 const complexPlan = await buildSyncPlan({
 	doc: "doc-token",

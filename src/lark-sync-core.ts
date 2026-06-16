@@ -1,5 +1,5 @@
 export type TitleSource = "first-heading" | "file-name";
-export type SyncStrategy = "precise" | "overwrite";
+export type SyncStrategy = "auto" | "precise" | "overwrite";
 export type MessageLanguage = "zh-CN" | "en";
 export type SyncMode = "manual" | "save" | "pre-push" | "folder";
 export type SyncFailureReason =
@@ -366,28 +366,11 @@ export function buildUpdateCommandArgs(command: LarkUpdateCommand): string[] {
 export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan> {
 	const contentHash = await createContentHash(input.markdown);
 	if (input.strategy === "overwrite") {
-		return {
-			mode: "overwrite",
-			commands: [
-				{
-					doc: input.doc,
-					command: "overwrite",
-					docFormat: "markdown",
-					contentFileName: input.contentFileName
-				}
-			],
-			contentHash,
-			nextState: createDocumentSyncState(input.doc, contentHash)
-		};
+		return createOverwriteSyncPlan(input, contentHash);
 	}
 
 	if (input.state && getDocumentStateKey(input.state.doc) !== getDocumentStateKey(input.doc)) {
-		return {
-			mode: "blocked",
-			commands: [],
-			contentHash,
-			reason: "block-mapping-missing"
-		};
+		return createBlockedOrOverwriteSyncPlan(input, contentHash, "block-mapping-missing");
 	}
 
 	if (input.state?.contentHash === contentHash) {
@@ -401,44 +384,80 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 
 	const units = await createMarkdownSyncUnits(input.markdown);
 	if (!input.state || input.state.units.length === 0) {
-		return {
-			mode: "blocked",
-			commands: [],
-			contentHash,
-			reason: "block-mapping-missing"
-		};
+		return createBlockedOrOverwriteSyncPlan(input, contentHash, "block-mapping-missing");
 	}
 
-	const precisePlan = optimizeSyncPlan(input, await buildPreciseReplacePlan(input, contentHash, units), units);
+	const precisePlan = finalizeCandidateSyncPlan(
+		input,
+		optimizeSyncPlan(input, await buildPreciseReplacePlan(input, contentHash, units), units)
+	);
 	if (precisePlan) {
 		return precisePlan;
 	}
 
-	const insertPlan = optimizeSyncPlan(input, await buildPreciseInsertPlan(input, contentHash, units), units);
+	const insertPlan = finalizeCandidateSyncPlan(
+		input,
+		optimizeSyncPlan(input, await buildPreciseInsertPlan(input, contentHash, units), units)
+	);
 	if (insertPlan) {
 		return insertPlan;
 	}
 
-	const mixedInsertReplacePlan = optimizeSyncPlan(
+	const mixedInsertReplacePlan = finalizeCandidateSyncPlan(
 		input,
-		await buildPreciseMixedInsertReplacePlan(input, contentHash, units),
-		units
+		optimizeSyncPlan(
+			input,
+			await buildPreciseMixedInsertReplacePlan(input, contentHash, units),
+			units
+		)
 	);
 	if (mixedInsertReplacePlan) {
 		return mixedInsertReplacePlan;
 	}
 
-	const deletePlan = optimizeSyncPlan(input, await buildPreciseDeletePlan(input, contentHash, units), units);
+	const deletePlan = finalizeCandidateSyncPlan(
+		input,
+		optimizeSyncPlan(input, await buildPreciseDeletePlan(input, contentHash, units), units)
+	);
 	if (deletePlan) {
 		return deletePlan;
+	}
+
+	return createBlockedOrOverwriteSyncPlan(input, contentHash, "diff-too-complex");
+}
+
+function createBlockedOrOverwriteSyncPlan(
+	input: BuildSyncPlanInput,
+	contentHash: string,
+	reason: SyncFailureReason
+): SyncPlan {
+	if (input.strategy === "auto" && canAutoFallbackToOverwrite(reason)) {
+		return createOverwriteSyncPlan(input, contentHash);
 	}
 
 	return {
 		mode: "blocked",
 		commands: [],
 		contentHash,
-		reason: "diff-too-complex"
+		reason
 	};
+}
+
+function finalizeCandidateSyncPlan(
+	input: BuildSyncPlanInput,
+	plan: SyncPlan | null
+): SyncPlan | null {
+	if (plan?.mode === "blocked"
+		&& input.strategy === "auto"
+		&& canAutoFallbackToOverwrite(plan.reason)) {
+		return createOverwriteSyncPlan(input, plan.contentHash);
+	}
+
+	return plan;
+}
+
+function canAutoFallbackToOverwrite(reason: SyncFailureReason): boolean {
+	return reason === "block-mapping-missing" || reason === "diff-too-complex";
 }
 
 function optimizeSyncPlan(
@@ -451,7 +470,8 @@ function optimizeSyncPlan(
 	}
 
 	const optimizedCommands = compactPreciseCommands(plan.commands, input);
-	if (!shouldDowngradeLargePreciseChange(plan.commands, units.length)
+	if (input.strategy !== "auto"
+		|| !shouldDowngradeLargePreciseChange(plan.commands, units.length)
 		&& !shouldDowngradeLargePreciseChange(optimizedCommands, units.length)) {
 		return optimizedCommands === plan.commands ? plan : {
 			...plan,
@@ -459,6 +479,10 @@ function optimizeSyncPlan(
 		};
 	}
 
+	return createOverwriteSyncPlan(input, plan.contentHash);
+}
+
+function createOverwriteSyncPlan(input: BuildSyncPlanInput, contentHash: string): OverwriteSyncPlan {
 	return {
 		mode: "overwrite",
 		commands: [{
@@ -467,8 +491,8 @@ function optimizeSyncPlan(
 			docFormat: "markdown",
 			contentFileName: input.contentFileName
 		}],
-		contentHash: plan.contentHash,
-		nextState: createDocumentSyncState(input.doc, plan.contentHash)
+		contentHash,
+		nextState: createDocumentSyncState(input.doc, contentHash)
 	};
 }
 

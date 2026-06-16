@@ -178,10 +178,10 @@ async function syncMarkdownTask(task, settings, syncState) {
 	try {
 		const file = { basename: basename(task.filePath, ".md") };
 		const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(task.content), settings.titleSource);
-		const strategy = settings.syncStrategy || "precise";
+		const strategy = settings.syncStrategy || "auto";
 		let state = findDocumentState(syncState, task.stateKeys);
 		let syncDoc = state?.doc || task.doc;
-		if (strategy === "precise" && (!state || state.units.length === 0)) {
+		if (strategy !== "overwrite" && (!state || state.units.length === 0)) {
 			state = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, task.stateKeys);
 			syncDoc = state?.doc || syncDoc;
 		}
@@ -193,7 +193,7 @@ async function syncMarkdownTask(task, settings, syncState) {
 			state
 		});
 		const stateKeys = task.stateKeys;
-		if (strategy === "precise" && plan.mode === "blocked") {
+		if (strategy !== "overwrite" && plan.mode === "blocked") {
 			const refreshedState = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, stateKeys);
 			if (refreshedState) {
 				const refreshedPlan = await buildSyncPlan({
@@ -209,7 +209,7 @@ async function syncMarkdownTask(task, settings, syncState) {
 				}
 			}
 		}
-		if (strategy === "precise" && plan.mode === "precise" && plan.commands.some((command) => {
+		if (strategy !== "overwrite" && plan.mode === "precise" && plan.commands.some((command) => {
 			return command.command === "block_insert_after";
 		})) {
 			const refreshedState = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, stateKeys);
@@ -260,6 +260,7 @@ async function executeSyncPlanForTask(task, settings, syncState, doc, contentFor
 	}
 
 	await withTempMarkdown(basename(task.filePath, ".md"), contentForLark, async (tempFile) => {
+		let latestRevisionId;
 		for (let index = 0; index < plan.commands.length; index += 1) {
 			const command = plan.commands[index];
 			const contentFileName = "content" in command && command.content
@@ -270,14 +271,23 @@ async function executeSyncPlanForTask(task, settings, syncState, doc, contentFor
 					? { ...command, contentFileName }
 					: command
 			);
-			await runLarkCli(settings, args, tempFile.directory);
+			const result = await runLarkCli(settings, args, tempFile.directory);
+			latestRevisionId = result.data?.document?.revision_id ?? latestRevisionId;
+		}
+		if (plan.mode === "precise") {
+			await saveRemoteDocumentState(
+				settings,
+				syncState,
+				doc,
+				stateKeys,
+				contentForLark,
+				task.repoRelativePath,
+				latestRevisionId
+			);
+		} else {
+			savePlanState(syncState, stateKeys, plan);
 		}
 	});
-	if (plan.mode === "precise") {
-		await saveRemoteDocumentState(settings, syncState, doc, stateKeys, contentForLark, task.repoRelativePath);
-	} else {
-		savePlanState(syncState, stateKeys, plan);
-	}
 }
 
 class PrePushSyncError extends Error {
@@ -306,24 +316,16 @@ function savePlanState(syncState, docs, plan) {
 	};
 }
 
-async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedMarkdown, path) {
+async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedMarkdown, path, expectedRevisionId) {
 	const expectedSignature = expectedMarkdown
 		? await createSyncContentSignature(expectedMarkdown)
 		: undefined;
 	let state;
 	for (let attempt = 0; attempt < REMOTE_STATE_REFRESH_ATTEMPTS; attempt += 1) {
-		const [remoteMarkdown, remoteXml] = await Promise.all([
-			fetchLarkDocumentMarkdown(settings, doc),
-			fetchLarkDocumentWithIds(settings, doc)
-		]);
-		const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
-		const remoteState = await createDocumentSyncStateFromRemote(
-			remoteDoc,
-			remoteMarkdown.content,
-			remoteXml.content,
-			remoteXml.revisionId
-		);
-		if (!expectedSignature || isDocumentStateContentEquivalent(remoteState, expectedSignature)) {
+		const remoteState = expectedRevisionId !== undefined
+			? await fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedSignature)
+			: await fetchRemoteDocumentState(settings, doc);
+		if (remoteState && (!expectedSignature || isDocumentStateContentEquivalent(remoteState, expectedSignature))) {
 			state = remoteState;
 			break;
 		}
@@ -347,6 +349,51 @@ async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedM
 		...touchDocumentSyncState(state),
 		doc: stateKey
 	};
+}
+
+async function fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedSignature) {
+	const remoteMarkdown = await fetchLarkDocumentMarkdown(settings, doc);
+	if (!await isRemoteMarkdownRefreshAccepted(remoteMarkdown, expectedRevisionId, expectedSignature)) {
+		return undefined;
+	}
+
+	const remoteXml = await fetchLarkDocumentWithIds(settings, doc);
+	if (remoteXml.revisionId === undefined || remoteXml.revisionId < expectedRevisionId) {
+		return undefined;
+	}
+
+	return await createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+}
+
+async function isRemoteMarkdownRefreshAccepted(remoteMarkdown, expectedRevisionId, expectedSignature) {
+	if (remoteMarkdown.revisionId === undefined || remoteMarkdown.revisionId < expectedRevisionId) {
+		return false;
+	}
+
+	if (!expectedSignature) {
+		return true;
+	}
+
+	const remoteSignature = await createSyncContentSignature(remoteMarkdown.content);
+	return isSyncContentSignatureEquivalent(remoteSignature, expectedSignature);
+}
+
+async function fetchRemoteDocumentState(settings, doc) {
+	const [remoteMarkdown, remoteXml] = await Promise.all([
+		fetchLarkDocumentMarkdown(settings, doc),
+		fetchLarkDocumentWithIds(settings, doc)
+	]);
+	return await createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+}
+
+async function createRemoteDocumentState(doc, remoteMarkdown, remoteXml) {
+	const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+	return await createDocumentSyncStateFromRemote(
+		remoteDoc,
+		remoteMarkdown.content,
+		remoteXml.content,
+		remoteXml.revisionId ?? remoteMarkdown.revisionId
+	);
 }
 
 async function sleep(ms) {

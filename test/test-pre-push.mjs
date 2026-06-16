@@ -37,6 +37,7 @@ async function run() {
 		await testPreciseHeadingInsertUsesXml(workspace);
 		await testPreciseDeleteRefreshesState(workspace);
 		await testPreciseRefreshRetriesStaleRemote(workspace);
+		await testPreciseRefreshUsesUpdateRevisionBeforeFetchingWithIds(workspace);
 		await testPreciseRefreshFailsOnStaleRemote(workspace);
 		await testPreciseRefreshAllowsNormalizedRemoteMarkdown(workspace);
 		await testPreciseSkipAllowsNormalizedRemoteMarkdown(workspace);
@@ -280,6 +281,35 @@ async function testPreciseRefreshRetriesStaleRemote(workspace) {
 	const log = await readLog(workspace);
 	assert.ok((log.match(/--doc-format markdown/g) || []).length >= 3);
 	const state = await readSyncState(workspace);
+	assert.deepEqual(state.documents["doc-token"].units.map((unit) => unit.blockId), [
+		"blk-1",
+		"blk-2"
+	]);
+}
+
+async function testPreciseRefreshUsesUpdateRevisionBeforeFetchingWithIds(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Body\n\n## Inserted"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateWithUnits(workspace, "https://example.feishu.cn/docx/doc-token", "# bound\n\nBody", [{
+		stableId: "0:paragraph",
+		kind: "paragraph",
+		hash: await createContentHash("Body"),
+		blockId: "blk-1"
+	}]);
+	await clearLog(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_FETCH_INSERTED_AFTER_UPDATE: "1",
+			LARK_CLI_UPDATE_REVISION_ID: "5",
+			LARK_CLI_STALE_WITH_IDS_FETCHES: "2"
+		}
+	});
+	const log = await readLog(workspace);
+	assert.equal((log.match(/--detail with-ids/g) || []).length, 4);
+	const state = await readSyncState(workspace);
+	assert.equal(state.documents["doc-token"].revisionId, 5);
 	assert.deepEqual(state.documents["doc-token"].units.map((unit) => unit.blockId), [
 		"blk-1",
 		"blk-2"
@@ -696,11 +726,19 @@ if (args.includes("+fetch")) {
   const isWithIds = args.includes("--detail") && args.includes("with-ids");
   const staleLimit = Number(process.env.LARK_CLI_STALE_MARKDOWN_FETCHES || "0");
   const stalePath = process.env.LARK_CLI_LOG + ".stale-markdown-count";
+  const staleWithIdsLimit = Number(process.env.LARK_CLI_STALE_WITH_IDS_FETCHES || "0");
+  const staleWithIdsPath = process.env.LARK_CLI_LOG + ".stale-with-ids-count";
   let shouldReturnStaleMarkdown = false;
   if (!isWithIds && staleLimit > 0) {
     const count = fs.existsSync(stalePath) ? Number(fs.readFileSync(stalePath, "utf8") || "0") : 0;
     fs.writeFileSync(stalePath, String(count + 1));
     shouldReturnStaleMarkdown = count < staleLimit;
+  }
+  let shouldReturnStaleWithIds = false;
+  if (isWithIds && staleWithIdsLimit > 0 && fs.existsSync(insertedAfterUpdatePath)) {
+    const count = fs.existsSync(staleWithIdsPath) ? Number(fs.readFileSync(staleWithIdsPath, "utf8") || "0") : 0;
+    fs.writeFileSync(staleWithIdsPath, String(count + 1));
+    shouldReturnStaleWithIds = count < staleWithIdsLimit;
   }
   let markdown = "# bound\\n\\nBody";
   if (doc.includes("second-token")) {
@@ -715,9 +753,10 @@ if (args.includes("+fetch")) {
     markdown = "# bound\\n\\nChanged";
   }
   let content = markdown;
+  let revisionId = Number(process.env.LARK_CLI_BASE_REVISION_ID || "4");
   if (isWithIds && !process.env.LARK_CLI_NO_BLOCK_IDS) {
     content = "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p>";
-    if (process.env.LARK_CLI_FETCH_INSERTED || (process.env.LARK_CLI_FETCH_INSERTED_AFTER_UPDATE && fs.existsSync(insertedAfterUpdatePath))) {
+    if (!shouldReturnStaleWithIds && (process.env.LARK_CLI_FETCH_INSERTED || (process.env.LARK_CLI_FETCH_INSERTED_AFTER_UPDATE && fs.existsSync(insertedAfterUpdatePath)))) {
       content = "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p><h2 id=\\"blk-2\\">Inserted</h2>";
     } else if (process.env.LARK_CLI_FETCH_CHANGED_AFTER_UPDATE && fs.existsSync(changedAfterUpdatePath)) {
       content = "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Changed</p>";
@@ -725,7 +764,10 @@ if (args.includes("+fetch")) {
       content = "<title id=\\"doc-title\\">bound</title><p id=\\"blk-2\\">Changed</p>";
     }
   }
-  process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc, content, revision_id: 4 } } }));
+  if (process.env.LARK_CLI_UPDATE_REVISION_ID && fs.existsSync(insertedAfterUpdatePath) && !shouldReturnStaleMarkdown && !shouldReturnStaleWithIds) {
+    revisionId = Number(process.env.LARK_CLI_UPDATE_REVISION_ID);
+  }
+  process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc, content, revision_id: revisionId } } }));
 } else {
   if (process.env.LARK_CLI_FETCH_CHANGED_AFTER_UPDATE && args.includes("+update")) {
     fs.writeFileSync(changedAfterUpdatePath, "1");
@@ -733,7 +775,8 @@ if (args.includes("+fetch")) {
   if (process.env.LARK_CLI_FETCH_INSERTED_AFTER_UPDATE && args.includes("+update")) {
     fs.writeFileSync(insertedAfterUpdatePath, "1");
   }
-  process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc } } }));
+  const revisionId = process.env.LARK_CLI_UPDATE_REVISION_ID ? Number(process.env.LARK_CLI_UPDATE_REVISION_ID) : undefined;
+  process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc, revision_id: revisionId } } }));
 }
 `;
 	const path = join(workspace, "bin", "lark-cli");
@@ -759,6 +802,7 @@ async function clearLog(workspace) {
 	await rm(`${logPath}.changed-after-update`, { force: true });
 	await rm(`${logPath}.inserted-after-update`, { force: true });
 	await rm(`${logPath}.stale-markdown-count`, { force: true });
+	await rm(`${logPath}.stale-with-ids-count`, { force: true });
 }
 
 async function clearNotificationLog(workspace) {
