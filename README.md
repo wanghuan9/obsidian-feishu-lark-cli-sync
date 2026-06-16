@@ -14,7 +14,8 @@ Feishu Lark CLI Sync publishes and synchronizes Obsidian Markdown notes to Feish
 - **覆盖到飞书**：需要完全以本地 Markdown 为准时，可手动执行全量覆盖。
 - **目录同步**：右键目录同步全部 Markdown 文件，并在飞书 / Lark 中保留目录层级。
 - **自动同步**：支持保存后同步，也支持 Git `pre-push` hook 在推送代码前同步已绑定文档。
-- **安全增量同步**：默认只更新变动块；无法安全更新时停止并通知，不会悄悄全量覆盖。
+- **按块增量同步**：小改动只更新变动块，不重写整篇文档，可保留飞书 / Lark 的操作历史。
+- **自动同步策略**：默认使用自动策略；小改动增量同步，改动较大或结构复杂时自动降级为全量覆盖。
 - **内部链接改写**：上传到飞书 / Lark 的内容会把目录内 Markdown 链接、Obsidian Wiki 链接改写成远端文档引用。
 
 ## 安装
@@ -41,6 +42,10 @@ cd obsidian-feishu-lark-cli-sync
 
 安装完成后，重启 Obsidian，在设置 → 社区插件中启用 `Feishu Lark CLI Sync`。
 
+启用后可以在插件设置页配置 `lark-cli`、默认上传位置、同步策略和 Git hook：
+
+![插件设置页](./docs/images/settings-page.png)
+
 ## 使用前准备
 
 先安装并登录 `lark-cli`：
@@ -65,6 +70,8 @@ which lark-cli
 
 - `Lark: 同步到飞书`：没有绑定时创建新文档；已有绑定时更新远端文档。
 - `Lark: 覆盖到飞书`：强制以本地 Markdown 为准，清空并重写远端文档。
+
+![Obsidian 操作入口](./docs/images/obsidian-actions.png)
 
 同步方向是单向的：**Obsidian Markdown 是源内容，飞书 / Lark 文档是输出结果**。
 
@@ -105,8 +112,16 @@ lark_doc_url: "https://example.feishu.cn/docx/xxxx"
 - `默认上传位置`：Wiki URL、Wiki 节点 token、文件夹 token；留空则上传到个人文档库。
 - `标题来源`：使用第一个 Markdown 标题，或使用文件名。
 - `写入 frontmatter 绑定信息`：发布后把飞书文档 URL 写入笔记 frontmatter。
-- `同步策略`：默认安全增量同步；也可切换为全量覆盖同步。
+- `同步策略`：默认自动策略；小改动增量同步，改动较大、结构复杂或无法安全增量时自动全量覆盖。
 - `同步状态缓存`：控制安全增量同步状态最多保留多少篇文档。
+
+## 增量同步与飞书历史记录
+
+插件会把 Markdown 拆成顶层内容块，并记录这些块与飞书 / Lark 文档 block id 的映射。后续同步时，优先只对发生变化的块执行增量更新，例如替换某个段落、插入新增段落或删除过期段落。
+
+这种按块同步不会清空并重写整篇文档，因此飞书 / Lark 侧能继续保留对应的操作历史、最近更新记录和协作上下文。只有在选择 `全量覆盖`，或自动策略判断本次改动较大、结构复杂、无法安全增量时，才会降级为重写远端文档。
+
+![飞书历史记录保留效果](./docs/images/lark-history.png)
 
 安全增量同步状态保存在：
 
