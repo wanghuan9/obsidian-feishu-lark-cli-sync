@@ -52,7 +52,7 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	titleSource: "file-name",
 	openAfterSync: true,
 	updateFrontmatter: true,
-	autoSyncMode: "manual",
+	autoSyncMode: "save",
 	autoSyncDelaySeconds: 15,
 	syncStrategy: "auto",
 	stateCacheRetainLimit: 100

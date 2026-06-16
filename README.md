@@ -42,9 +42,7 @@ cd obsidian-feishu-lark-cli-sync
 
 安装完成后，重启 Obsidian，在设置 → 社区插件中启用 `Feishu Lark CLI Sync`。
 
-启用后可以在插件设置页配置 `lark-cli`、默认上传位置、同步策略和 Git hook：
-
-![插件设置页](./docs/images/settings-page.png)
+启用后可以在插件设置页配置 `lark-cli`、默认上传位置、同步策略和 Git hook。
 
 ## 使用前准备
 
@@ -99,11 +97,27 @@ lark_doc_url: "https://example.feishu.cn/docx/xxxx"
 
 ### 自动同步
 
+自动同步只处理已绑定文档。首次使用时，需要先在 Obsidian 中执行 `Lark: 同步到飞书` 发布文档，并写入 `lark_doc_url`
+绑定链接；后续保存后同步或 Git hook 才能识别并同步该文件。
+
+#### 触发方式
+
 在设置中可选择：
 
 - `关闭`：只手动同步。
-- `保存后同步`：已绑定 Markdown 文件保存后自动同步。
+- `保存后同步`：Obsidian 运行期间，已绑定 Markdown 文件发生保存事件后自动同步。
 - `Git pre-push hook`：执行 `git push` 前同步已绑定 Markdown 文件。
+
+#### 生效场景
+
+`保存后同步` 依赖 Obsidian 捕获文件变更事件，适用于以下场景：
+
+- 在 Obsidian 中直接编辑并保存：可以自动同步。
+- 用其他编辑器修改文件，但 Obsidian 同时保持运行并监听该 vault：可以自动同步。
+- 用其他编辑器修改文件，且 Obsidian 未运行或未打开该 vault：不会触发自动同步。
+
+`Git pre-push hook` 只依赖 Git 推送命令，不依赖 Obsidian 或其他编辑器是否运行。适合把同步作为提交发布流程的一部分，确保执行
+`git push` 前先同步已绑定文档。
 
 使用 Git hook 时，在设置页 `Git Hook` 区域点击 `安装 hook`。如果同步失败，本次 `git push` 会被阻断。
 
