@@ -554,6 +554,41 @@ assert.deepEqual(complexPlan.commands, [{
 	content: "Inserted"
 }]);
 
+const modifiedAroundInsertState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\nOld one\n\nOld two\n\nKeep",
+	[
+		"<title id=\"doc-title\">Note</title>",
+		"<p id=\"blk-1\">Old one</p>",
+		"<p id=\"blk-2\">Old two</p>",
+		"<p id=\"blk-3\">Keep</p>"
+	].join(""),
+	11
+);
+const modifiedAroundInsertPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nNew one\n\nInserted\n\nNew two\n\nKeep",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: modifiedAroundInsertState
+});
+assert.equal(modifiedAroundInsertPlan.mode, "precise");
+assert.deepEqual(modifiedAroundInsertPlan.commands, [
+	{
+		doc: "doc-token",
+		command: "block_delete",
+		blockId: "blk-1,blk-2"
+	},
+	{
+		doc: "doc-token",
+		command: "block_insert_after",
+		docFormat: "markdown",
+		blockId: "doc-title",
+		contentFileName: "sync.md",
+		content: "New one\n\nInserted\n\nNew two"
+	}
+]);
+
 const headingInsertPlan = await buildSyncPlan({
 	doc: "doc-token",
 	markdown: "# Note\n\nBody\n\n## Inserted\n\n## Next",

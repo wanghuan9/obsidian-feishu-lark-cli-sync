@@ -1192,6 +1192,10 @@ function buildMixedGapCommands(
 		return buildDeleteCommands(doc, previousGap);
 	}
 
+	if (previousGap.length !== nextGap.length) {
+		return buildMixedUnalignedGapCommands(doc, contentFileName, previousGap, nextGap, anchorBlockId);
+	}
+
 	const replaceCount = Math.min(previousGap.length, nextGap.length);
 	const replaceUnits = nextGap.slice(0, replaceCount);
 	const replacedPreviousUnits = previousGap.slice(0, replaceCount);
