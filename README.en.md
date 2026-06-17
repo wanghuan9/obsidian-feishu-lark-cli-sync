@@ -55,6 +55,14 @@ If Obsidian cannot find `lark-cli`, set the absolute path in the plugin settings
 which lark-cli
 ```
 
+On Windows, try the default `lark-cli` value first. The plugin auto-detects PATH, `C:\nvm4w\nodejs`, `%APPDATA%\npm`, and other common locations. If you set a path manually, use the folder containing `lark-cli.cmd` or the full shim path, for example:
+
+```powershell
+C:\nvm4w\nodejs\lark-cli.cmd
+```
+
+The `Check lark-cli` button in settings verifies the command path, version, and current login identity. The plugin requires `lark-cli` `1.0.55` or newer.
+
 ## Usage
 
 ### Single-note Sync
@@ -102,7 +110,7 @@ For Git hook mode, click `Install hook` in the `Git Hook` settings section. If s
 
 - `Default target`: Wiki URL, wiki node token, folder token, or blank for the personal library.
 - `Title source`: use the first Markdown heading or the file name.
-- `Write binding to frontmatter`: store the remote document URL in note frontmatter.
+- `Write binding to frontmatter`: store the remote document URL, doc token, and folder-publish remote path in note frontmatter.
 - `Sync strategy`: safe precise sync by default, or overwrite sync.
 - `Sync state cache`: controls how many document states are kept for safe precise sync.
 

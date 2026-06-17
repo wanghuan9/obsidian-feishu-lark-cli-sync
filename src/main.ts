@@ -1,11 +1,10 @@
 import { addIcon, FileSystemAdapter, Menu, Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
 import { execFile } from "child_process";
 import { constants } from "fs";
-import { access, chmod, copyFile, mkdir, readFile, rename } from "fs/promises";
+import { access, chmod, copyFile, mkdir, readFile, rename, stat } from "fs/promises";
 import { mkdtemp, rm, writeFile } from "fs/promises";
-import { homedir } from "os";
 import { dirname, join } from "path";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { promisify } from "util";
 import {
 	getRemoteParentPath as getSelectedRemoteParentPath,
@@ -40,7 +39,20 @@ import {
 	touchDocumentSyncState,
 	trimSyncStateCache
 } from "./lark-sync-core";
-import { EMBEDDED_PRE_PUSH_CORE_SCRIPT, EMBEDDED_PRE_PUSH_SCRIPT } from "./embedded-helpers";
+import {
+	buildCommandEnvironment as buildLarkCommandEnvironment,
+	LARK_CLI_COMMAND,
+	MIN_LARK_CLI_VERSION,
+	resolveLarkCliPathFromSetting,
+	shouldUseCommandShell,
+	uniquePathEntries,
+	withDocsApiVersion
+} from "./lark-cli-command";
+import {
+	EMBEDDED_LARK_CLI_COMMAND_SCRIPT,
+	EMBEDDED_PRE_PUSH_CORE_SCRIPT,
+	EMBEDDED_PRE_PUSH_SCRIPT
+} from "./embedded-helpers";
 
 const execFileAsync = promisify(execFile);
 
@@ -62,10 +74,10 @@ const FRONTMATTER_REMOTE_ROOT_KEY = "remoteRoot";
 const FRONTMATTER_REMOTE_PARENT_PATH_KEY = "remoteParentPath";
 const MAX_STDERR_LENGTH = 1600;
 const MAX_NOTICE_ERROR_DETAIL_LENGTH = 260;
-const LARK_CLI_COMMAND = "lark-cli";
 const NODE_COMMAND = "node";
 const PRE_PUSH_SCRIPT_NAME = "sync-pre-push.mjs";
 const PRE_PUSH_CORE_SCRIPT_NAME = "lark-sync-core.mjs";
+const LARK_CLI_COMMAND_SCRIPT_NAME = "lark-cli-command.mjs";
 const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const PRE_PUSH_HOOK_MARKER = "Feishu Lark CLI Sync";
 const LARK_RIBBON_ICON_ID = "feishu-lark-cli-sync-ribbon";
@@ -87,7 +99,6 @@ const LARK_CLI_MAX_CONCURRENT_REQUESTS = 3;
 const LARK_CLI_REQUEST_INTERVAL_MS = 350;
 const LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
-const FALLBACK_PATH_ENTRIES = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 type Language = "zh-CN" | "en";
 type AutoSyncMode = "manual" | "save" | "pre-push";
@@ -146,6 +157,12 @@ interface LarkCommandResult {
 		wiki_node?: {
 			node_token?: string;
 			obj_token?: string;
+		};
+		user?: {
+			name?: string;
+			en_name?: string;
+			user_id?: string;
+			open_id?: string;
 		};
 	};
 	error?: {
@@ -232,6 +249,9 @@ const MESSAGES = {
 		noticeNoGitRepository: "当前 Obsidian 仓库不是 Git 仓库，未找到 .git 目录。",
 		noticeExistingGitHookBackedUp: "检测到已有 pre-push hook，已备份并在新 hook 中继续调用：{path}",
 		noticeAutoSyncFailed: "自动同步失败：{path}\n{message}",
+		noticeCheckingLarkCli: "正在检查 lark-cli...",
+		noticeLarkCliCheckOk: "lark-cli {version} 可用；当前账号：{user}",
+		noticeLarkCliCheckFailed: "lark-cli 检查失败：{message}",
 		errorNoDocumentToken: "lark-cli 没有返回文档 token 或 URL。",
 		errorInvalidDefaultTarget: "默认上传位置无效或当前飞书账号无权访问。\n请检查插件设置中的“默认上传位置”：{target}\n底层原因：{detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
@@ -244,7 +264,10 @@ const MESSAGES = {
 		languageChinese: "中文",
 		languageEnglish: "English",
 		settingLarkCliPathName: "lark-cli 路径",
-		settingLarkCliPathDesc: "用于执行 lark-cli 的命令或绝对路径。保持默认值时会自动探测。",
+		settingLarkCliPathDesc: "建议保持默认值自动探测。Windows 可填 lark-cli.cmd 所在目录或完整 .cmd 路径。",
+		settingCheckLarkCliName: "检查 lark-cli",
+		settingCheckLarkCliDesc: "检查命令路径、版本和当前登录身份；要求 lark-cli 1.0.55 或更新版本。",
+		checkLarkCliButton: "检查",
 		settingDefaultTargetName: "默认上传位置",
 		settingDefaultTargetDesc: "填写 Wiki URL、Wiki 节点 token、文件夹 token；留空则上传到个人文档库。",
 		settingTitleSourceName: "标题来源",
@@ -303,6 +326,9 @@ const MESSAGES = {
 		noticeNoGitRepository: "The current Obsidian vault is not a Git repository. No .git directory was found.",
 		noticeExistingGitHookBackedUp: "Existing pre-push hook detected. It was backed up and will still be called by the new hook: {path}",
 		noticeAutoSyncFailed: "Auto sync failed: {path}\n{message}",
+		noticeCheckingLarkCli: "Checking lark-cli...",
+		noticeLarkCliCheckOk: "lark-cli {version} is ready; current account: {user}",
+		noticeLarkCliCheckFailed: "lark-cli check failed: {message}",
 		errorNoDocumentToken: "lark-cli did not return a document token or URL.",
 		errorInvalidDefaultTarget: "Default upload target is invalid or inaccessible.\nCheck the Default target setting: {target}\nCause: {detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
@@ -315,7 +341,10 @@ const MESSAGES = {
 		languageChinese: "中文",
 		languageEnglish: "English",
 		settingLarkCliPathName: "lark-cli path",
-		settingLarkCliPathDesc: "Command or absolute path used to run lark-cli. Keep the default for auto-detection.",
+		settingLarkCliPathDesc: "Recommended: keep the default for auto-detection. On Windows, you may set the folder containing lark-cli.cmd or the full .cmd path.",
+		settingCheckLarkCliName: "Check lark-cli",
+		settingCheckLarkCliDesc: "Checks command path, version, and current login identity; requires lark-cli 1.0.55 or newer.",
+		checkLarkCliButton: "Check",
 		settingDefaultTargetName: "Default target",
 		settingDefaultTargetDesc: "Wiki URL, wiki node token, folder token, or blank for personal library.",
 		settingTitleSourceName: "Title source",
@@ -724,10 +753,13 @@ export default class LarkCliSyncPlugin extends Plugin {
 		const pluginDirectory = this.getPluginDirectoryPath();
 		const sourceScript = join(pluginDirectory, PRE_PUSH_SCRIPT_NAME);
 		const sourceCoreScript = join(pluginDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
+		const sourceCommandScript = join(pluginDirectory, LARK_CLI_COMMAND_SCRIPT_NAME);
 		const targetScript = join(hooksDirectory, PRE_PUSH_SCRIPT_NAME);
 		const targetCoreScript = join(hooksDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
+		const targetCommandScript = join(hooksDirectory, LARK_CLI_COMMAND_SCRIPT_NAME);
 		await this.copyOrWriteEmbeddedHelper(sourceScript, targetScript, EMBEDDED_PRE_PUSH_SCRIPT);
 		await this.copyOrWriteEmbeddedHelper(sourceCoreScript, targetCoreScript, EMBEDDED_PRE_PUSH_CORE_SCRIPT);
+		await this.copyOrWriteEmbeddedHelper(sourceCommandScript, targetCommandScript, EMBEDDED_LARK_CLI_COMMAND_SCRIPT);
 		await chmod(targetScript, 0o755);
 	}
 
@@ -1269,13 +1301,17 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		const token = this.readFrontmatterString(frontmatter[FRONTMATTER_TOKEN_KEY]);
 		const url = this.readFrontmatterString(frontmatter[FRONTMATTER_URL_KEY]);
+		const remoteRoot = this.readFrontmatterString(frontmatter[FRONTMATTER_REMOTE_ROOT_KEY]);
+		const remoteParentPath = this.readFrontmatterString(frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY]);
 		if (!token && !url) {
 			return null;
 		}
 
 		return {
 			token,
-			url
+			url,
+			remoteRoot,
+			remoteParentPath
 		};
 	}
 
@@ -1850,7 +1886,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		return !previous
 			|| previous.url !== next.url
-			|| Boolean(previous.token)
+			|| previous.token !== next.token
 			|| previous.remoteRoot !== next.remoteRoot
 			|| previous.remoteParentPath !== next.remoteParentPath;
 	}
@@ -2125,7 +2161,50 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async runLarkCli(args: string[], options: LarkCommandOptions = {}): Promise<LarkCommandResult> {
-		return await this.runLarkCliQueued(args, options);
+		return await this.runLarkCliQueued(withDocsApiVersion(args), options);
+	}
+
+	async checkLarkCliConnection(): Promise<{ version: string; user: string }> {
+		const version = await this.getLarkCliVersion();
+		if (this.compareVersions(version, MIN_LARK_CLI_VERSION) < 0) {
+			throw new Error(`lark-cli ${version} is too old. Install ${MIN_LARK_CLI_VERSION} or newer.`);
+		}
+
+		const result = await this.runLarkCli(["contact", "+get-user", "--as", "user", "--json"]);
+		const user = result.data?.user;
+		return {
+			version,
+			user: user?.name || user?.en_name || user?.user_id || user?.open_id || "unknown"
+		};
+	}
+
+	private async getLarkCliVersion(): Promise<string> {
+		const executable = await this.resolveLarkCliPath();
+		const env = await this.buildCommandEnvironment(executable);
+		const { stdout } = await execFileAsync(executable, ["--version"], {
+			env,
+			shell: shouldUseCommandShell(executable),
+			maxBuffer: 1024 * 1024
+		});
+		const match = stdout.match(/(\d+\.\d+\.\d+)/);
+		const version = match?.[1];
+		if (!version) {
+			throw new Error(`Could not parse lark-cli version from: ${stdout.trim()}`);
+		}
+		return version;
+	}
+
+	private compareVersions(a: string, b: string): number {
+		const aa = a.split(".").map((part) => Number(part));
+		const bb = b.split(".").map((part) => Number(part));
+		for (let index = 0; index < Math.max(aa.length, bb.length); index += 1) {
+			const av = aa[index] || 0;
+			const bv = bb[index] || 0;
+			if (av !== bv) {
+				return av > bv ? 1 : -1;
+			}
+		}
+		return 0;
 	}
 
 	private async runLarkCliQueued(args: string[], options: LarkCommandOptions): Promise<LarkCommandResult> {
@@ -2189,6 +2268,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const { stdout } = await execFileAsync(executable, args, {
 			cwd: options.cwd,
 			env,
+			shell: shouldUseCommandShell(executable),
 			maxBuffer: 20 * 1024 * 1024
 		});
 		const result = JSON.parse(stdout) as LarkCommandResult;
@@ -2289,24 +2369,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			return this.cachedCommandEnvironment;
 		}
 
-		const pathEntries = this.getDefaultPathEntries();
-		if (executable.startsWith("/")) {
-			pathEntries.unshift(dirname(executable));
-		}
-
-		if (shellPath) {
-			pathEntries.unshift(...shellPath.split(":").filter(Boolean));
-		}
-
-		const currentPath = process.env.PATH;
-		if (currentPath) {
-			pathEntries.push(currentPath);
-		}
-
-		const env = {
-			...process.env,
-			PATH: this.uniquePathEntries(pathEntries).join(":")
-		};
+		const env = buildLarkCommandEnvironment(executable, {
+			env: process.env,
+			loginShellPath: shellPath
+		}) as NodeJS.ProcessEnv;
 		this.cachedCommandEnvironment = env;
 		this.cachedCommandEnvironmentExecutable = executable;
 		this.cachedCommandEnvironmentShellPath = shellPath;
@@ -2332,35 +2398,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async resolveLarkCliPathUncached(configuredPath: string): Promise<string> {
-		if (configuredPath && configuredPath !== LARK_CLI_COMMAND) {
-			return this.cacheResolvedLarkCliPath(configuredPath, configuredPath);
-		}
-
-		const shellPath = await this.resolveCommandFromLoginShell(LARK_CLI_COMMAND);
-		if (shellPath) {
-			return this.cacheResolvedLarkCliPath(configuredPath, shellPath);
-		}
-
-		const candidates = [
-			join(homedir(), ".npm-global/bin/lark-cli"),
-			join(homedir(), ".local/bin/lark-cli"),
-			join(homedir(), "bin/lark-cli"),
-			"/opt/homebrew/bin/lark-cli",
-			"/usr/local/bin/lark-cli",
-			LARK_CLI_COMMAND
-		];
-
-		for (const candidate of candidates) {
-			if (candidate === LARK_CLI_COMMAND) {
-				return this.cacheResolvedLarkCliPath(configuredPath, candidate);
-			}
-
-			if (await this.canExecute(candidate)) {
-				return this.cacheResolvedLarkCliPath(configuredPath, candidate);
-			}
-		}
-
-		return this.cacheResolvedLarkCliPath(configuredPath, LARK_CLI_COMMAND);
+		return this.cacheResolvedLarkCliPath(configuredPath, await resolveLarkCliPathFromSetting(configuredPath, {
+			env: process.env,
+			canExecute: (path) => this.canExecute(path),
+			pathExists: (path) => this.pathExists(path),
+			isDirectory: (path) => this.isDirectory(path),
+			resolveCommandFromLoginShell: (command) => this.resolveCommandFromLoginShell(command)
+		}));
 	}
 
 	private cacheResolvedLarkCliPath(setting: string, resolvedPath: string): string {
@@ -2372,16 +2416,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		return resolvedPath;
 	}
 
-	private getDefaultPathEntries(): string[] {
-		return [
-			join(homedir(), ".npm-global/bin"),
-			join(homedir(), ".local/bin"),
-			join(homedir(), "bin"),
-			...FALLBACK_PATH_ENTRIES
-		];
-	}
-
 	private async resolveCommandFromLoginShell(command: string): Promise<string> {
+		if (process.platform === "win32") {
+			return "";
+		}
+
 		for (const shell of this.getShellCandidates()) {
 			try {
 				const { stdout } = await execFileAsync(shell, ["-lc", `command -v ${command}`], {
@@ -2418,6 +2457,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async resolveLoginShellPathUncached(): Promise<string> {
+		if (process.platform === "win32") {
+			return "";
+		}
+
 		for (const shell of this.getShellCandidates()) {
 			try {
 				const { stdout } = await execFileAsync(shell, ["-lc", "printf %s \"$PATH\""], {
@@ -2452,23 +2495,21 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private uniquePathEntries(entries: string[]): string[] {
-		const seen = new Set<string>();
-		const result: string[] = [];
-
-		for (const entry of entries) {
-			if (entry && !seen.has(entry)) {
-				seen.add(entry);
-				result.push(entry);
-			}
-		}
-
-		return result;
+		return uniquePathEntries(entries);
 	}
 
 	private async canExecute(path: string): Promise<boolean> {
 		try {
 			await access(path, constants.X_OK);
 			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private async isDirectory(path: string): Promise<boolean> {
+		try {
+			return (await stat(path)).isDirectory();
 		} catch {
 			return false;
 		}
@@ -2498,7 +2539,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private sanitizeFileName(name: string): string {
-		return name.replace(/[\\/:*?"<>|]/g, "-").trim() || "note";
+		return name
+			.replace(/[^A-Za-z0-9._-]+/g, "-")
+			.replace(/-+/g, "-")
+			.replace(/^[.-]+|[.-]+$/g, "") || "note";
 	}
 
 	private async writeBinding(file: TFile, binding: BoundLarkDocument): Promise<void> {
@@ -2511,11 +2555,27 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		this.selfWrittenPaths.set(file.path, Date.now());
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			delete frontmatter.lark_doc;
-			delete frontmatter[FRONTMATTER_TOKEN_KEY];
-			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
-			delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
 			delete frontmatter[LEGACY_FRONTMATTER_SYNCED_AT_KEY];
-			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
+			if (binding.url) {
+				frontmatter[FRONTMATTER_URL_KEY] = binding.url;
+			} else {
+				delete frontmatter[FRONTMATTER_URL_KEY];
+			}
+			if (binding.token) {
+				frontmatter[FRONTMATTER_TOKEN_KEY] = binding.token;
+			} else {
+				delete frontmatter[FRONTMATTER_TOKEN_KEY];
+			}
+			if (binding.remoteRoot) {
+				frontmatter[FRONTMATTER_REMOTE_ROOT_KEY] = binding.remoteRoot;
+			} else {
+				delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
+			}
+			if (binding.remoteParentPath) {
+				frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY] = binding.remoteParentPath;
+			} else {
+				delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
+			}
 		});
 		this.selfWrittenPaths.set(file.path, Date.now());
 	}
@@ -2593,6 +2653,25 @@ class LarkCliSyncSettingTab extends PluginSettingTab {
 				text.setPlaceholder("lark-cli").setValue(this.plugin.settings.larkCliPath).onChange(async (value) => {
 					this.plugin.settings.larkCliPath = value.trim() || DEFAULT_SETTINGS.larkCliPath;
 					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(generalSectionEl)
+			.setName(this.plugin.t("settingCheckLarkCliName"))
+			.setDesc(this.plugin.t("settingCheckLarkCliDesc"))
+			.addButton((button) => {
+				button.setButtonText(this.plugin.t("checkLarkCliButton")).onClick(async () => {
+					new Notice(this.plugin.t("noticeCheckingLarkCli"), 2000);
+					try {
+						const result = await this.plugin.checkLarkCliConnection();
+						new Notice(this.plugin.t("noticeLarkCliCheckOk", {
+							version: result.version,
+							user: result.user
+						}), 8000);
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						new Notice(this.plugin.t("noticeLarkCliCheckFailed", { message }), 10000);
+					}
 				});
 			});
 

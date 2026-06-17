@@ -62,6 +62,14 @@ lark-cli auth status
 which lark-cli
 ```
 
+Windows 上建议先保持默认值 `lark-cli`，插件会自动探测 PATH、`C:\nvm4w\nodejs`、`%APPDATA%\npm` 等常见位置。手动填写时可以填 `lark-cli.cmd` 所在目录，或完整路径，例如：
+
+```powershell
+C:\nvm4w\nodejs\lark-cli.cmd
+```
+
+设置页里的 `检查 lark-cli` 按钮会验证命令路径、版本和当前登录身份。当前要求 `lark-cli` 版本为 `1.0.55` 或更新版本。
+
 ## 使用
 
 ### 单篇同步
@@ -111,7 +119,7 @@ lark_doc_url: "https://example.feishu.cn/docx/xxxx"
 
 - `默认上传位置`：Wiki URL、Wiki 节点 token、文件夹 token；留空则上传到个人文档库。
 - `标题来源`：使用第一个 Markdown 标题，或使用文件名。
-- `写入 frontmatter 绑定信息`：发布后把飞书文档 URL 写入笔记 frontmatter。
+- `写入 frontmatter 绑定信息`：发布后把飞书文档 URL、doc token 和文件夹发布的远端路径写入笔记 frontmatter。
 - `同步策略`：默认自动策略；小改动增量同步，改动较大、结构复杂或无法安全增量时自动全量覆盖。
 - `同步状态缓存`：控制安全增量同步状态最多保留多少篇文档。
 
