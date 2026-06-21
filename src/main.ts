@@ -668,22 +668,21 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	private async listRemoteImportFolderPage(input: RemoteImportFolderPageInput): Promise<RemoteImportPage> {
+		const params = {
+			folder_token: input.folderToken,
+			page_size: input.pageSize,
+			...(input.pageToken ? { page_token: input.pageToken } : {})
+		};
 		const args = [
 			"drive",
 			"files",
 			"list",
 			"--as",
 			"user",
-			"--page-size",
-			String(input.pageSize),
+			"--params",
+			JSON.stringify(params),
 			"--json"
 		];
-		if (input.folderToken) {
-			args.push("--folder-token", input.folderToken);
-		}
-		if (input.pageToken) {
-			args.push("--page-token", input.pageToken);
-		}
 
 		return normalizeRemoteImportPage(await this.runLarkCli(args));
 	}
