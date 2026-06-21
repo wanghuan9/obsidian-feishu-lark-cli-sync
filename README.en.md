@@ -9,10 +9,11 @@ It is useful when Obsidian is your local source of truth and Feishu/Lark is wher
 ## Features
 
 - **Single-note sync**: publish or update the current Markdown note as a Feishu/Lark Docx document.
-- **Overwrite to Feishu/Lark**: force the remote document to match the local Markdown content.
 - **Folder sync**: right-click a folder and sync all Markdown files while preserving the folder hierarchy.
-- **Auto sync**: sync after save, or sync bound notes before `git push` through a Git `pre-push` hook.
-- **Safe precise sync**: updates changed blocks by default; if it cannot update safely, it stops and notifies you.
+- **Block-level incremental sync**: update only changed blocks for small edits, without rewriting the whole document, so Feishu/Lark history can be preserved.
+- **Full overwrite sync**: clear and rewrite the remote document when the local Markdown file should be the complete source of truth.
+- **Automatic sync strategy**: use the automatic strategy by default; small changes are synced incrementally, while large or complex changes fall back to full overwrite when safe incremental sync is not possible.
+- **Auto sync triggers**: sync after save, or sync bound notes before `git push` through a Git `pre-push` hook.
 - **Internal link rewriting**: uploaded content rewrites Markdown and Obsidian internal links into Feishu/Lark document references.
 
 ## Installation
@@ -45,8 +46,15 @@ Install and log in to `lark-cli` first:
 
 ```bash
 npm install -g @larksuite/cli
+lark-cli version
 lark-cli auth login
 lark-cli auth status
+```
+
+Use `lark-cli >= 1.0.53`. Older versions may create documents with the title `Untitled` or cause sync errors. If your version is too old, upgrade it:
+
+```bash
+npm install -g @larksuite/cli@latest
 ```
 
 If Obsidian cannot find `lark-cli`, set the absolute path in the plugin settings:
@@ -63,6 +71,8 @@ Open a Markdown file, then click the ribbon icon or use the file context menu:
 
 - `Lark: Sync to Feishu/Lark`: create a document when no binding exists, or update the bound remote document.
 - `Lark: Overwrite to Feishu/Lark`: clear and rewrite the remote document with the local Markdown content.
+
+![Obsidian actions](./docs/images/obsidian-actions.png)
 
 Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source.
 
@@ -90,11 +100,25 @@ Local notes remain unchanged.
 
 ### Auto Sync
 
+Auto sync only handles already bound documents. For first-time use, run `Lark: Sync to Feishu/Lark` in Obsidian to publish the document and write the `lark_doc_url` binding; subsequent save-after-sync or Git hook sync can then find and update that file.
+
+#### Trigger Modes
+
 Choose one mode in settings:
 
 - `Off`: manual sync only.
-- `Sync after save`: sync bound Markdown notes after save.
+- `Sync after save`: while Obsidian is running, sync bound Markdown notes after file save events.
 - `Git pre-push hook`: sync bound Markdown notes before `git push`.
+
+#### When It Takes Effect
+
+`Sync after save` depends on Obsidian receiving file change events, so it works in these cases:
+
+- Editing and saving directly in Obsidian: auto sync is triggered.
+- Editing with another editor while Obsidian is running and watching the vault: auto sync can be triggered.
+- Editing with another editor while Obsidian is not running or the vault is not open: auto sync is not triggered.
+
+`Git pre-push hook` depends only on the Git push command. It does not require Obsidian or any editor to be running, and is useful when sync should be part of the publishing flow before `git push`.
 
 For Git hook mode, click `Install hook` in the `Git Hook` settings section. If sync fails, the current `git push` is blocked.
 
@@ -103,8 +127,16 @@ For Git hook mode, click `Install hook` in the `Git Hook` settings section. If s
 - `Default target`: Wiki URL, wiki node token, folder token, or blank for the personal library.
 - `Title source`: use the first Markdown heading or the file name.
 - `Write binding to frontmatter`: store the remote document URL in note frontmatter.
-- `Sync strategy`: safe precise sync by default, or overwrite sync.
+- `Sync strategy`: use automatic strategy by default; small changes use incremental sync, while large, complex, or unsafe incremental changes automatically fall back to full overwrite.
 - `Sync state cache`: controls how many document states are kept for safe precise sync.
+
+## Incremental Sync And Feishu/Lark History
+
+The plugin splits Markdown into top-level content blocks and records the mapping between those blocks and Feishu/Lark document block ids. Later syncs prefer incremental updates for changed blocks, such as replacing a paragraph, inserting a new paragraph, or deleting an outdated paragraph.
+
+This block-level sync does not clear and rewrite the whole document, so Feishu/Lark can keep the corresponding edit history, recent update records, and collaboration context. The remote document is rewritten only when you choose `Overwrite to Feishu/Lark`, or when the automatic strategy decides that the change is too large, too complex, or unsafe for incremental sync.
+
+![Feishu/Lark history preservation](./docs/images/lark-history.png)
 
 Safe precise sync state is stored at:
 

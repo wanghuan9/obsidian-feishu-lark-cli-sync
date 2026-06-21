@@ -50,8 +50,15 @@ cd obsidian-feishu-lark-cli-sync
 
 ```bash
 npm install -g @larksuite/cli
+lark-cli version
 lark-cli auth login
 lark-cli auth status
+```
+
+请使用 `lark-cli >= 1.0.53`。旧版本可能导致创建的文档标题显示为 `Untitled`、同步报错等问题。如果版本过低，请升级：
+
+```bash
+npm install -g @larksuite/cli@latest
 ```
 
 如果 Obsidian 找不到 `lark-cli`，在插件设置里的 `lark-cli 路径` 填写绝对路径：
