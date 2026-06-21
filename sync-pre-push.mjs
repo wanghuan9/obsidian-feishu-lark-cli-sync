@@ -33,8 +33,14 @@ const ZERO_REF = "0000000000000000000000000000000000000000";
 const MAX_STDERR_LENGTH = 1600;
 const MAX_PARALLEL_SYNCS = 3;
 const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
-const REMOTE_STATE_REFRESH_ATTEMPTS = 5;
-const REMOTE_STATE_REFRESH_DELAY_MS = 600;
+const REMOTE_STATE_REFRESH_ATTEMPTS = readPositiveIntegerEnv(
+	"FEISHU_LARK_CLI_SYNC_REMOTE_REFRESH_ATTEMPTS",
+	8
+);
+const REMOTE_STATE_REFRESH_DELAY_MS = readPositiveIntegerEnv(
+	"FEISHU_LARK_CLI_SYNC_REMOTE_REFRESH_DELAY_MS",
+	1500
+);
 const LARK_CLI_MAX_CONCURRENT_REQUESTS = 3;
 const LARK_CLI_REQUEST_INTERVAL_MS = 350;
 const LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
@@ -400,6 +406,20 @@ async function sleep(ms) {
 	await new Promise((resolvePromise) => {
 		setTimeout(resolvePromise, ms);
 	});
+}
+
+function readPositiveIntegerEnv(name, defaultValue) {
+	const rawValue = process.env[name];
+	if (!rawValue) {
+		return defaultValue;
+	}
+
+	const parsedValue = Number.parseInt(rawValue, 10);
+	if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+		return defaultValue;
+	}
+
+	return parsedValue;
 }
 
 async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs) {
