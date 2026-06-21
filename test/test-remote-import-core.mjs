@@ -26,9 +26,12 @@ const {
 	runProgressiveRemoteImport
 } = await import("./.tmp-remote-import-core-test.mjs");
 const {
+	buildSyncPlan,
 	createEmptySyncStateFile,
 	getDocumentStateKey,
-	readBindingFromMarkdown
+	prepareNoteContentForLark,
+	readBindingFromMarkdown,
+	removeLarkBinding
 } = await import("./.tmp-remote-import-sync-core-test.mjs");
 
 function createMemoryAdapter({ pages, documents, files }) {
@@ -133,6 +136,23 @@ function createMemoryAdapter({ pages, documents, files }) {
 	assert.equal(harness.pageCalls[1].pageToken, "page-2");
 	assert.equal(files.has("Imported/Doc Two.md"), true);
 	assert.ok(syncState.documents[getDocumentStateKey("doc-two")]);
+
+	const importedContent = files.get("Imported/Doc Two.md");
+	const importedBinding = readBindingFromMarkdown(importedContent);
+	const importedState = syncState.documents[getDocumentStateKey(importedBinding.token)];
+	const localContentForLark = prepareNoteContentForLark(
+		{ basename: "Doc Two" },
+		removeLarkBinding(importedContent),
+		"file-name"
+	);
+	const plan = await buildSyncPlan({
+		doc: importedBinding.token,
+		markdown: localContentForLark,
+		contentFileName: "sync.md",
+		strategy: "auto",
+		state: importedState
+	});
+	assert.equal(plan.mode, "skipped");
 }
 
 {
