@@ -641,6 +641,16 @@ export async function createDocumentSyncStateFromRemote(
 ): Promise<DocumentSyncState> {
 	const contentHash = await createContentHash(markdown);
 	const markdownUnits = await createMarkdownSyncUnits(markdown);
+	return createDocumentSyncStateFromParsedRemote(doc, contentHash, markdownUnits, remoteXml, revisionId);
+}
+
+function createDocumentSyncStateFromParsedRemote(
+	doc: string,
+	contentHash: string,
+	markdownUnits: MarkdownSyncUnit[],
+	remoteXml: string,
+	revisionId?: number
+): DocumentSyncState {
 	const remoteUnits = readRemoteTopLevelUnits(remoteXml);
 	const titleBlockId = readRemoteTitleBlockId(remoteXml);
 	if (markdownUnits.length !== remoteUnits.length) {
@@ -697,11 +707,9 @@ function createDocumentSyncStateFromPartialMapping(
 	revisionId?: number,
 	titleBlockId?: string
 ): DocumentSyncState {
-	const markdownKeyCounts = countUnitFingerprintKeys(markdownUnits);
-	const remoteUnitsByKey = collectUniqueRemoteUnitsByFingerprint(remoteUnits);
-	const units = markdownUnits.map((unit) => {
-		const key = createUnitFingerprintKey(unit);
-		const remoteUnit = markdownKeyCounts.get(key) === 1 ? remoteUnitsByKey.get(key) : undefined;
+	const mappedRemoteUnits = mapRemoteUnitsToMarkdownUnits(markdownUnits, remoteUnits);
+	const units = markdownUnits.map((unit, index) => {
+		const remoteUnit = mappedRemoteUnits[index];
 		return {
 			stableId: unit.stableId,
 			kind: unit.kind,
@@ -722,6 +730,256 @@ function createDocumentSyncStateFromPartialMapping(
 		units,
 		updatedAt: new Date().toISOString()
 	};
+}
+
+function mapRemoteUnitsToMarkdownUnits(
+	markdownUnits: MarkdownSyncUnit[],
+	remoteUnits: RemoteSyncUnit[]
+): Array<RemoteSyncUnit | undefined> {
+	const mapping = new Array<RemoteSyncUnit | undefined>(markdownUnits.length);
+	const usedRemoteIndexes = new Set<number>();
+	mapRemoteUnitsByIndex(markdownUnits, remoteUnits, mapping, usedRemoteIndexes);
+	mapRemoteUnitsByUniqueFingerprint(markdownUnits, remoteUnits, mapping, usedRemoteIndexes);
+	mapRemoteUnitsInAnchoredWindows(markdownUnits, remoteUnits, mapping, usedRemoteIndexes);
+	return mapping;
+}
+
+function mapRemoteUnitsByIndex(
+	markdownUnits: MarkdownSyncUnit[],
+	remoteUnits: RemoteSyncUnit[],
+	mapping: Array<RemoteSyncUnit | undefined>,
+	usedRemoteIndexes: Set<number>
+): void {
+	const limit = Math.min(markdownUnits.length, remoteUnits.length);
+	for (let index = 0; index < limit; index += 1) {
+		const markdownUnit = markdownUnits[index];
+		const remoteUnit = remoteUnits[index];
+		if (!markdownUnit || !remoteUnit || !areSameFingerprintUnit(markdownUnit, remoteUnit)) {
+			continue;
+		}
+
+		mapping[index] = remoteUnit;
+		usedRemoteIndexes.add(index);
+	}
+}
+
+function mapRemoteUnitsByUniqueFingerprint(
+	markdownUnits: MarkdownSyncUnit[],
+	remoteUnits: RemoteSyncUnit[],
+	mapping: Array<RemoteSyncUnit | undefined>,
+	usedRemoteIndexes: Set<number>
+): void {
+	const markdownIndexesByKey = collectMarkdownIndexesByFingerprint(markdownUnits, mapping);
+	const remoteIndexesByKey = collectRemoteIndexesByFingerprint(remoteUnits, usedRemoteIndexes);
+	for (const [key, markdownIndexes] of markdownIndexesByKey.entries()) {
+		const remoteIndexes = remoteIndexesByKey.get(key) || [];
+		if (markdownIndexes.length !== 1 || remoteIndexes.length !== 1) {
+			continue;
+		}
+
+		mapRemoteIndexesToMarkdownIndexes(markdownIndexes, remoteIndexes, remoteUnits, mapping, usedRemoteIndexes);
+	}
+}
+
+function mapRemoteUnitsInAnchoredWindows(
+	markdownUnits: MarkdownSyncUnit[],
+	remoteUnits: RemoteSyncUnit[],
+	mapping: Array<RemoteSyncUnit | undefined>,
+	usedRemoteIndexes: Set<number>
+): void {
+	const anchors = createMappingAnchors(mapping, remoteUnits);
+	for (let anchorIndex = 0; anchorIndex < anchors.length - 1; anchorIndex += 1) {
+		const previousAnchor = anchors[anchorIndex]!;
+		const nextAnchor = anchors[anchorIndex + 1]!;
+		const markdownIndexes = collectUnmappedMarkdownIndexes(markdownUnits, mapping, previousAnchor.markdownIndex + 1,
+			nextAnchor.markdownIndex);
+		const remoteIndexes = collectUnusedRemoteIndexes(remoteUnits, usedRemoteIndexes, previousAnchor.remoteIndex + 1,
+			nextAnchor.remoteIndex);
+		mapWindowByPosition(markdownIndexes, remoteIndexes, markdownUnits, remoteUnits, mapping, usedRemoteIndexes);
+		mapWindowByFingerprint(markdownIndexes, remoteIndexes, markdownUnits, remoteUnits, mapping, usedRemoteIndexes);
+	}
+}
+
+function createMappingAnchors(
+	mapping: Array<RemoteSyncUnit | undefined>,
+	remoteUnits: RemoteSyncUnit[]
+): Array<{ markdownIndex: number; remoteIndex: number }> {
+	const anchors = [{ markdownIndex: -1, remoteIndex: -1 }];
+	let lastRemoteIndex = -1;
+	for (const [markdownIndex, remoteUnit] of mapping.entries()) {
+		if (!remoteUnit) {
+			continue;
+		}
+
+		const remoteIndex = remoteUnits.indexOf(remoteUnit);
+		if (remoteIndex <= lastRemoteIndex) {
+			continue;
+		}
+
+		anchors.push({ markdownIndex, remoteIndex });
+		lastRemoteIndex = remoteIndex;
+	}
+
+	anchors.push({ markdownIndex: mapping.length, remoteIndex: remoteUnits.length });
+	return anchors;
+}
+
+function collectUnmappedMarkdownIndexes(
+	markdownUnits: MarkdownSyncUnit[],
+	mapping: Array<RemoteSyncUnit | undefined>,
+	startIndex: number,
+	endIndex: number
+): number[] {
+	const indexes: number[] = [];
+	for (let index = startIndex; index < endIndex && index < markdownUnits.length; index += 1) {
+		if (!mapping[index]) {
+			indexes.push(index);
+		}
+	}
+
+	return indexes;
+}
+
+function collectUnusedRemoteIndexes(
+	remoteUnits: RemoteSyncUnit[],
+	usedRemoteIndexes: Set<number>,
+	startIndex: number,
+	endIndex: number
+): number[] {
+	const indexes: number[] = [];
+	for (let index = startIndex; index < endIndex && index < remoteUnits.length; index += 1) {
+		if (!usedRemoteIndexes.has(index)) {
+			indexes.push(index);
+		}
+	}
+
+	return indexes;
+}
+
+function mapWindowByPosition(
+	markdownIndexes: number[],
+	remoteIndexes: number[],
+	markdownUnits: MarkdownSyncUnit[],
+	remoteUnits: RemoteSyncUnit[],
+	mapping: Array<RemoteSyncUnit | undefined>,
+	usedRemoteIndexes: Set<number>
+): void {
+	if (markdownIndexes.length !== remoteIndexes.length || markdownIndexes.length === 0) {
+		return;
+	}
+
+	const isSameKindSequence = markdownIndexes.every((markdownIndex, offset) => {
+		const remoteIndex = remoteIndexes[offset];
+		return remoteIndex !== undefined && markdownUnits[markdownIndex]?.kind === remoteUnits[remoteIndex]?.kind;
+	});
+	if (!isSameKindSequence) {
+		return;
+	}
+
+	mapRemoteIndexesToMarkdownIndexes(markdownIndexes, remoteIndexes, remoteUnits, mapping, usedRemoteIndexes);
+}
+
+function mapWindowByFingerprint(
+	markdownIndexes: number[],
+	remoteIndexes: number[],
+	markdownUnits: MarkdownSyncUnit[],
+	remoteUnits: RemoteSyncUnit[],
+	mapping: Array<RemoteSyncUnit | undefined>,
+	usedRemoteIndexes: Set<number>
+): void {
+	const markdownIndexesByKey = collectIndexesByFingerprint(markdownIndexes, markdownUnits);
+	const remoteIndexesByKey = collectIndexesByFingerprint(remoteIndexes, remoteUnits);
+	for (const [key, indexes] of markdownIndexesByKey.entries()) {
+		const matchingRemoteIndexes = remoteIndexesByKey.get(key) || [];
+		if (indexes.length !== matchingRemoteIndexes.length || indexes.length === 0) {
+			continue;
+		}
+
+		mapRemoteIndexesToMarkdownIndexes(indexes, matchingRemoteIndexes, remoteUnits, mapping, usedRemoteIndexes);
+	}
+}
+
+function mapRemoteIndexesToMarkdownIndexes(
+	markdownIndexes: number[],
+	remoteIndexes: number[],
+	remoteUnits: RemoteSyncUnit[],
+	mapping: Array<RemoteSyncUnit | undefined>,
+	usedRemoteIndexes: Set<number>
+): void {
+	for (const [offset, markdownIndex] of markdownIndexes.entries()) {
+		const remoteIndex = remoteIndexes[offset];
+		if (remoteIndex === undefined || mapping[markdownIndex] || usedRemoteIndexes.has(remoteIndex)) {
+			continue;
+		}
+
+		mapping[markdownIndex] = remoteUnits[remoteIndex];
+		usedRemoteIndexes.add(remoteIndex);
+	}
+}
+
+function collectMarkdownIndexesByFingerprint(
+	units: MarkdownSyncUnit[],
+	mapping: Array<RemoteSyncUnit | undefined>
+): Map<string, number[]> {
+	const result = new Map<string, number[]>();
+	for (const [index, unit] of units.entries()) {
+		if (mapping[index]) {
+			continue;
+		}
+
+		addIndexByFingerprint(result, unit, index);
+	}
+
+	return result;
+}
+
+function collectRemoteIndexesByFingerprint(
+	units: RemoteSyncUnit[],
+	usedIndexes: Set<number>
+): Map<string, number[]> {
+	const result = new Map<string, number[]>();
+	for (const [index, unit] of units.entries()) {
+		if (usedIndexes.has(index)) {
+			continue;
+		}
+
+		addIndexByFingerprint(result, unit, index);
+	}
+
+	return result;
+}
+
+function collectIndexesByFingerprint(
+	indexes: number[],
+	units: Array<{ kind: string; fingerprint: string }>
+): Map<string, number[]> {
+	const result = new Map<string, number[]>();
+	for (const index of indexes) {
+		const unit = units[index];
+		if (unit) {
+			addIndexByFingerprint(result, unit, index);
+		}
+	}
+
+	return result;
+}
+
+function addIndexByFingerprint(
+	indexesByKey: Map<string, number[]>,
+	unit: { kind: string; fingerprint: string },
+	index: number
+): void {
+	const key = createUnitFingerprintKey(unit);
+	const indexes = indexesByKey.get(key) || [];
+	indexes.push(index);
+	indexesByKey.set(key, indexes);
+}
+
+function areSameFingerprintUnit(
+	markdownUnit: MarkdownSyncUnit,
+	remoteUnit: RemoteSyncUnit
+): boolean {
+	return markdownUnit.kind === remoteUnit.kind && markdownUnit.fingerprint === remoteUnit.fingerprint;
 }
 
 export async function createSyncContentSignature(markdown: string): Promise<SyncContentSignature> {
@@ -756,6 +1014,24 @@ export function isSyncContentSignatureEquivalent(
 	}
 
 	return areSyncContentUnitsEquivalent(current.units, expected.units);
+}
+
+export async function isRemoteXmlContentEquivalent(remoteXml: string, markdown: string): Promise<boolean> {
+	const markdownUnits = await createMarkdownSyncUnits(markdown);
+	const remoteUnits = readRemoteTopLevelUnits(remoteXml);
+	if (markdownUnits.length !== remoteUnits.length) {
+		return false;
+	}
+
+	return markdownUnits.every((unit, index) => {
+		const remoteUnit = remoteUnits[index];
+		if (!remoteUnit) {
+			return false;
+		}
+
+		return unit.kind === remoteUnit.kind
+			&& unit.fingerprint === remoteUnit.fingerprint;
+	});
 }
 
 function areSyncContentUnitsEquivalent(
@@ -1757,7 +2033,7 @@ function readMarkdownBlockKind(line: string): string {
 }
 
 function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
-	const units: RemoteSyncUnit[] = [];
+	const collectedUnits: Array<RemoteSyncUnit & { startIndex: number }> = [];
 	const tagPattern = /<\/?([A-Za-z][A-Za-z0-9-]*)([^>]*)>/g;
 	const stack: Array<{ tagName: string; startIndex: number; kind?: string; blockId?: string }> = [];
 	let match: RegExpExecArray | null;
@@ -1771,7 +2047,8 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 			const frame = stack.pop();
 			if (frame?.blockId && frame.kind) {
 				const content = xml.slice(frame.startIndex, tagPattern.lastIndex);
-				units.push({
+				collectedUnits.push({
+					startIndex: frame.startIndex,
 					kind: frame.kind,
 					blockId: frame.blockId,
 					fingerprint: createXmlFingerprint(frame.kind, content)
@@ -1784,18 +2061,20 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 		const parentTagName = stack[depth - 1]?.tagName;
 		const grandparentTagName = stack[depth - 2]?.tagName;
 		const blockId = readRemoteBlockId(attributes);
-		const hasTopLevelListParent = tagName === "li"
-			&& (parentTagName === "ul" || parentTagName === "ol")
-			&& (depth === 1 || depth === 2 && isRemoteDocumentContainer(grandparentTagName || ""));
 		const normalizedKind = normalizeRemoteBlockKind(tagName);
 		const isTopLevelBlock = blockId
 			&& normalizedKind
 			&& !isRemoteListContainer(tagName)
 			&& stack.every((frame) => isRemoteDocumentContainer(frame.tagName));
-		const kind = isTopLevelBlock ? normalizedKind : hasTopLevelListParent && blockId ? "list" : "";
+		const kind = isTopLevelBlock
+			? normalizedKind
+			: tagName === "li" && blockId && shouldTreatRemoteListItemAsSyncUnit(stack)
+				? "list"
+				: "";
 		if (isSelfClosing) {
 			if (kind) {
-				units.push({
+				collectedUnits.push({
+					startIndex: match.index,
 					kind,
 					blockId,
 					fingerprint: createXmlFingerprint(kind, rawTag)
@@ -1812,7 +2091,34 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 		});
 	}
 
+	const units = collectedUnits.sort((left, right) => left.startIndex - right.startIndex).map((unit) => {
+		return {
+			kind: unit.kind,
+			blockId: unit.blockId,
+			fingerprint: unit.fingerprint
+		};
+	});
 	return removeDuplicatedHeadingTextUnits(units);
+}
+
+function shouldTreatRemoteListItemAsSyncUnit(
+	stack: Array<{ tagName: string; startIndex: number; kind?: string; blockId?: string }>
+): boolean {
+	if (stack.length === 0) {
+		return false;
+	}
+
+	const parentTagName = stack[stack.length - 1]?.tagName || "";
+	if (!isRemoteListContainer(parentTagName)) {
+		return false;
+	}
+
+	// Keep list-item extraction aligned with Markdown top-level block splitting:
+	// each visible list item should be a candidate sync unit, even when nested
+	// under another <li> via an intermediate <ul>/<ol>.
+	return stack.every((frame) => {
+		return isRemoteDocumentContainer(frame.tagName) || frame.tagName === "li" || isRemoteListContainer(frame.tagName);
+	});
 }
 
 function removeDuplicatedHeadingTextUnits(units: RemoteSyncUnit[]): RemoteSyncUnit[] {
@@ -1843,35 +2149,6 @@ function isRemoteDocumentContainer(tagName: string): boolean {
 
 function isRemoteListContainer(tagName: string): boolean {
 	return tagName === "ul" || tagName === "ol";
-}
-
-function countUnitFingerprintKeys(units: MarkdownSyncUnit[]): Map<string, number> {
-	const counts = new Map<string, number>();
-	for (const unit of units) {
-		const key = createUnitFingerprintKey(unit);
-		counts.set(key, (counts.get(key) || 0) + 1);
-	}
-
-	return counts;
-}
-
-function collectUniqueRemoteUnitsByFingerprint(units: RemoteSyncUnit[]): Map<string, RemoteSyncUnit> {
-	const result = new Map<string, RemoteSyncUnit>();
-	const duplicates = new Set<string>();
-	for (const unit of units) {
-		const key = createUnitFingerprintKey(unit);
-		if (result.has(key)) {
-			result.delete(key);
-			duplicates.add(key);
-			continue;
-		}
-
-		if (!duplicates.has(key)) {
-			result.set(key, unit);
-		}
-	}
-
-	return result;
 }
 
 function createUnitFingerprintKey(unit: { kind: string; fingerprint: string }): string {
@@ -1920,10 +2197,21 @@ function createMarkdownComparisonContent(kind: string, content: string): string 
 
 function createMarkdownTableFingerprint(content: string): string {
 	return content.replace(/\r\n/g, "\n").split("\n")
-		.map((line) => line.trim())
+		.map((line) => normalizeMarkdownTableRow(line))
 		.filter((line) => line && !isMarkdownTableSeparatorLine(line))
 		.map((line) => line.split("|").map((cell) => normalizeFingerprintText(cell)).join("|"))
 		.join("\n");
+}
+
+function normalizeMarkdownTableRow(line: string): string {
+	let row = line.trim();
+	if (row.startsWith("|")) {
+		row = row.slice(1);
+	}
+	if (row.endsWith("|")) {
+		row = row.slice(0, -1);
+	}
+	return row;
 }
 
 function createMarkdownCodeFingerprint(content: string): string {

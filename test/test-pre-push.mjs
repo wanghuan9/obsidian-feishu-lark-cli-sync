@@ -611,6 +611,7 @@ async function spawnHook(workspace, stdin, envOverrides) {
 					...process.env,
 					PATH: `${join(workspace, "bin")}:${process.env.PATH || ""}`,
 					FEISHU_LARK_CLI_SYNC_NOTIFY_PLATFORM: "test",
+					FEISHU_LARK_CLI_SYNC_REMOTE_REFRESH_DELAY_MS: "1",
 					LARK_CLI_LOG: join(workspace, "lark-cli.log"),
 					SYSTEM_NOTIFICATION_LOG: join(workspace, "system-notification.log"),
 					...envOverrides

@@ -23,6 +23,7 @@ const {
 	getDocumentStateKey,
 	getDocumentStateKeys,
 	isDocumentStateContentEquivalent,
+	isRemoteXmlContentEquivalent,
 	normalizeStateCacheRetainLimit,
 	normalizeStateCacheTrimThreshold,
 	prepareNoteContentForLark,
@@ -198,6 +199,8 @@ assert.deepEqual(mappedState.units.map((unit) => unit.kind), ["paragraph", "head
 const exportedMarkdownState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\n## Exported", remoteXml, 7);
 assert.equal(exportedMarkdownState.contentHash, await createContentHash("# Note\n\n## Exported"));
 assert.notEqual(exportedMarkdownState.contentHash, await createContentHash("# Note\n\n## Local"));
+assert.equal(await isRemoteXmlContentEquivalent(remoteXml, "# Note\n\nBody\n\n## Next"), true);
+assert.equal(await isRemoteXmlContentEquivalent(remoteXml, "# Note\n\nBody"), false);
 
 const partialRemoteXml = "<title id=\"doc-token\">Note</title><p id=\"blk-1\">Body</p><p id=\"blk-2\">Merged<br/>Second</p>";
 const partialState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\nBody\n\n1. Second", partialRemoteXml, 8);
@@ -235,6 +238,15 @@ const autoUnmappedReplacePlan = await buildSyncPlan({
 });
 assert.equal(autoUnmappedReplacePlan.mode, "overwrite");
 
+const incompleteState = {
+	...partialState,
+	units: [
+		partialState.units[0],
+		{ ...partialState.units[1], blockId: "" }
+	]
+};
+assert.equal(incompleteState.units.some((unit) => !unit.blockId), true);
+
 const tableRemoteXml = "<title id=\"doc-token\">Note</title><table id=\"blk-1\"><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>";
 const tableState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\n| A | B |\n|-|-|\n| 1 | 2 |", tableRemoteXml, 9);
 assert.equal(tableState.units.length, 1);
@@ -246,6 +258,85 @@ assert.equal((await buildSyncPlan({
 	strategy: "precise",
 	state: tableState
 })).mode, "skipped");
+
+const paddedTableRemoteXml = [
+	"<title id=\"doc-token\">Note</title>",
+	"<h2 id=\"heading-1\">Section</h2>",
+	"<table id=\"table-1\"><tr><th>接口类</th><th>功能说明</th></tr>",
+	"<tr><td><b>PERM_QUOTE — 报价权限</b></td><td></td></tr></table>"
+].join("");
+const paddedTableState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"## Section",
+		"",
+		"| 接口类 | 功能说明 |",
+		"| --- | --- |",
+		"| **PERM_QUOTE — 报价权限** | |"
+	].join("\n"),
+	paddedTableRemoteXml,
+	9
+);
+assert.deepEqual(paddedTableState.units.map((unit) => unit.blockId), ["heading-1", "table-1"]);
+const paddedTableResyncedPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: [
+		"# Note",
+		"",
+		"## Section",
+		"",
+		"| 接口类 | 功能说明 |",
+		"| --- | --- |",
+		"| **PERM_QUOTE — 报价权限** | |"
+	].join("\n"),
+	contentFileName: "sync.md",
+	strategy: "auto",
+	state: paddedTableState
+});
+assert.equal(paddedTableResyncedPlan.mode, "skipped");
+
+const nestedListRemoteXml = [
+	"<title id=\"doc-token\">Note</title>",
+	"<h4 id=\"heading-1\">4.4 jdx-titans 后台统一账号分页查询</h4>",
+	"<p id=\"p-1\">接口路径：<code>POST /backend/partner-account/page</code></p>",
+	"<ol id=\"ol-1\"><li id=\"li-1\">基础查询：以 <code>partner_account</code> 为主表。</li>",
+	"<li id=\"li-2\">主账号（accountType=1）：<ul><li id=\"li-3\">名称：<code>partner_account.name</code>。</li><li id=\"li-4\">手机号：<code>partner_account.phone</code>。</li></ul></li>",
+	"<li id=\"li-5\">子账号（accountType=2）：<ul><li id=\"li-6\">手机号：<code>partner_account.phone</code> 匹配。</li><li id=\"li-7\">权限筛选：匹配 <code>partner_account.permissions</code> JSON 中是否包含指定权限编码。</li></ul></li></ol>"
+].join("");
+const nestedListState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"#### 4.4 jdx-titans 后台统一账号分页查询",
+		"",
+		"接口路径：`POST /backend/partner-account/page`",
+		"",
+		"1. **基础查询**：以 `partner_account` 为主表。",
+		"2. **主账号（accountType=1）**：",
+		"   - 名称：`partner_account.name`。",
+		"   - 手机号：`partner_account.phone`。",
+		"3. **子账号（accountType=2）**：",
+		"   - 手机号：`partner_account.phone` 匹配。",
+		"   - 权限筛选：匹配 `partner_account.permissions` JSON 中是否包含指定权限编码。"
+	].join("\n"),
+	nestedListRemoteXml,
+	10
+);
+assert.deepEqual(nestedListState.units.map((unit) => unit.blockId), [
+	"heading-1",
+	"p-1",
+	"li-1",
+	"li-2",
+	"li-3",
+	"li-4",
+	"li-5",
+	"li-6",
+	"li-7"
+]);
+assert.equal(nestedListState.units.filter((unit) => unit.kind === "list").length, 7);
 
 const indentedCodeRemoteXml = "<title id=\"doc-token\">Note</title><ul><li id=\"blk-1\">Hint</li></ul><pre id=\"blk-2\"><code>x</code></pre><h2 id=\"blk-3\">Next</h2>";
 const indentedCodeState = await createDocumentSyncStateFromRemote(
@@ -970,9 +1061,14 @@ const rebuiltTasksBackendState = await createDocumentSyncStateFromRemote(
 	"<title id=\"doc-title\">实施任务清单（PC 后台接口）</title><blockquote id=\"blk-1\"><p>由 spec.md 04-api.md 第四节生成</p><p>核心原则: jdx-titans 作为数据 owner 提供后台查询接口，pjt-partner-admin 对前端暴露统一入口并做模式分发</p></blockquote><h2 id=\"blk-2\">依赖关系</h2><pre id=\"blk-3\"><code>Batch 1（模型基础层） ← Task 7.1, 7.3 依赖\nTask 7.1 (jdx-titans 后台 DTO) ← Task 7.2 依赖</code></pre><h2 id=\"blk-4\">变更影响概览</h2><p id=\"blk-extra\">远端结构化占位</p><h3 id=\"blk-5\">文件变更清单</h3><table id=\"blk-6\"><tr><th>文件</th><th>操作</th><th>涉及任务</th><th>说明</th></tr><tr><td>jdx-titans-model/.../BackendAccountOptionReq.java</td><td>新建</td><td>Task 7.1</td><td>后台候选查询请求</td></tr></table>",
 	16
 );
-assert.ok(rebuiltTasksBackendState.units.some((unit) => {
-	return !unit.blockId;
-}));
+assert.deepEqual(rebuiltTasksBackendState.units.map((unit) => unit.blockId), [
+	"blk-1",
+	"blk-2",
+	"blk-3",
+	"blk-4",
+	"blk-5",
+	"blk-6"
+]);
 const rebuiltTasksBackendInsertPlan = await buildSyncPlan({
 	doc: "doc-token",
 	markdown: "# 实施任务清单（PC 后台接口）\n\n> 由 spec.md 04-api.md 第四节生成\n> 核心原则: jdx-titans 作为数据 owner 提供后台查询接口，pjt-partner-admin 对前端暴露统一入口并做模式分发\n\n## 依赖关系\n\n```\nBatch 1（模型基础层） ← Task 7.1, 7.3 依赖\nTask 7.1 (jdx-titans 后台 DTO) ← Task 7.2 依赖\n```\n\n## 变更影响概览\n212dsa\n\n### 文件变更清单\n\n| 文件 | 操作 | 涉及任务 | 说明 |\n| --- | --- | --- | --- |\n| jdx-titans-model/.../BackendAccountOptionReq.java | 新建 | Task 7.1 | 后台候选查询请求 |",
@@ -989,6 +1085,55 @@ assert.deepEqual(rebuiltTasksBackendInsertPlan.commands, [{
 	contentFileName: "sync.md",
 	content: "212dsa"
 }]);
+
+const repeatedSectionState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# API",
+		"",
+		"## A",
+		"",
+		"请求参数：",
+		"",
+		"```json",
+		"{\"id\":1}",
+		"```",
+		"",
+		"响应参数：",
+		"",
+		"## B",
+		"",
+		"请求参数：",
+		"",
+		"```json",
+		"{\"id\":1}",
+		"```",
+		"",
+		"响应参数："
+	].join("\n"),
+	[
+		"<title id=\"doc-title\">API</title>",
+		"<h2 id=\"heading-a\">A</h2>",
+		"<p id=\"a-req\">请求参数：</p>",
+		"<pre id=\"a-code\"><code>{\"id\":1}</code></pre>",
+		"<p id=\"a-resp\">响应参数：</p>",
+		"<h2 id=\"heading-b\">B</h2>",
+		"<p id=\"b-req\">请求参数：</p>",
+		"<pre id=\"b-code\"><code>{\"id\":1}</code></pre>",
+		"<p id=\"b-resp\">响应参数：</p>"
+	].join(""),
+	17
+);
+assert.deepEqual(repeatedSectionState.units.map((unit) => unit.blockId), [
+	"heading-a",
+	"a-req",
+	"a-code",
+	"a-resp",
+	"heading-b",
+	"b-req",
+	"b-code",
+	"b-resp"
+]);
 
 assert.equal(
 	formatSyncFailureMessage({
