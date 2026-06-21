@@ -40,6 +40,25 @@ import {
 	trimSyncStateCache
 } from "./lark-sync-core";
 import {
+	createEmptyRemoteImportStateFile,
+	DEFAULT_REMOTE_IMPORT_LOCAL_ROOT,
+	DEFAULT_REMOTE_IMPORT_PAGE_SIZE,
+	isValidRemoteImportStateFile,
+	normalizeRemoteImportPage,
+	REMOTE_IMPORT_STATE_FILE_NAME,
+	RemoteImportAdapter,
+	RemoteImportDriveFolderSource,
+	RemoteImportFetchedDocument,
+	RemoteImportFolderPageInput,
+	RemoteImportPage,
+	RemoteImportRunSummary,
+	RemoteImportSearchPageInput,
+	RemoteImportSearchSource,
+	RemoteImportSource,
+	RemoteImportStateFile,
+	runProgressiveRemoteImport
+} from "./remote-import-core";
+import {
 	buildCommandEnvironment as buildLarkCommandEnvironment,
 	LARK_CLI_COMMAND,
 	MIN_LARK_CLI_VERSION,
@@ -228,6 +247,8 @@ const MESSAGES = {
 	"zh-CN": {
 		commandSyncCurrentNote: "同步到飞书",
 		commandOverwriteCurrentNote: "覆盖同步到飞书",
+		commandImportNextBatchFromDefaultFolder: "从默认飞书文件夹导入下一批",
+		commandImportNextBatchFromSearch: "从飞书搜索导入下一批",
 		menuSyncToLark: "Lark: 同步到飞书",
 		menuOverwriteSyncToLark: "Lark: 覆盖到飞书",
 		menuPublishFolderToLark: "Lark: 同步目录到飞书",
@@ -236,11 +257,16 @@ const MESSAGES = {
 		noticeSyncingToLark: "正在同步到飞书...",
 		noticeOverwriteSyncingToLark: "正在覆盖同步到飞书...",
 		noticePublishingFolderToLark: "正在发布目录到飞书...",
+		noticeImportingFromLark: "正在从飞书导入...",
 		noticeNoMarkdownFilesInFolder: "该目录下没有 Markdown 文件。",
 		noticePublishedToLark: "已发布到飞书",
 		noticeSyncedToLark: "已同步到飞书",
 		noticeOverwriteSyncedToLark: "已覆盖同步到飞书",
 		noticePublishedFolderToLark: "已发布 {count} 篇笔记到飞书。",
+		noticeImportedBatchFromLark: "本批导入 {imported} 篇，跳过 {skipped} 篇，冲突 {conflicts} 篇，失败 {failed} 篇。{status}",
+		remoteImportComplete: "远端已遍历完成。",
+		remoteImportMore: "可再次执行命令继续下一批。",
+		promptRemoteImportSearchQuery: "输入飞书搜索关键词；留空则按筛选浏览。",
 		noticeSyncFailed: "飞书同步失败：{message}",
 		noticeRemoteDeletedRecreate: "远端文档已删除，正在重新创建...",
 		noticeGitHookInstalled: "已安装 pre-push hook。选择 pre-push 模式后，git push 前会同步已绑定文档。",
@@ -253,6 +279,7 @@ const MESSAGES = {
 		noticeLarkCliCheckOk: "lark-cli {version} 可用；当前账号：{user}",
 		noticeLarkCliCheckFailed: "lark-cli 检查失败：{message}",
 		errorNoDocumentToken: "lark-cli 没有返回文档 token 或 URL。",
+		errorDefaultImportTargetNotFolder: "默认上传位置需要填写飞书云空间文件夹 URL 或 folder token，当前值无法用文件夹分页导入。",
 		errorInvalidDefaultTarget: "默认上传位置无效或当前飞书账号无权访问。\n请检查插件设置中的“默认上传位置”：{target}\n底层原因：{detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
 		settingsSectionGeneral: "常规",
@@ -305,6 +332,8 @@ const MESSAGES = {
 	en: {
 		commandSyncCurrentNote: "Sync to Feishu/Lark",
 		commandOverwriteCurrentNote: "Overwrite sync to Feishu/Lark",
+		commandImportNextBatchFromDefaultFolder: "Import next batch from default Lark folder",
+		commandImportNextBatchFromSearch: "Import next batch from Lark search",
 		menuSyncToLark: "Lark: Sync to Feishu/Lark",
 		menuOverwriteSyncToLark: "Lark: Overwrite to Feishu/Lark",
 		menuPublishFolderToLark: "Lark: Sync folder to Feishu/Lark",
@@ -313,11 +342,16 @@ const MESSAGES = {
 		noticeSyncingToLark: "Syncing to Lark...",
 		noticeOverwriteSyncingToLark: "Overwriting to Lark...",
 		noticePublishingFolderToLark: "Publishing folder to Lark...",
+		noticeImportingFromLark: "Importing from Lark...",
 		noticeNoMarkdownFilesInFolder: "No Markdown files found in this folder.",
 		noticePublishedToLark: "Published to Feishu/Lark",
 		noticeSyncedToLark: "Synced to Feishu/Lark",
 		noticeOverwriteSyncedToLark: "Overwritten to Feishu/Lark",
 		noticePublishedFolderToLark: "Published {count} notes to Feishu/Lark.",
+		noticeImportedBatchFromLark: "Imported {imported}, skipped {skipped}, conflicts {conflicts}, failed {failed}. {status}",
+		remoteImportComplete: "Remote traversal is complete.",
+		remoteImportMore: "Run the command again to continue with the next batch.",
+		promptRemoteImportSearchQuery: "Enter a Lark search query; leave blank to browse by filters.",
 		noticeSyncFailed: "Feishu/Lark sync failed: {message}",
 		noticeRemoteDeletedRecreate: "Remote document was deleted. Creating a new document...",
 		noticeGitHookInstalled: "Installed the pre-push hook. When pre-push mode is selected, bound notes sync before git push.",
@@ -330,6 +364,7 @@ const MESSAGES = {
 		noticeLarkCliCheckOk: "lark-cli {version} is ready; current account: {user}",
 		noticeLarkCliCheckFailed: "lark-cli check failed: {message}",
 		errorNoDocumentToken: "lark-cli did not return a document token or URL.",
+		errorDefaultImportTargetNotFolder: "Default target must be a Lark Drive folder URL or folder token for paged folder import.",
 		errorInvalidDefaultTarget: "Default upload target is invalid or inaccessible.\nCheck the Default target setting: {target}\nCause: {detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
 		settingsSectionGeneral: "General",
@@ -435,6 +470,22 @@ export default class LarkCliSyncPlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: "import-next-batch-from-default-lark-folder",
+			name: this.t("commandImportNextBatchFromDefaultFolder"),
+			callback: () => {
+				void this.importNextBatchFromDefaultFolder();
+			}
+		});
+
+		this.addCommand({
+			id: "import-next-batch-from-lark-search",
+			name: this.t("commandImportNextBatchFromSearch"),
+			callback: () => {
+				void this.importNextBatchFromSearch();
+			}
+		});
+
 		this.addRibbonIcon(LARK_RIBBON_ICON_ID, this.t("ribbonSyncCurrentNote"), () => {
 			void this.syncCurrentNote();
 		});
@@ -522,6 +573,196 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}
 
 		await this.overwriteSyncFile(file);
+	}
+
+	private async importNextBatchFromDefaultFolder(): Promise<void> {
+		await this.runWithNotice(this.t("noticeImportingFromLark"), async () => {
+			const source = await this.createDefaultFolderImportSource();
+			await this.runRemoteImport(source);
+		});
+	}
+
+	private async importNextBatchFromSearch(): Promise<void> {
+		const query = window.prompt(this.t("promptRemoteImportSearchQuery"), "");
+		if (query === null) {
+			return;
+		}
+
+		const source: RemoteImportSearchSource = {
+			type: "search",
+			query: query.trim(),
+			localRoot: DEFAULT_REMOTE_IMPORT_LOCAL_ROOT,
+			remoteRoot: DEFAULT_REMOTE_IMPORT_LOCAL_ROOT
+		};
+		await this.runWithNotice(this.t("noticeImportingFromLark"), async () => {
+			await this.runRemoteImport(source);
+		});
+	}
+
+	private async runRemoteImport(source: RemoteImportSource): Promise<void> {
+		const progressState = await this.loadRemoteImportState();
+		const result = await runProgressiveRemoteImport({
+			source,
+			progressState,
+			syncState: this.syncState,
+			adapter: this.createRemoteImportAdapter(),
+			pageSize: DEFAULT_REMOTE_IMPORT_PAGE_SIZE
+		});
+		await this.saveLarkSyncState();
+		await this.saveRemoteImportState(progressState);
+		new Notice(this.formatRemoteImportSummary(result.summary), 10000);
+	}
+
+	private async createDefaultFolderImportSource(): Promise<RemoteImportDriveFolderSource> {
+		const target = this.settings.targetTokenOrUrl.trim();
+		if (/^https?:\/\//.test(target) && !target.includes("/drive/folder/")) {
+			throw new LocalizedSyncError(this.t("errorDefaultImportTargetNotFolder"));
+		}
+
+		const rootParent = await this.resolveRemoteRootParent();
+		if (rootParent.kind === "wiki") {
+			throw new LocalizedSyncError(this.t("errorDefaultImportTargetNotFolder"));
+		}
+
+		return {
+			type: "drive-folder",
+			folderToken: rootParent.token,
+			localRoot: DEFAULT_REMOTE_IMPORT_LOCAL_ROOT,
+			remoteRoot: DEFAULT_REMOTE_IMPORT_LOCAL_ROOT,
+			recursive: true
+		};
+	}
+
+	private createRemoteImportAdapter(): RemoteImportAdapter {
+		return {
+			searchPage: (input) => this.searchRemoteImportPage(input),
+			listFolderPage: (input) => this.listRemoteImportFolderPage(input),
+			fetchDocument: (doc) => this.fetchRemoteImportDocument(doc),
+			readLocalFile: (path) => this.readVaultMarkdownFile(path),
+			writeLocalFile: (path, content) => this.writeVaultMarkdownFile(path, content)
+		};
+	}
+
+	private async searchRemoteImportPage(input: RemoteImportSearchPageInput): Promise<RemoteImportPage> {
+		const args = [
+			"drive",
+			"+search",
+			"--as",
+			"user",
+			"--query",
+			input.query,
+			"--doc-types",
+			"doc,docx,wiki",
+			"--page-size",
+			String(input.pageSize),
+			"--json"
+		];
+		if (input.folderToken) {
+			args.push("--folder-tokens", input.folderToken);
+		}
+		if (input.pageToken) {
+			args.push("--page-token", input.pageToken);
+		}
+
+		return normalizeRemoteImportPage(await this.runLarkCli(args));
+	}
+
+	private async listRemoteImportFolderPage(input: RemoteImportFolderPageInput): Promise<RemoteImportPage> {
+		const args = [
+			"drive",
+			"files",
+			"list",
+			"--as",
+			"user",
+			"--page-size",
+			String(input.pageSize),
+			"--json"
+		];
+		if (input.folderToken) {
+			args.push("--folder-token", input.folderToken);
+		}
+		if (input.pageToken) {
+			args.push("--page-token", input.pageToken);
+		}
+
+		return normalizeRemoteImportPage(await this.runLarkCli(args));
+	}
+
+	private async fetchRemoteImportDocument(doc: string): Promise<RemoteImportFetchedDocument> {
+		const [remoteMarkdown, remoteXml] = await Promise.all([
+			this.fetchLarkDocumentMarkdown(doc),
+			this.fetchLarkDocumentWithIds(doc)
+		]);
+		return {
+			doc: remoteXml.doc || remoteMarkdown.doc || doc,
+			markdown: remoteMarkdown.content,
+			xml: remoteXml.content,
+			revisionId: remoteXml.revisionId ?? remoteMarkdown.revisionId
+		};
+	}
+
+	private async readVaultMarkdownFile(path: string): Promise<string | null> {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!file) {
+			return null;
+		}
+
+		if (!(file instanceof TFile)) {
+			throw new Error(`Cannot import over non-file path: ${path}`);
+		}
+
+		return await this.app.vault.read(file);
+	}
+
+	private async writeVaultMarkdownFile(path: string, content: string): Promise<void> {
+		await this.ensureVaultFolderPath(this.parentPath(path));
+		const existingFile = this.app.vault.getAbstractFileByPath(path);
+		this.selfWrittenPaths.set(path, Date.now());
+		if (existingFile instanceof TFile) {
+			await this.app.vault.modify(existingFile, content);
+		} else if (!existingFile) {
+			await this.app.vault.create(path, content);
+		} else {
+			throw new Error(`Cannot import over non-file path: ${path}`);
+		}
+		this.selfWrittenPaths.set(path, Date.now());
+	}
+
+	private async ensureVaultFolderPath(folderPath: string): Promise<void> {
+		const normalizedFolderPath = this.normalizeLinkPath(folderPath);
+		if (!normalizedFolderPath) {
+			return;
+		}
+
+		let currentPath = "";
+		for (const segment of normalizedFolderPath.split("/").filter(Boolean)) {
+			currentPath = this.normalizeLinkPath([currentPath, segment].filter(Boolean).join("/"));
+			const existingFile = this.app.vault.getAbstractFileByPath(currentPath);
+			if (!existingFile) {
+				await this.app.vault.createFolder(currentPath);
+				continue;
+			}
+
+			if (existingFile instanceof TFile) {
+				throw new Error(`Cannot create folder over file: ${currentPath}`);
+			}
+		}
+	}
+
+	private formatRemoteImportSummary(summary: RemoteImportRunSummary): string {
+		const status = summary.completed ? this.t("remoteImportComplete") : this.t("remoteImportMore");
+		const baseMessage = this.t("noticeImportedBatchFromLark", {
+			imported: String(summary.imported),
+			skipped: String(summary.skipped),
+			conflicts: String(summary.conflicts),
+			failed: String(summary.failed),
+			status
+		});
+		if (summary.errors.length === 0) {
+			return baseMessage;
+		}
+
+		return `${baseMessage}\n${summary.errors[0]}`;
 	}
 
 	private async syncFile(file: TFile): Promise<void> {
@@ -799,6 +1040,15 @@ export default class LarkCliSyncPlugin extends Plugin {
 		return join(vaultPath, ".obsidian", "plugins", this.manifest.id, LARK_SYNC_STATE_FILE_NAME);
 	}
 
+	private getRemoteImportStatePath(): string | null {
+		const vaultPath = this.getVaultBasePath();
+		if (!vaultPath) {
+			return null;
+		}
+
+		return join(vaultPath, ".obsidian", "plugins", this.manifest.id, REMOTE_IMPORT_STATE_FILE_NAME);
+	}
+
 	private async loadLarkSyncState(): Promise<LarkSyncStateFile> {
 		const statePath = this.getLarkSyncStatePath();
 		if (!statePath) {
@@ -841,6 +1091,44 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 		this.hasDeferredSyncStateSave = false;
 		await this.writeLarkSyncStateQueued();
+	}
+
+	private async loadRemoteImportState(): Promise<RemoteImportStateFile> {
+		const statePath = this.getRemoteImportStatePath();
+		if (!statePath) {
+			return createEmptyRemoteImportStateFile();
+		}
+
+		try {
+			const rawState = await readFile(statePath, "utf8");
+			const state = JSON.parse(rawState) as unknown;
+			if (isValidRemoteImportStateFile(state)) {
+				return state;
+			}
+		} catch (error) {
+			if (!this.isFileNotFoundError(error)) {
+				console.warn("[Feishu Lark CLI Sync] failed to load remote import state", error);
+			}
+		}
+
+		return createEmptyRemoteImportStateFile();
+	}
+
+	private async saveRemoteImportState(state: RemoteImportStateFile): Promise<void> {
+		const statePath = this.getRemoteImportStatePath();
+		if (!statePath) {
+			return;
+		}
+
+		const tempPath = `${statePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+		await mkdir(dirname(statePath), { recursive: true });
+		try {
+			await writeFile(tempPath, JSON.stringify(state, null, 2), "utf8");
+			await rename(tempPath, statePath);
+		} catch (error) {
+			await rm(tempPath, { force: true });
+			throw error;
+		}
 	}
 
 	private async writeLarkSyncStateQueued(): Promise<void> {
