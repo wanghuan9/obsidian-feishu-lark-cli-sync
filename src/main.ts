@@ -152,7 +152,9 @@ interface LarkDocumentUpdateResult extends Partial<BoundLarkDocument> {
 }
 
 interface LarkCommandResult {
-	ok: boolean;
+	ok?: boolean;
+	code?: number;
+	msg?: string;
 	data?: {
 		token?: string;
 			document?: {
@@ -652,7 +654,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 			"--query",
 			input.query,
 			"--doc-types",
-			"doc,docx,wiki",
+			input.folderToken ? "doc,docx" : "doc,docx,wiki",
 			"--page-size",
 			String(input.pageSize),
 			"--json"
@@ -673,18 +675,20 @@ export default class LarkCliSyncPlugin extends Plugin {
 			page_size: input.pageSize,
 			...(input.pageToken ? { page_token: input.pageToken } : {})
 		};
-		const args = [
-			"drive",
-			"files",
-			"list",
-			"--as",
-			"user",
-			"--params",
-			JSON.stringify(params),
-			"--json"
-		];
+		return await this.withTempJson("params", params, async (tempFile) => {
+			const args = [
+				"drive",
+				"files",
+				"list",
+				"--as",
+				"user",
+				"--params",
+				`@${tempFile.fileName}`,
+				"--json"
+			];
 
-		return normalizeRemoteImportPage(await this.runLarkCli(args));
+			return normalizeRemoteImportPage(await this.runLarkCli(args, { cwd: tempFile.directory }));
+		});
 	}
 
 	private async fetchRemoteImportDocument(doc: string): Promise<RemoteImportFetchedDocument> {
@@ -2560,11 +2564,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		});
 		const result = JSON.parse(stdout) as LarkCommandResult;
 
-		if (!result.ok) {
+		if (!this.isSuccessfulLarkCommandResult(result)) {
 			throw new Error(this.formatLarkError(result));
 		}
 
 		return result;
+	}
+
+	private isSuccessfulLarkCommandResult(result: LarkCommandResult): boolean {
+		return result.ok === true || result.code === 0;
 	}
 
 	private isLarkRateLimitError(error: unknown): boolean {
@@ -2577,7 +2585,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private formatLarkError(result: LarkCommandResult): string {
-		const message = result.error?.message || "lark-cli request failed.";
+		const message = result.error?.message || result.msg || "lark-cli request failed.";
 		const hint = result.error?.hint;
 		return hint ? `${message}\n${hint}` : message;
 	}
@@ -2823,6 +2831,23 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const fileName = `${this.sanitizeFileName(baseName)}.md`;
 		await writeFile(join(directory, fileName), content, "utf8");
 		return fileName;
+	}
+
+	private async withTempJson<T>(
+		baseName: string,
+		value: unknown,
+		callback: (file: { directory: string; fileName: string }) => Promise<T>
+	): Promise<T> {
+		const tempDir = await mkdtemp(join(tmpdir(), "feishu-lark-cli-sync-"));
+		const fileName = `${this.sanitizeFileName(baseName)}.json`;
+		const tempPath = join(tempDir, fileName);
+
+		try {
+			await writeFile(tempPath, JSON.stringify(value), "utf8");
+			return await callback({ directory: tempDir, fileName });
+		} finally {
+			await rm(tempDir, { force: true, recursive: true });
+		}
 	}
 
 	private sanitizeFileName(name: string): string {

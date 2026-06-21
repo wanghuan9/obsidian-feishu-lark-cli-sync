@@ -590,8 +590,14 @@ function normalizeRemoteImportItem(rawItem: unknown): RemoteImportItem | null {
 		"id"
 	]);
 	const url = readString(nested, ["url", "docs_url", "web_url"]);
-	const title = readString(nested, ["title", "name", "doc_name", "display_name"]) || token || url || "Untitled";
-	const type = readString(nested, ["type", "doc_type", "obj_type", "file_type"]).toLowerCase();
+	const title = stripSearchHighlight(readString(nested, [
+		"title",
+		"name",
+		"doc_name",
+		"display_name",
+		"title_highlighted"
+	])) || token || url || "Untitled";
+	const type = readString(nested, ["type", "doc_type", "doc_types", "obj_type", "file_type"]).toLowerCase();
 	if (!token && !url) {
 		return null;
 	}
@@ -609,7 +615,7 @@ function unwrapData(value: Record<string, unknown> | null): Record<string, unkno
 		return {};
 	}
 
-	for (const key of ["data", "result", "item", "file", "document", "docs", "wiki"]) {
+	for (const key of ["data", "result", "item", "file", "document", "docs", "wiki", "result_meta"]) {
 		const nested = value[key];
 		if (nested && typeof nested === "object" && !Array.isArray(nested)) {
 			return {
@@ -665,6 +671,17 @@ function readBoolean(data: Record<string, unknown>, keys: string[]): boolean {
 	}
 
 	return false;
+}
+
+function stripSearchHighlight(value: string): string {
+	return value
+		.replace(/<\/?h>/g, "")
+		.replace(/&amp;/g, "&")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&#39;/g, "'")
+		.replace(/&quot;/g, "\"")
+		.trim();
 }
 
 function isDocumentImportItem(item: RemoteImportItem): boolean {

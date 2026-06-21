@@ -22,10 +22,11 @@ if (process.env.LARK_REAL_E2E !== "1") {
 	process.exit(0);
 }
 
-const parentFolderToken = requireEnv("LARK_E2E_PARENT_FOLDER_TOKEN");
+const parentFolderToken = process.env.LARK_E2E_PARENT_FOLDER_TOKEN || "";
 const pageSize = normalizePageSize(process.env.LARK_E2E_PAGE_SIZE || "2");
 const keepRemote = process.env.LARK_E2E_KEEP_REMOTE === "1";
 const runId = process.env.LARK_E2E_RUN_ID || `obsidian-import-e2e-${formatTimestamp(new Date())}`;
+const searchKeyword = process.env.LARK_E2E_QUERY_PREFIX || `obie2e${Date.now().toString(36)}`;
 
 await esbuild.build({
 	bundle: true,
@@ -83,7 +84,7 @@ try {
 		remoteRoot: "Lark",
 		recursive: true
 	};
-	const folderRuns = await runImportUntilComplete(folderSource, 10);
+	const folderRuns = await runImportUntilComplete(folderSource, 10, pageSize);
 	assert.equal(folderRuns.length, Math.ceil(createdDocuments.size / pageSize));
 	const importStateAfterFolder = readImportState();
 	const folderSession = Object.values(importStateAfterFolder.sessions).find((session) => {
@@ -98,17 +99,18 @@ try {
 
 	const searchSource = {
 		type: "search",
-		query: runId,
-		folderToken: rootFolder.token,
+		query: searchKeyword,
 		localRoot: "SearchImport",
 		remoteRoot: "SearchImport"
 	};
-	await waitForSearchResults(rootFolder.token, runId, createdDocuments.size);
-	const searchRuns = await runImportUntilComplete(searchSource, 10);
-	assert.equal(searchRuns.length, Math.ceil(createdDocuments.size / pageSize));
+	await waitForSearchResults(searchKeyword, createdDocuments.size);
+	await runImportUntilComplete(searchSource, 10, 20);
 	const importState = readImportState();
 	const sessionTypes = Object.values(importState.sessions).map((session) => session.source.type).sort();
 	assert.deepEqual(sessionTypes, ["drive-folder", "search"]);
+	const searchSession = Object.values(importState.sessions).find((session) => session.source.type === "search");
+	assert.equal(searchSession?.completed, true);
+	assert.equal(new Set(searchSession?.seen || []).size, createdDocuments.size);
 	assertImportedFrontmatter("SearchImport", "01 README");
 
 	await assertImportedNoteSyncsBackToSameDoc();
@@ -134,17 +136,17 @@ try {
 
 async function createRemoteFixture(folderToken) {
 	const specs = [
-		["01 README", `# 01 README ${runId}\n\nFolder restore baseline.\n\nKeyword: ${runId}`],
-		["02 Search", `# 02 Search ${runId}\n\nSearch pagination baseline.\n\nKeyword: ${runId}`],
-		["03 Conflict", `# 03 Conflict ${runId}\n\nRemote conflict body.\n\nKeyword: ${runId}`],
-		["04 Same Content", `# 04 Same Content ${runId}\n\nEquivalent local body.\n\nKeyword: ${runId}`],
-		["05 Sync Back", `# 05 Sync Back ${runId}\n\nInitial remote sync body.\n\nKeyword: ${runId}`]
+		["01 README", `# ${makeTitle("01 README")}\n\nFolder restore baseline.\n\nKeyword: ${searchKeyword}`],
+		["02 Search", `# ${makeTitle("02 Search")}\n\nSearch pagination baseline.\n\nKeyword: ${searchKeyword}`],
+		["03 Conflict", `# ${makeTitle("03 Conflict")}\n\nRemote conflict body.\n\nKeyword: ${searchKeyword}`],
+		["04 Same Content", `# ${makeTitle("04 Same Content")}\n\nEquivalent local body.\n\nKeyword: ${searchKeyword}`],
+		["05 Sync Back", `# ${makeTitle("05 Sync Back")}\n\nInitial remote sync body.\n\nKeyword: ${searchKeyword}`]
 	];
 
 	await mkdir(join(vaultDirectory, "Lark"), { recursive: true });
 	await writeFile(
 		join(vaultDirectory, "Lark", safeTitle("03 Conflict")),
-		`# 03 Conflict ${runId}\n\nLocal-only content must survive.\n`,
+		`# ${makeTitle("03 Conflict")}\n\nLocal-only content must survive.\n`,
 		"utf8"
 	);
 	await writeFile(
@@ -154,7 +156,7 @@ async function createRemoteFixture(folderToken) {
 	);
 
 	for (const [name, content] of specs) {
-		const title = `${name} ${runId}`;
+		const title = makeTitle(name);
 		const document = await createDocument(folderToken, title, content);
 		createdDocuments.set(name, {
 			...document,
@@ -164,10 +166,10 @@ async function createRemoteFixture(folderToken) {
 	}
 }
 
-async function runImportUntilComplete(source, maxRuns) {
+async function runImportUntilComplete(source, maxRuns, importPageSize) {
 	const runs = [];
 	for (let index = 0; index < maxRuns; index += 1) {
-		const result = await runImportOnce(source);
+		const result = await runImportOnce(source, importPageSize);
 		runs.push(result);
 		if (result.summary.completed) {
 			return runs;
@@ -177,7 +179,7 @@ async function runImportUntilComplete(source, maxRuns) {
 	throw new Error(`remote import did not complete after ${maxRuns} runs`);
 }
 
-async function runImportOnce(source) {
+async function runImportOnce(source, importPageSize) {
 	const progressState = readJsonIfExists(remoteImportStatePath, createEmptyRemoteImportStateFile());
 	const syncState = readJsonIfExists(syncStatePath, createEmptySyncStateFile());
 	const result = await runProgressiveRemoteImport({
@@ -185,7 +187,7 @@ async function runImportOnce(source) {
 		progressState,
 		syncState,
 		adapter: createDiskLarkAdapter(),
-		pageSize
+		pageSize: importPageSize
 	});
 	await writeJson(remoteImportStatePath, progressState);
 	await writeJson(syncStatePath, syncState);
@@ -203,7 +205,7 @@ function createDiskLarkAdapter() {
 				"--query",
 				input.query,
 				"--doc-types",
-				"docx,wiki",
+				input.folderToken ? "doc,docx" : "docx,wiki",
 				"--page-size",
 				String(input.pageSize),
 				"--json"
@@ -222,17 +224,19 @@ function createDiskLarkAdapter() {
 				page_size: input.pageSize,
 				...(input.pageToken ? { page_token: input.pageToken } : {})
 			};
-			const result = await runLarkCli([
-				"drive",
-				"files",
-				"list",
-				"--as",
-				"user",
-				"--params",
-				JSON.stringify(params),
-				"--json"
-			]);
-			return normalizeRemoteImportPage(result);
+			return await withTempJson("params.json", params, async (tempFile) => {
+				const result = await runLarkCli([
+					"drive",
+					"files",
+					"list",
+					"--as",
+					"user",
+					"--params",
+					`@${tempFile.fileName}`,
+					"--json"
+				], { cwd: tempFile.directory });
+				return normalizeRemoteImportPage(result);
+			});
 		},
 		fetchDocument: async (doc) => {
 			const [markdown, xml] = await Promise.all([
@@ -329,7 +333,7 @@ function assertLocalConflictProtected() {
 	const doc = createdDocuments.get("03 Conflict");
 	const originalPath = join(vaultDirectory, "Lark", `${doc.title}.md`);
 	const originalContent = readText(originalPath);
-	assert.equal(originalContent, `# 03 Conflict ${runId}\n\nLocal-only content must survive.\n`);
+	assert.equal(originalContent, `# ${makeTitle("03 Conflict")}\n\nLocal-only content must survive.\n`);
 	const suffixedPath = join(vaultDirectory, "Lark", `${doc.title}-${getDocumentStateKey(doc.token).slice(0, 8)}.md`);
 	const importState = readImportState();
 	const hasSuffixedImport = fileExistsSync(suffixedPath);
@@ -347,15 +351,16 @@ function assertEquivalentLocalFileBound() {
 	assert.ok(syncState.documents[getDocumentStateKey(doc.token)]);
 }
 
-async function waitForSearchResults(folderToken, query, expectedCount) {
+async function waitForSearchResults(query, expectedCount) {
 	const deadline = Date.now() + 90000;
 	while (Date.now() < deadline) {
 		const page = await createDiskLarkAdapter().searchPage({
 			query,
-			folderToken,
 			pageSize: 20
 		});
-		if (page.items.length >= expectedCount) {
+		const foundTokens = new Set(page.items.map((item) => item.token).filter(Boolean));
+		const createdTokens = Array.from(createdDocuments.values()).map((doc) => doc.token);
+		if (createdTokens.every((token) => foundTokens.has(token))) {
 			return;
 		}
 		await sleep(5000);
@@ -394,7 +399,7 @@ async function createFolder(parentToken, name) {
 		args.push("--folder-token", parentToken);
 	}
 	const result = await runLarkCli(args);
-	const token = result.data?.folder?.token || result.data?.token;
+	const token = result.data?.folder?.token || result.data?.folder_token || result.data?.token;
 	const url = result.data?.folder?.url || result.data?.url || "";
 	assert.ok(token, "folder create should return a token");
 	return {
@@ -500,8 +505,8 @@ async function runLarkCli(args, options = {}) {
 		maxBuffer: 20 * 1024 * 1024
 	});
 	const result = JSON.parse(stdout);
-	if (!result.ok) {
-		throw new Error(result.error?.message || stdout);
+	if (result.ok !== true && result.code !== 0) {
+		throw new Error(result.error?.message || result.msg || stdout);
 	}
 	return result;
 }
@@ -544,7 +549,7 @@ async function isDirectory(path) {
 
 async function withTempMarkdown(fileName, content, callback) {
 	const directory = await mkdtemp(join(tmpdir(), "feishu-lark-e2e-content-"));
-	const safeFileName = fileName.replace(/[\\/:*?"<>|]+/g, "-");
+	const safeFileName = fileName.replace(/[\\/:*?"<>|\s]+/g, "-");
 	await writeFile(join(directory, safeFileName), content, "utf8");
 	try {
 		return await callback({
@@ -556,8 +561,22 @@ async function withTempMarkdown(fileName, content, callback) {
 	}
 }
 
+async function withTempJson(fileName, value, callback) {
+	const directory = await mkdtemp(join(tmpdir(), "feishu-lark-e2e-json-"));
+	const safeFileName = fileName.replace(/[\\/:*?"<>|\s]+/g, "-");
+	await writeFile(join(directory, safeFileName), JSON.stringify(value), "utf8");
+	try {
+		return await callback({
+			directory,
+			fileName: safeFileName
+		});
+	} finally {
+		await rm(directory, { force: true, recursive: true });
+	}
+}
+
 async function writeTempMarkdown(directory, fileName, content) {
-	const safeFileName = fileName.replace(/[\\/:*?"<>|]+/g, "-");
+	const safeFileName = fileName.replace(/[\\/:*?"<>|\s]+/g, "-");
 	await writeFile(join(directory, safeFileName), content, "utf8");
 	return safeFileName;
 }
@@ -591,7 +610,11 @@ function fileExistsSync(path) {
 }
 
 function safeTitle(name) {
-	return `${name} ${runId}.md`.replace(/[\\/:*?"<>|#^[\]]+/g, "-");
+	return `${makeTitle(name)}.md`.replace(/[\\/:*?"<>|#^[\]]+/g, "-");
+}
+
+function makeTitle(name) {
+	return `${name} ${runId} ${searchKeyword}`;
 }
 
 function normalizePageSize(rawValue) {

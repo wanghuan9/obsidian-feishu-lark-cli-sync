@@ -331,4 +331,33 @@ function createMemoryAdapter({ pages, documents, files }) {
 	});
 }
 
+{
+	const page = normalizeRemoteImportPage({
+		ok: true,
+		data: {
+			results: [{
+				entity_type: "DOC",
+				title_highlighted: "Search <h>Hit</h>",
+				result_meta: {
+					token: "doc-search",
+					url: "https://example.feishu.cn/docx/doc-search",
+					doc_types: "DOCX"
+				}
+			}],
+			has_more: true,
+			page_token: "search-next"
+		}
+	});
+	assert.deepEqual(page, {
+		items: [{
+			token: "doc-search",
+			url: "https://example.feishu.cn/docx/doc-search",
+			title: "Search Hit",
+			type: "docx"
+		}],
+		hasMore: true,
+		nextPageToken: "search-next"
+	});
+}
+
 console.log("remote-import-core tests passed");
