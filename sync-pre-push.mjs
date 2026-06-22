@@ -311,7 +311,7 @@ function findDocumentState(syncState, aliases) {
 }
 
 function savePlanState(syncState, docs, plan) {
-	if (!("nextState" in plan) || !plan.nextState) {
+	if (!("nextState" in plan) || !isCompleteNextState(plan.nextState)) {
 		return;
 	}
 
@@ -320,6 +320,13 @@ function savePlanState(syncState, docs, plan) {
 		...touchDocumentSyncState(plan.nextState),
 		doc: stateKey
 	};
+}
+
+function isCompleteNextState(nextState) {
+	return Boolean(nextState)
+		&& Array.isArray(nextState.units)
+		&& nextState.units.length > 0
+		&& nextState.units.every((unit) => Boolean(unit.blockId));
 }
 
 async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedMarkdown, path, expectedRevisionId) {

@@ -1714,7 +1714,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private getCompletePlanNextState(plan: SyncPlan): LarkSyncStateFile["documents"][string] | undefined {
 		const nextState = this.getPlanNextState(plan);
-		if (!nextState || !nextState.units.every((unit) => Boolean(unit.blockId))) {
+		if (!nextState
+			|| nextState.units.length === 0
+			|| !nextState.units.every((unit) => Boolean(unit.blockId))) {
 			return undefined;
 		}
 

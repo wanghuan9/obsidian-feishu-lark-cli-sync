@@ -42,6 +42,7 @@ async function run() {
 		await testPreciseRefreshAllowsNormalizedRemoteMarkdown(workspace);
 		await testPreciseSkipAllowsNormalizedRemoteMarkdown(workspace);
 		await testPreciseRefreshBeforeUpdateAvoidsDuplicateInsert(workspace);
+		await testOverwriteDoesNotPersistEmptyState(workspace);
 			await testOverwriteUpdates(workspace);
 			await testUnboundFilesDoNotBlock(workspace);
 			await testCanonicalStateKey(workspace);
@@ -432,8 +433,7 @@ async function testCanonicalStateKey(workspace) {
 	await clearLog(workspace);
 	await runHook(workspace);
 	const state = await readSyncState(workspace);
-	assert.ok(state.documents["doc-token"]);
-	assert.equal(state.documents["doc-token"].doc, "doc-token");
+	assert.equal(state.documents["doc-token"], undefined);
 	assert.equal(state.documents["https://example.feishu.cn/docx/doc-token"].contentHash, "legacy-hash");
 	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
 	await clearLog(workspace);
@@ -441,6 +441,8 @@ async function testCanonicalStateKey(workspace) {
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+fetch/);
 	assert.doesNotMatch(log, /docs \+update/);
+	const refreshedState = await readSyncState(workspace);
+	assert.ok(refreshedState.documents["doc-token"]);
 }
 
 async function testStateCacheTrim(workspace) {
@@ -459,9 +461,8 @@ async function testStateCacheTrim(workspace) {
 	const state = await readSyncState(workspace);
 	assert.equal(Object.keys(state.documents).length, 10);
 	assert.equal(state.documents["old-doc-000"], undefined);
-	assert.ok(state.documents["old-doc-007"]);
-	assert.ok(state.documents["doc-token"]);
-	assert.ok(Date.parse(state.documents["doc-token"].updatedAt) > Date.parse("2026-01-01T00:15:00.000Z"));
+	assert.ok(state.documents["old-doc-006"]);
+	assert.equal(state.documents["doc-token"], undefined);
 }
 
 async function testSameDocumentAliasesRunSerially(workspace) {
@@ -486,7 +487,8 @@ async function testSameDocumentAliasesRunSerially(workspace) {
 	});
 	assert.equal(result.exitCode, 0);
 	const log = await readLog(workspace);
-	assert.equal((log.match(/--doc doc-token/g) || []).length, 2);
+	assert.equal((log.match(/docs \+update/g) || []).length, 2);
+	assert.match(log, /--doc doc-token|--doc https:\/\/example\.feishu\.cn\/docx\/doc-token/);
 }
 
 async function testConcurrentFailureWaitsForStartedTasks(workspace) {
@@ -511,7 +513,7 @@ async function testConcurrentFailureWaitsForStartedTasks(workspace) {
 	assert.match(log, /--doc https:\/\/example\.feishu\.cn\/docx\/doc-token/);
 	assert.match(log, /--doc https:\/\/example\.feishu\.cn\/docx\/second-token/);
 	const state = await readSyncState(workspace);
-	assert.ok(state.documents["second-token"]);
+	assert.equal(state.documents["second-token"], undefined);
 }
 
 async function testMacSystemNotificationOnFailure(workspace) {
@@ -571,6 +573,16 @@ async function testOverwriteUpdates(workspace) {
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+update/);
 	assert.match(log, /--command overwrite/);
+}
+
+async function testOverwriteDoesNotPersistEmptyState(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "overwrite", language: "en" });
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	await runHook(workspace);
+	const state = await readSyncState(workspace);
+	assert.equal(state.documents["doc-token"], undefined);
 }
 
 async function testUnboundFilesDoNotBlock(workspace) {
