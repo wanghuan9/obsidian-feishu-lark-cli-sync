@@ -19,6 +19,7 @@ async function run() {
 			await mkdir(join(workspace, "bin"), { recursive: true });
 			await cp("sync-pre-push.mjs", join(workspace, "sync-pre-push.mjs"));
 			await cp("lark-sync-core.mjs", join(workspace, "lark-sync-core.mjs"));
+			await cp("lark-cli-command.mjs", join(workspace, "lark-cli-command.mjs"));
 			await writeFakeLarkCli(workspace);
 			await writeFakeSystemNotifiers(workspace);
 
@@ -66,7 +67,7 @@ async function testPreciseSkip(workspace) {
 	await clearLog(workspace);
 	await runHook(workspace);
 	const log = await readLog(workspace);
-	assert.match(log, /docs \+fetch/);
+	assert.match(log, /docs \+fetch .*--api-version v2/);
 	assert.doesNotMatch(log, /docs \+update/);
 }
 
@@ -588,16 +589,18 @@ async function testMacSystemNotificationOnFailure(workspace) {
 		reject: false,
 		env: {
 			FEISHU_LARK_CLI_SYNC_NOTIFY_PLATFORM: "darwin",
-			FEISHU_LARK_CLI_SYNC_OSASCRIPT_PATH: join(workspace, "bin", "osascript"),
+			FEISHU_LARK_CLI_SYNC_OSASCRIPT_PATH: fakeNotifierPath(workspace, "osascript"),
 			LARK_CLI_NO_BLOCK_IDS: "1"
 		}
 	});
 	assert.notEqual(result.exitCode, 0);
 	const notificationLog = await readNotificationLog(workspace);
-	assert.match(notificationLog, /^osascript\n/);
-	assert.match(notificationLog, /display notification/);
+	assert.match(notificationLog, /^osascript(?:\.cmd)?\n/);
+	assert.match(notificationLog, /display\s+notification/);
 	assert.match(notificationLog, /pre-push sync failed: bound\.md/);
-	assert.match(notificationLog, /with title "Feishu Lark CLI Sync"/);
+	if (process.platform !== "win32") {
+		assert.match(notificationLog, /with title "Feishu Lark CLI Sync"/);
+	}
 }
 
 async function testWindowsSystemNotificationOnFailure(workspace) {
@@ -612,16 +615,16 @@ async function testWindowsSystemNotificationOnFailure(workspace) {
 		reject: false,
 		env: {
 			FEISHU_LARK_CLI_SYNC_NOTIFY_PLATFORM: "win32",
-			FEISHU_LARK_CLI_SYNC_POWERSHELL_PATH: join(workspace, "bin", "powershell.exe"),
+			FEISHU_LARK_CLI_SYNC_POWERSHELL_PATH: fakeNotifierPath(workspace, "powershell"),
 			LARK_CLI_NO_BLOCK_IDS: "1"
 		}
 	});
 	assert.notEqual(result.exitCode, 0);
 	const notificationLog = await readNotificationLog(workspace);
-	assert.match(notificationLog, /^powershell\.exe\n/);
+	assert.match(notificationLog, /^powershell(?:\.cmd)?\n/);
 	assert.match(notificationLog, /System\.Windows\.Forms\.NotifyIcon/);
-	assert.match(notificationLog, /pre-push sync failed: bound\.md/);
-	assert.match(notificationLog, /Feishu Lark CLI Sync/);
+	assert.match(notificationLog, /pre-push\s+sync\s+failed:\s+bound\.md/);
+	assert.match(notificationLog, /Feishu\s+Lark\s+CLI\s+Sync/);
 }
 
 async function testOverwriteUpdates(workspace) {
@@ -717,7 +720,9 @@ async function writeSettings(workspace, settings) {
 		JSON.stringify({
 			autoSyncMode: "pre-push",
 			titleSource: "file-name",
-			larkCliPath: join(workspace, "bin", "lark-cli"),
+			larkCliPath: process.platform === "win32"
+				? join(workspace, "bin", "lark-cli.cmd")
+				: join(workspace, "bin", "lark-cli"),
 			...settings
 		}, null, 2),
 		"utf8"
@@ -868,21 +873,42 @@ if (args.includes("+fetch")) {
   process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc, revision_id: revisionId } } }));
 }
 `;
-	const path = join(workspace, "bin", "lark-cli");
-	await writeFile(path, script, "utf8");
-	await chmod(path, 0o755);
+	const scriptPath = join(workspace, "bin", "lark-cli.js");
+	await writeFile(scriptPath, script, "utf8");
+	if (process.platform === "win32") {
+		await writeFile(join(workspace, "bin", "lark-cli.cmd"), "@echo off\r\nnode \"%~dp0\\lark-cli.js\" %*\r\n", "utf8");
+		return;
+	}
+
+	const executablePath = join(workspace, "bin", "lark-cli");
+	await writeFile(executablePath, script, "utf8");
+	await chmod(executablePath, 0o755);
 }
 
 async function writeFakeSystemNotifiers(workspace) {
-	const script = `#!/usr/bin/env node
+const script = `#!/usr/bin/env node
 const fs = require("fs");
-fs.appendFileSync(process.env.SYSTEM_NOTIFICATION_LOG, process.argv[1].split(/[\\\\/]/).pop() + "\\n");
+fs.appendFileSync(process.env.SYSTEM_NOTIFICATION_LOG, (process.env.NOTIFIER_NAME || process.argv[1].split(/[\\\\/]/).pop()) + "\\n");
 fs.appendFileSync(process.env.SYSTEM_NOTIFICATION_LOG, process.argv.slice(2).join("\\n") + "\\n");
 `;
+	const scriptPath = join(workspace, "bin", "notifier.js");
+	await writeFile(scriptPath, script, "utf8");
+	if (process.platform === "win32") {
+		await writeFile(join(workspace, "bin", "osascript.cmd"), "@echo off\r\nset NOTIFIER_NAME=osascript.cmd\r\nnode \"%~dp0\\notifier.js\" %*\r\n", "utf8");
+		await writeFile(join(workspace, "bin", "powershell.cmd"), "@echo off\r\nset NOTIFIER_NAME=powershell.cmd\r\nnode \"%~dp0\\notifier.js\" %*\r\n", "utf8");
+		return;
+	}
+
 	await writeFile(join(workspace, "bin", "osascript"), script, "utf8");
 	await chmod(join(workspace, "bin", "osascript"), 0o755);
-	await writeFile(join(workspace, "bin", "powershell.exe"), script, "utf8");
-	await chmod(join(workspace, "bin", "powershell.exe"), 0o755);
+	await writeFile(join(workspace, "bin", "powershell"), script, "utf8");
+	await chmod(join(workspace, "bin", "powershell"), 0o755);
+}
+
+function fakeNotifierPath(workspace, name) {
+	return process.platform === "win32"
+		? join(workspace, "bin", `${name}.cmd`)
+		: join(workspace, "bin", name);
 }
 
 async function clearLog(workspace) {

@@ -17,9 +17,25 @@ await esbuild.build({
 	]
 });
 
+await esbuild.build({
+	bundle: true,
+	entryPoints: ["src/lark-cli-command.ts"],
+	format: "esm",
+	logLevel: "silent",
+	minify: true,
+	outfile: "lark-cli-command.mjs",
+	platform: "node",
+	target: "node20",
+	treeShaking: true,
+	external: [
+		...builtins
+	]
+});
+
 const files = [
 	["sync-pre-push.mjs", "EMBEDDED_PRE_PUSH_SCRIPT"],
-	["lark-sync-core.mjs", "EMBEDDED_PRE_PUSH_CORE_SCRIPT"]
+	["lark-sync-core.mjs", "EMBEDDED_PRE_PUSH_CORE_SCRIPT"],
+	["lark-cli-command.mjs", "EMBEDDED_LARK_CLI_COMMAND_SCRIPT"]
 ];
 
 const lines = [

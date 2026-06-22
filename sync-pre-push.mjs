@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 import { execFile } from "child_process";
-import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import { constants } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 import { promisify } from "util";
+import {
+	buildCommandEnvironment,
+	resolveLarkCliPathFromSetting,
+	shouldUseCommandShell,
+	withDocsApiVersion
+} from "./lark-cli-command.mjs";
 import {
 	buildSyncPlan,
 	buildUpdateCommandArgs,
@@ -48,15 +54,6 @@ const SYSTEM_NOTIFICATION_TITLE = "Feishu Lark CLI Sync";
 const SYSTEM_NOTIFICATION_TIMEOUT_MS = 3000;
 const MAC_NOTIFICATION_EXECUTABLE_ENV = "FEISHU_LARK_CLI_SYNC_OSASCRIPT_PATH";
 const WINDOWS_NOTIFICATION_EXECUTABLE_ENV = "FEISHU_LARK_CLI_SYNC_POWERSHELL_PATH";
-const FALLBACK_PATH_ENTRIES = [
-	"/opt/homebrew/bin",
-	"/opt/homebrew/sbin",
-	"/usr/local/bin",
-	"/usr/bin",
-	"/bin",
-	"/usr/sbin",
-	"/sbin"
-];
 
 let larkCliRequestQueue = Promise.resolve();
 let larkCliActiveRequestCount = 0;
@@ -669,7 +666,7 @@ function isValidSyncState(state) {
 }
 
 async function runLarkCli(settings, args, cwd) {
-	return await runLarkCliQueued(settings, args, cwd);
+	return await runLarkCliQueued(settings, withDocsApiVersion(args), cwd);
 }
 
 async function runLarkCliQueued(settings, args, cwd) {
@@ -729,6 +726,7 @@ async function runLarkCliOnce(settings, args, cwd) {
 	const { stdout } = await execFileAsync(executable, args, {
 		cwd,
 		env,
+		shell: shouldUseCommandShell(executable),
 		maxBuffer: 20 * 1024 * 1024
 	});
 	const result = JSON.parse(stdout);
@@ -747,65 +745,36 @@ function isLarkRateLimitError(error) {
 		|| normalizedMessage.includes("too many requests");
 }
 
-function buildCommandEnvironment(executable) {
-	const pathEntries = [...FALLBACK_PATH_ENTRIES];
-	if (executable.startsWith("/")) {
-		pathEntries.unshift(dirname(executable));
-	}
-
-	if (process.env.PATH) {
-		pathEntries.push(process.env.PATH);
-	}
-
-	return {
-		...process.env,
-		PATH: uniquePathEntries(pathEntries.join(":").split(":")).join(":")
-	};
-}
-
-function uniquePathEntries(entries) {
-	const seen = new Set();
-	const result = [];
-	for (const entry of entries) {
-		if (!entry || seen.has(entry)) {
-			continue;
-		}
-
-		seen.add(entry);
-		result.push(entry);
-	}
-
-	return result;
-}
-
 async function resolveLarkCliPath(settings) {
-	const configuredPath = String(settings.larkCliPath || "").trim();
-	if (configuredPath && configuredPath !== "lark-cli") {
-		return configuredPath;
-	}
-
-	const candidates = [
-		join(process.env.HOME || "", ".npm-global/bin/lark-cli"),
-		join(process.env.HOME || "", ".local/bin/lark-cli"),
-		join(process.env.HOME || "", "bin/lark-cli"),
-		"/opt/homebrew/bin/lark-cli",
-		"/usr/local/bin/lark-cli",
-		"lark-cli"
-	];
-
-	for (const candidate of candidates) {
-		if (candidate === "lark-cli" || await canExecute(candidate)) {
-			return candidate;
-		}
-	}
-
-	return "lark-cli";
+	return await resolveLarkCliPathFromSetting(String(settings.larkCliPath || "").trim(), {
+		env: process.env,
+		canExecute,
+		pathExists,
+		isDirectory
+	});
 }
 
 async function canExecute(path) {
 	try {
 		await access(path, constants.X_OK);
 		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function pathExists(path) {
+	try {
+		await access(path, constants.F_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function isDirectory(path) {
+	try {
+		return (await stat(path)).isDirectory();
 	} catch {
 		return false;
 	}
@@ -845,6 +814,7 @@ async function notifySystemFailure(message) {
 	try {
 		await execFileAsync(command.executable, command.args, {
 			env: buildCommandEnvironment(command.executable),
+			shell: shouldUseCommandShell(command.executable),
 			timeout: SYSTEM_NOTIFICATION_TIMEOUT_MS,
 			windowsHide: true
 		});
