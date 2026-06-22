@@ -32,7 +32,7 @@ fi
 PLUGIN_DIR="$VAULT_PATH/.obsidian/plugins/$PLUGIN_ID"
 mkdir -p "$PLUGIN_DIR"
 
-for file in manifest.json main.js lark-sync-core.mjs README.md README.en.md sync-pre-push.mjs styles.css; do
+for file in manifest.json main.js lark-sync-core.mjs lark-cli-command.mjs README.md README.en.md sync-pre-push.mjs styles.css; do
   if [ ! -f "$REPO_DIR/$file" ]; then
     echo "缺少 $file，请先运行 npm install && npm run build / Missing $file, run npm install && npm run build first." >&2
     exit 1
@@ -48,6 +48,7 @@ HOOK_DIR="$VAULT_PATH/.git/hooks"
 if [ -f "$HOOK_PATH" ] && grep -q "Feishu Lark CLI Sync" "$HOOK_PATH"; then
   cp "$PLUGIN_DIR/sync-pre-push.mjs" "$HOOK_DIR/sync-pre-push.mjs"
   cp "$PLUGIN_DIR/lark-sync-core.mjs" "$HOOK_DIR/lark-sync-core.mjs"
+  cp "$PLUGIN_DIR/lark-cli-command.mjs" "$HOOK_DIR/lark-cli-command.mjs"
   chmod +x "$HOOK_DIR/sync-pre-push.mjs"
 fi
 

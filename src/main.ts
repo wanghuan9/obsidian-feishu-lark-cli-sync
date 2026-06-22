@@ -1,11 +1,10 @@
 import { addIcon, FileSystemAdapter, Menu, Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
 import { execFile } from "child_process";
 import { constants } from "fs";
-import { access, chmod, copyFile, mkdir, readFile, rename } from "fs/promises";
+import { access, chmod, copyFile, mkdir, readFile, rename, stat } from "fs/promises";
 import { mkdtemp, rm, writeFile } from "fs/promises";
-import { homedir } from "os";
 import { dirname, join } from "path";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { promisify } from "util";
 import {
 	getRemoteParentPath as getSelectedRemoteParentPath,
@@ -41,7 +40,19 @@ import {
 	touchDocumentSyncState,
 	trimSyncStateCache
 } from "./lark-sync-core";
-import { EMBEDDED_PRE_PUSH_CORE_SCRIPT, EMBEDDED_PRE_PUSH_SCRIPT } from "./embedded-helpers";
+import {
+	buildCommandEnvironment as buildLarkCommandEnvironment,
+	LARK_CLI_COMMAND,
+	resolveLarkCliPathFromSetting,
+	shouldUseCommandShell,
+	uniquePathEntries,
+	withDocsApiVersion
+} from "./lark-cli-command";
+import {
+	EMBEDDED_LARK_CLI_COMMAND_SCRIPT,
+	EMBEDDED_PRE_PUSH_CORE_SCRIPT,
+	EMBEDDED_PRE_PUSH_SCRIPT
+} from "./embedded-helpers";
 
 const execFileAsync = promisify(execFile);
 
@@ -63,10 +74,10 @@ const FRONTMATTER_REMOTE_ROOT_KEY = "remoteRoot";
 const FRONTMATTER_REMOTE_PARENT_PATH_KEY = "remoteParentPath";
 const MAX_STDERR_LENGTH = 1600;
 const MAX_NOTICE_ERROR_DETAIL_LENGTH = 260;
-const LARK_CLI_COMMAND = "lark-cli";
 const NODE_COMMAND = "node";
 const PRE_PUSH_SCRIPT_NAME = "sync-pre-push.mjs";
 const PRE_PUSH_CORE_SCRIPT_NAME = "lark-sync-core.mjs";
+const LARK_CLI_COMMAND_SCRIPT_NAME = "lark-cli-command.mjs";
 const LARK_SYNC_STATE_FILE_NAME = "lark-sync-state.json";
 const PRE_PUSH_HOOK_MARKER = "Feishu Lark CLI Sync";
 const LARK_RIBBON_ICON_ID = "feishu-lark-cli-sync-ribbon";
@@ -90,7 +101,6 @@ const LARK_CLI_MAX_CONCURRENT_REQUESTS = 3;
 const LARK_CLI_REQUEST_INTERVAL_MS = 350;
 const LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
-const FALLBACK_PATH_ENTRIES = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 type Language = "zh-CN" | "en";
 type AutoSyncMode = "manual" | "save" | "pre-push";
@@ -745,10 +755,13 @@ export default class LarkCliSyncPlugin extends Plugin {
 		const pluginDirectory = this.getPluginDirectoryPath();
 		const sourceScript = join(pluginDirectory, PRE_PUSH_SCRIPT_NAME);
 		const sourceCoreScript = join(pluginDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
+		const sourceCommandScript = join(pluginDirectory, LARK_CLI_COMMAND_SCRIPT_NAME);
 		const targetScript = join(hooksDirectory, PRE_PUSH_SCRIPT_NAME);
 		const targetCoreScript = join(hooksDirectory, PRE_PUSH_CORE_SCRIPT_NAME);
+		const targetCommandScript = join(hooksDirectory, LARK_CLI_COMMAND_SCRIPT_NAME);
 		await this.copyOrWriteEmbeddedHelper(sourceScript, targetScript, EMBEDDED_PRE_PUSH_SCRIPT);
 		await this.copyOrWriteEmbeddedHelper(sourceCoreScript, targetCoreScript, EMBEDDED_PRE_PUSH_CORE_SCRIPT);
+		await this.copyOrWriteEmbeddedHelper(sourceCommandScript, targetCommandScript, EMBEDDED_LARK_CLI_COMMAND_SCRIPT);
 		await chmod(targetScript, 0o755);
 	}
 
@@ -1060,7 +1073,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		preparedFiles: FolderPreparedFile[]
 	): Promise<Map<string, RemoteParent>> {
 		const parentsByPath = new Map<string, RemoteParent>();
-		const parentPaths = this.uniquePathEntries(preparedFiles.map((preparedFile) => {
+		const parentPaths = uniquePathEntries(preparedFiles.map((preparedFile) => {
 			return preparedFile.remoteParentPath;
 		})).sort((left, right) => {
 			return this.countPathSegments(left) - this.countPathSegments(right) || left.localeCompare(right);
@@ -1961,14 +1974,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private removeSyncStateForDocuments(docs: string[]): void {
-		const keys = this.uniquePathEntries([...docs, ...getDocumentStateKeys(docs)]);
+		const keys = uniquePathEntries([...docs, ...getDocumentStateKeys(docs)]);
 		for (const key of keys) {
 			delete this.syncState.documents[key];
 		}
 	}
 
 	private getBindingAliases(binding: BoundLarkDocument): string[] {
-		return this.uniquePathEntries([
+		return uniquePathEntries([
 			binding.token,
 			binding.url,
 			binding.url ? extractDocumentToken(binding.url) : ""
@@ -2287,9 +2300,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private async runLarkCliOnce(args: string[], options: LarkCommandOptions): Promise<LarkCommandResult> {
 		const executable = await this.resolveLarkCliPath();
 		const env = await this.buildCommandEnvironment(executable);
-		const { stdout } = await execFileAsync(executable, args, {
+		const { stdout } = await execFileAsync(executable, withDocsApiVersion(args), {
 			cwd: options.cwd,
 			env,
+			shell: shouldUseCommandShell(executable),
 			maxBuffer: 20 * 1024 * 1024
 		});
 		const result = JSON.parse(stdout) as LarkCommandResult;
@@ -2390,24 +2404,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			return this.cachedCommandEnvironment;
 		}
 
-		const pathEntries = this.getDefaultPathEntries();
-		if (executable.startsWith("/")) {
-			pathEntries.unshift(dirname(executable));
-		}
-
-		if (shellPath) {
-			pathEntries.unshift(...shellPath.split(":").filter(Boolean));
-		}
-
-		const currentPath = process.env.PATH;
-		if (currentPath) {
-			pathEntries.push(currentPath);
-		}
-
-		const env = {
-			...process.env,
-			PATH: this.uniquePathEntries(pathEntries).join(":")
-		};
+		const env = buildLarkCommandEnvironment(executable, {
+			loginShellPath: shellPath
+		});
 		this.cachedCommandEnvironment = env;
 		this.cachedCommandEnvironmentExecutable = executable;
 		this.cachedCommandEnvironmentShellPath = shellPath;
@@ -2433,35 +2432,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async resolveLarkCliPathUncached(configuredPath: string): Promise<string> {
-		if (configuredPath && configuredPath !== LARK_CLI_COMMAND) {
-			return this.cacheResolvedLarkCliPath(configuredPath, configuredPath);
-		}
-
-		const shellPath = await this.resolveCommandFromLoginShell(LARK_CLI_COMMAND);
-		if (shellPath) {
-			return this.cacheResolvedLarkCliPath(configuredPath, shellPath);
-		}
-
-		const candidates = [
-			join(homedir(), ".npm-global/bin/lark-cli"),
-			join(homedir(), ".local/bin/lark-cli"),
-			join(homedir(), "bin/lark-cli"),
-			"/opt/homebrew/bin/lark-cli",
-			"/usr/local/bin/lark-cli",
-			LARK_CLI_COMMAND
-		];
-
-		for (const candidate of candidates) {
-			if (candidate === LARK_CLI_COMMAND) {
-				return this.cacheResolvedLarkCliPath(configuredPath, candidate);
-			}
-
-			if (await this.canExecute(candidate)) {
-				return this.cacheResolvedLarkCliPath(configuredPath, candidate);
-			}
-		}
-
-		return this.cacheResolvedLarkCliPath(configuredPath, LARK_CLI_COMMAND);
+		const resolvedPath = await resolveLarkCliPathFromSetting(configuredPath, {
+			env: process.env,
+			canExecute: (path) => this.canExecute(path),
+			pathExists: (path) => this.pathExists(path),
+			isDirectory: (path) => this.isDirectory(path),
+			resolveCommandFromLoginShell: (command) => this.resolveCommandFromLoginShell(command)
+		});
+		return this.cacheResolvedLarkCliPath(configuredPath, resolvedPath);
 	}
 
 	private cacheResolvedLarkCliPath(setting: string, resolvedPath: string): string {
@@ -2471,15 +2449,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		this.cachedCommandEnvironmentExecutable = "";
 		this.cachedCommandEnvironmentShellPath = "";
 		return resolvedPath;
-	}
-
-	private getDefaultPathEntries(): string[] {
-		return [
-			join(homedir(), ".npm-global/bin"),
-			join(homedir(), ".local/bin"),
-			join(homedir(), "bin"),
-			...FALLBACK_PATH_ENTRIES
-		];
 	}
 
 	private async resolveCommandFromLoginShell(command: string): Promise<string> {
@@ -2549,27 +2518,21 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private getShellCandidates(): string[] {
 		const candidates = [process.env.SHELL || "", ...FALLBACK_LOGIN_SHELLS];
-		return this.uniquePathEntries(candidates);
-	}
-
-	private uniquePathEntries(entries: string[]): string[] {
-		const seen = new Set<string>();
-		const result: string[] = [];
-
-		for (const entry of entries) {
-			if (entry && !seen.has(entry)) {
-				seen.add(entry);
-				result.push(entry);
-			}
-		}
-
-		return result;
+		return uniquePathEntries(candidates);
 	}
 
 	private async canExecute(path: string): Promise<boolean> {
 		try {
 			await access(path, constants.X_OK);
 			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private async isDirectory(path: string): Promise<boolean> {
+		try {
+			return (await stat(path)).isDirectory();
 		} catch {
 			return false;
 		}
