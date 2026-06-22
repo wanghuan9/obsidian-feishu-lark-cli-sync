@@ -41,16 +41,18 @@ async function run() {
 		await testPreciseRefreshFailsOnStaleRemote(workspace);
 		await testPreciseRefreshAllowsNormalizedRemoteMarkdown(workspace);
 		await testPreciseSkipAllowsNormalizedRemoteMarkdown(workspace);
+		await testPreciseSkipRepairsRemoteHeadingDrift(workspace);
+		await testPreciseSkipDeletesRemoteInsertedHeading(workspace);
 		await testPreciseRefreshBeforeUpdateAvoidsDuplicateInsert(workspace);
 		await testOverwriteDoesNotPersistEmptyState(workspace);
-			await testOverwriteUpdates(workspace);
-			await testUnboundFilesDoNotBlock(workspace);
-			await testCanonicalStateKey(workspace);
-			await testStateCacheTrim(workspace);
-			await testSameDocumentAliasesRunSerially(workspace);
-			await testConcurrentFailureWaitsForStartedTasks(workspace);
-			await testMacSystemNotificationOnFailure(workspace);
-			await testWindowsSystemNotificationOnFailure(workspace);
+		await testOverwriteUpdates(workspace);
+		await testUnboundFilesDoNotBlock(workspace);
+		await testCanonicalStateKey(workspace);
+		await testStateCacheTrim(workspace);
+		await testSameDocumentAliasesRunSerially(workspace);
+		await testConcurrentFailureWaitsForStartedTasks(workspace);
+		await testMacSystemNotificationOnFailure(workspace);
+		await testWindowsSystemNotificationOnFailure(workspace);
 	} finally {
 		await rm(workspace, { recursive: true, force: true });
 	}
@@ -383,7 +385,65 @@ async function testPreciseSkipAllowsNormalizedRemoteMarkdown(workspace) {
 	await runHook(workspace);
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+fetch/);
+	assert.doesNotMatch(log, /--detail with-ids/);
 	assert.doesNotMatch(log, /docs \+update/);
+}
+
+async function testPreciseSkipRepairsRemoteHeadingDrift(workspace) {
+	await resetWorkspaceFiles(workspace);
+	const contentForLark = "# bound\n\n## Title\n\nBody";
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "## Title\n\nBody"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateWithUnits(workspace, "https://example.feishu.cn/docx/doc-token", contentForLark, [
+		{
+			stableId: "0:heading",
+			kind: "heading",
+			hash: await createContentHash("Title"),
+			blockId: "blk-heading"
+		},
+		{
+			stableId: "1:paragraph",
+			kind: "paragraph",
+			hash: await createContentHash("Body"),
+			blockId: "blk-1"
+		}
+	]);
+	await clearLog(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_FETCH_STALE_HEADING: "1"
+		}
+	});
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+fetch .*--doc-format markdown/);
+	assert.match(log, /docs \+fetch .*--detail with-ids/);
+	assert.match(log, /docs \+update .*--command block_replace .*--block-id blk-heading .*--revision-id 4/);
+	assert.doesNotMatch(log, /--command overwrite/);
+}
+
+async function testPreciseSkipDeletesRemoteInsertedHeading(workspace) {
+	await resetWorkspaceFiles(workspace);
+	const contentForLark = "# bound\n\nBody";
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Body"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateWithUnits(workspace, "https://example.feishu.cn/docx/doc-token", contentForLark, [{
+		stableId: "0:paragraph",
+		kind: "paragraph",
+		hash: await createContentHash("Body"),
+		blockId: "blk-1"
+	}]);
+	await clearLog(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_FETCH_EXTRA_HEADING: "1"
+		}
+	});
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+fetch .*--detail with-ids/);
+	assert.match(log, /docs \+update .*--command block_delete .*--block-id blk-extra-heading .*--revision-id 4/);
+	assert.doesNotMatch(log, /--command overwrite/);
 }
 
 async function testPreciseRefreshBeforeUpdateAvoidsDuplicateInsert(workspace) {
@@ -734,6 +794,7 @@ if (process.env.LARK_CLI_FAIL_DOC && doc.includes(process.env.LARK_CLI_FAIL_DOC)
 }
 const changedAfterUpdatePath = process.env.LARK_CLI_LOG + ".changed-after-update";
 const insertedAfterUpdatePath = process.env.LARK_CLI_LOG + ".inserted-after-update";
+const skippedRepairPath = process.env.LARK_CLI_LOG + ".skipped-repair-updated";
 const responseDoc = process.env.LARK_CLI_RETURN_DOC_TOKEN_FOR_URL && doc.includes("/docx/doc-token") ? "doc-token" : doc;
 if (args.includes("+fetch")) {
   const isWithIds = args.includes("--detail") && args.includes("with-ids");
@@ -764,6 +825,10 @@ if (args.includes("+fetch")) {
     markdown = "# bound\\n\\nBody\\n\\n## Inserted";
   } else if (process.env.LARK_CLI_FETCH_REPLACED) {
     markdown = "# bound\\n\\nChanged";
+  } else if (process.env.LARK_CLI_FETCH_STALE_HEADING) {
+    markdown = fs.existsSync(skippedRepairPath) ? "# bound\\n\\n## Title\\n\\nBody" : "# bound\\n\\n## Title121221\\n\\nBody";
+  } else if (process.env.LARK_CLI_FETCH_EXTRA_HEADING) {
+    markdown = fs.existsSync(skippedRepairPath) ? "# bound\\n\\nBody" : "# bound\\n\\nBody\\n\\n## Extra";
   }
   let content = markdown;
   let revisionId = Number(process.env.LARK_CLI_BASE_REVISION_ID || "4");
@@ -775,6 +840,14 @@ if (args.includes("+fetch")) {
       content = "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Changed</p>";
     } else if (process.env.LARK_CLI_FETCH_REPLACED) {
       content = "<title id=\\"doc-title\\">bound</title><p id=\\"blk-2\\">Changed</p>";
+    } else if (process.env.LARK_CLI_FETCH_STALE_HEADING) {
+      content = fs.existsSync(skippedRepairPath)
+        ? "<title id=\\"doc-title\\">bound</title><h2 id=\\"blk-heading\\">Title</h2><p id=\\"blk-1\\">Body</p>"
+        : "<title id=\\"doc-title\\">bound</title><h2 id=\\"blk-heading\\">Title121221</h2><p id=\\"blk-1\\">Body</p>";
+    } else if (process.env.LARK_CLI_FETCH_EXTRA_HEADING) {
+      content = fs.existsSync(skippedRepairPath)
+        ? "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p>"
+        : "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p><h2 id=\\"blk-extra-heading\\">Extra</h2>";
     }
   }
   if (process.env.LARK_CLI_UPDATE_REVISION_ID && fs.existsSync(insertedAfterUpdatePath) && !shouldReturnStaleMarkdown && !shouldReturnStaleWithIds) {
@@ -787,6 +860,9 @@ if (args.includes("+fetch")) {
   }
   if (process.env.LARK_CLI_FETCH_INSERTED_AFTER_UPDATE && args.includes("+update")) {
     fs.writeFileSync(insertedAfterUpdatePath, "1");
+  }
+  if ((process.env.LARK_CLI_FETCH_STALE_HEADING || process.env.LARK_CLI_FETCH_EXTRA_HEADING) && args.includes("+update")) {
+    fs.writeFileSync(skippedRepairPath, "1");
   }
   const revisionId = process.env.LARK_CLI_UPDATE_REVISION_ID ? Number(process.env.LARK_CLI_UPDATE_REVISION_ID) : undefined;
   process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc, revision_id: revisionId } } }));
@@ -814,6 +890,7 @@ async function clearLog(workspace) {
 	await writeFile(logPath, "", "utf8");
 	await rm(`${logPath}.changed-after-update`, { force: true });
 	await rm(`${logPath}.inserted-after-update`, { force: true });
+	await rm(`${logPath}.skipped-repair-updated`, { force: true });
 	await rm(`${logPath}.stale-markdown-count`, { force: true });
 	await rm(`${logPath}.stale-with-ids-count`, { force: true });
 }

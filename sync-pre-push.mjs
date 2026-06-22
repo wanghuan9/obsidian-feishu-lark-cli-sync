@@ -210,7 +210,16 @@ async function syncMarkdownTask(task, settings, syncState) {
 					state: refreshedState
 				});
 				if (refreshedPlan.mode !== "blocked") {
-					await executeSyncPlanForTask(task, settings, syncState, refreshedState.doc, contentForLark, refreshedPlan, stateKeys);
+					await executeSyncPlanForTask(
+						task,
+						settings,
+						syncState,
+						refreshedState.doc,
+						contentForLark,
+						refreshedPlan,
+						stateKeys,
+						refreshedState.revisionId
+					);
 					return;
 				}
 			}
@@ -227,12 +236,21 @@ async function syncMarkdownTask(task, settings, syncState) {
 					strategy,
 					state: refreshedState
 				});
-				await executeSyncPlanForTask(task, settings, syncState, refreshedState.doc, contentForLark, refreshedPlan, stateKeys);
+				await executeSyncPlanForTask(
+					task,
+					settings,
+					syncState,
+					refreshedState.doc,
+					contentForLark,
+					refreshedPlan,
+					stateKeys,
+					refreshedState.revisionId
+				);
 				return;
 			}
 		}
 
-		await executeSyncPlanForTask(task, settings, syncState, syncDoc, contentForLark, plan, stateKeys);
+		await executeSyncPlanForTask(task, settings, syncState, syncDoc, contentForLark, plan, stateKeys, state?.revisionId);
 	} catch (error) {
 		if (error instanceof PrePushSyncError) {
 			throw error;
@@ -249,10 +267,9 @@ async function syncMarkdownTask(task, settings, syncState) {
 	}
 }
 
-async function executeSyncPlanForTask(task, settings, syncState, doc, contentForLark, plan, stateKeys) {
+async function executeSyncPlanForTask(task, settings, syncState, doc, contentForLark, plan, stateKeys, baseRevisionId) {
 	if (plan.mode === "skipped") {
-		await ensureRemoteDocumentMatches(settings, doc, contentForLark, task.repoRelativePath);
-		savePlanState(syncState, stateKeys, plan);
+		await executeSkippedSyncPlanForTask(task, settings, syncState, doc, contentForLark, plan, stateKeys);
 		return;
 	}
 
@@ -267,18 +284,21 @@ async function executeSyncPlanForTask(task, settings, syncState, doc, contentFor
 
 	await withTempMarkdown(basename(task.filePath, ".md"), contentForLark, async (tempFile) => {
 		let latestRevisionId;
+		let nextRevisionId = baseRevisionId;
 		for (let index = 0; index < plan.commands.length; index += 1) {
 			const command = plan.commands[index];
 			const contentFileName = "content" in command && command.content
 				? await writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
 				: tempFile.fileName;
+			const commandRevisionId = plan.mode === "precise" ? nextRevisionId : undefined;
 			const args = buildUpdateCommandArgs(
 				"contentFileName" in command
-					? { ...command, contentFileName }
-					: command
+					? { ...command, contentFileName, revisionId: commandRevisionId }
+					: { ...command, revisionId: commandRevisionId }
 			);
 			const result = await runLarkCli(settings, args, tempFile.directory);
-			latestRevisionId = result.data?.document?.revision_id ?? latestRevisionId;
+			nextRevisionId = result.data?.document?.revision_id;
+			latestRevisionId = nextRevisionId ?? latestRevisionId;
 		}
 		if (plan.mode === "precise") {
 			await saveRemoteDocumentState(
@@ -294,6 +314,60 @@ async function executeSyncPlanForTask(task, settings, syncState, doc, contentFor
 			savePlanState(syncState, stateKeys, plan);
 		}
 	});
+}
+
+async function executeSkippedSyncPlanForTask(task, settings, syncState, doc, contentForLark, plan, stateKeys) {
+	const remoteMarkdown = await fetchLarkDocumentMarkdown(settings, doc);
+	const [remoteSignature, expectedSignature] = await Promise.all([
+		createSyncContentSignature(remoteMarkdown.content),
+		createSyncContentSignature(contentForLark)
+	]);
+	if (isSyncContentSignatureEquivalent(remoteSignature, expectedSignature)) {
+		savePlanState(syncState, stateKeys, plan);
+		return;
+	}
+
+	const remoteXml = await fetchLarkDocumentWithIds(settings, doc);
+	const remoteState = await createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+	const repairPlan = await buildSyncPlan({
+		doc: remoteState.doc,
+		markdown: contentForLark,
+		contentFileName: "sync.md",
+		strategy: "precise",
+		state: remoteState
+	});
+	if (repairPlan.mode === "skipped") {
+		savePlanState(syncState, stateKeys, repairPlan);
+		return;
+	}
+	if (repairPlan.mode === "precise") {
+		await executeSyncPlanForTask(
+			task,
+			settings,
+			syncState,
+			remoteState.doc,
+			contentForLark,
+			repairPlan,
+			stateKeys,
+			remoteState.revisionId
+		);
+		return;
+	}
+	if (repairPlan.mode === "blocked") {
+		throw new PrePushSyncError(formatSyncFailureMessage({
+			language: readLanguage(settings),
+			mode: "pre-push",
+			path: task.repoRelativePath,
+			reason: repairPlan.reason
+		}));
+	}
+
+	throw new PrePushSyncError(formatSyncFailureMessage({
+		language: readLanguage(settings),
+		mode: "pre-push",
+		path: task.repoRelativePath,
+		reason: "remote-content-mismatch"
+	}));
 }
 
 class PrePushSyncError extends Error {
@@ -491,35 +565,6 @@ async function fetchLarkDocumentWithIds(settings, doc) {
 		content: result.data?.document?.content || "",
 		revisionId: result.data?.document?.revision_id
 	};
-}
-
-async function ensureRemoteDocumentMatches(settings, doc, expectedMarkdown, repoRelativePath) {
-	const result = await runLarkCli(settings, [
-		"docs",
-		"+fetch",
-		"--api-version",
-		"v2",
-		"--as",
-		"user",
-		"--doc",
-		doc,
-		"--doc-format",
-		"markdown",
-		"--json"
-	]);
-	const remoteContent = result.data?.document?.content || "";
-	const [remoteSignature, expectedSignature] = await Promise.all([
-		createSyncContentSignature(remoteContent),
-		createSyncContentSignature(expectedMarkdown)
-	]);
-	if (!isSyncContentSignatureEquivalent(remoteSignature, expectedSignature)) {
-		throw new PrePushSyncError(formatSyncFailureMessage({
-			language: readLanguage(settings),
-			mode: "pre-push",
-			path: repoRelativePath,
-			reason: "remote-content-mismatch"
-		}));
-	}
 }
 
 async function runWithConcurrency(items, limit, worker) {

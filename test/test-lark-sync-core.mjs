@@ -114,6 +114,29 @@ assert.deepEqual(buildUpdateCommandArgs({
 	"--json"
 ]);
 
+assert.deepEqual(buildUpdateCommandArgs({
+	doc: "doc-token",
+	command: "block_delete",
+	blockId: "blk-2",
+	revisionId: 12
+}), [
+	"docs",
+	"+update",
+	"--api-version",
+	"v2",
+	"--as",
+	"user",
+	"--doc",
+	"doc-token",
+	"--command",
+	"block_delete",
+	"--block-id",
+	"blk-2",
+	"--revision-id",
+	"12",
+	"--json"
+]);
+
 assert.deepEqual(createEmptySyncStateFile(), {
 	version: 1,
 	documents: {}
@@ -195,6 +218,33 @@ assert.equal(mappedState.revisionId, 7);
 assert.equal(mappedState.units.length, 2);
 assert.deepEqual(mappedState.units.map((unit) => unit.blockId), ["blk-1", "blk-2"]);
 assert.deepEqual(mappedState.units.map((unit) => unit.kind), ["paragraph", "heading"]);
+assert.ok(mappedState.titleHash);
+
+const titleAppendPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note123\n\nBody\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: mappedState
+});
+assert.equal(titleAppendPlan.mode, "precise");
+assert.deepEqual(titleAppendPlan.commands.map((command) => command.command), ["block_replace"]);
+assert.equal(titleAppendPlan.commands[0].blockId, "doc-token");
+assert.equal(titleAppendPlan.commands[0].docFormat, "xml");
+assert.equal(titleAppendPlan.commands[0].content, "<title>Note123</title>");
+assert.equal(titleAppendPlan.nextState.contentHash, await createContentHash("# Note123\n\nBody\n\n## Next"));
+
+const titleDeletePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody\n\n## Next",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: titleAppendPlan.nextState
+});
+assert.equal(titleDeletePlan.mode, "precise");
+assert.equal(titleDeletePlan.commands.length, 1);
+assert.equal(titleDeletePlan.commands[0].blockId, "doc-token");
+assert.equal(titleDeletePlan.commands[0].content, "<title>Note</title>");
 
 const exportedMarkdownState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\n## Exported", remoteXml, 7);
 assert.equal(exportedMarkdownState.contentHash, await createContentHash("# Note\n\n## Exported"));
@@ -257,6 +307,24 @@ assert.equal((await buildSyncPlan({
 	contentFileName: "sync.md",
 	strategy: "precise",
 	state: tableState
+})).mode, "skipped");
+
+const genericTableRemoteXml = [
+	"<title id=\"doc-token\">Note</title>",
+	"<table id=\"blk-1\"><tr><th>类型</th></tr>",
+	"<tr><td>List&lt;String&gt;</td></tr></table>"
+].join("");
+const genericTableMarkdown = "# Note\n\n| 类型 |\n| --- |\n| List\\<String\\> |";
+assert.equal(await isRemoteXmlContentEquivalent(genericTableRemoteXml, genericTableMarkdown), true);
+const genericTableState = await createDocumentSyncStateFromRemote("doc-token", genericTableMarkdown, genericTableRemoteXml, 9);
+assert.equal(genericTableState.units.length, 1);
+assert.equal(genericTableState.units[0].blockId, "blk-1");
+assert.equal((await buildSyncPlan({
+	doc: "doc-token",
+	markdown: genericTableMarkdown,
+	contentFileName: "sync.md",
+	strategy: "auto",
+	state: genericTableState
 })).mode, "skipped");
 
 const paddedTableRemoteXml = [

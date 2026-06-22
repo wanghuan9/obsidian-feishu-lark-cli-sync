@@ -1421,9 +1421,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		context: { mode: SyncMode; path: string; stateKeys?: string[]; previousRevisionId?: number }
 	): Promise<Partial<BoundLarkDocument>> {
 		if (plan.mode === "skipped") {
-			await this.ensureRemoteDocumentMatches(doc, content, context);
-			await this.saveSyncPlanStateForDocument(doc, {}, plan, context.stateKeys || []);
-			return {};
+			return await this.executeSkippedSyncPlan(doc, content, plan, context);
 		}
 
 		if (plan.mode === "blocked") {
@@ -1433,6 +1431,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		return await this.withTempMarkdown("sync", content, async (tempFile) => {
 			let latestDocument: LarkDocumentUpdateResult = {};
+			let nextRevisionId = context.previousRevisionId;
 			if (plan.mode === "overwrite") {
 				this.removeSyncStateKeys([doc, ...(context.stateKeys || [])], doc);
 				await this.saveLarkSyncState();
@@ -1441,15 +1440,19 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				const contentFileName = "content" in command && command.content
 					? await this.writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
 					: tempFile.fileName;
-				const commandArgs = buildUpdateCommandArgs(
-					"contentFileName" in command
-						? { ...command, doc, contentFileName }
-						: { ...command, doc }
-				);
+				const commandRevisionId = plan.mode === "precise" ? nextRevisionId : undefined;
+				const commandWithContent = "contentFileName" in command
+					? { ...command, doc, contentFileName }
+					: { ...command, doc };
+				const commandWithRevision = commandRevisionId === undefined
+					? commandWithContent
+					: { ...commandWithContent, revisionId: commandRevisionId };
+				const commandArgs = buildUpdateCommandArgs(commandWithRevision);
 				const result = await this.runLarkCli(commandArgs, {
 					cwd: tempFile.directory
 				});
 				const document = result.data?.document;
+				nextRevisionId = document?.revision_id;
 				latestDocument = {
 					token: document?.document_id || latestDocument.token,
 					url: document?.url || latestDocument.url,
@@ -1457,35 +1460,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				};
 			}
 
-			const optimisticState = context.mode === "save" ? this.getCompletePlanNextState(plan) : undefined;
 			if (plan.mode === "precise") {
-				if (optimisticState) {
-					await this.persistDocumentState(this.withRevisionId(optimisticState, latestDocument.revisionId), [
-						doc,
-						latestDocument.token || "",
-						latestDocument.url || "",
-						...(context.stateKeys || [])
-					]);
-				} else {
-					await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
-						expectedMarkdown: content,
-						expectedRevisionId: latestDocument.revisionId,
-						context,
-						fallbackState: this.getPlanNextState(plan),
-						refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
-					});
-				}
+				await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
+					expectedMarkdown: content,
+					expectedRevisionId: latestDocument.revisionId,
+					context,
+					refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
+				});
 			} else if (plan.mode === "overwrite") {
-				if (optimisticState) {
-					await this.persistDocumentState(this.withRevisionId(optimisticState, latestDocument.revisionId), [
-						doc,
-						latestDocument.token || "",
-						latestDocument.url || "",
-						...(context.stateKeys || [])
-					]);
-				} else {
-					await this.saveOverwrittenDocumentState(doc, latestDocument, content, context, this.getPlanNextState(plan));
-				}
+				await this.saveOverwrittenDocumentState(doc, latestDocument, content, context);
 			} else {
 				await this.saveSyncPlanStateForDocument(doc, latestDocument, plan, context.stateKeys || []);
 			}
@@ -1511,13 +1494,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			return;
 		}
 
-		if (!("nextState" in plan) || !plan.nextState) {
+		const nextState = this.getCompletePlanNextState(plan);
+		if (!nextState) {
 			return;
 		}
 
 		const stateKey = getDocumentStateKey(doc);
 		this.syncState.documents[stateKey] = {
-			...touchDocumentSyncState(plan.nextState),
+			...touchDocumentSyncState(nextState),
 			doc: stateKey
 		};
 		await this.saveLarkSyncState();
@@ -1527,8 +1511,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		doc: string,
 		document: LarkDocumentUpdateResult,
 		expectedMarkdown: string,
-		context: { mode: SyncMode; path: string; stateKeys?: string[] },
-		fallbackState?: LarkSyncStateFile["documents"][string]
+		context: { mode: SyncMode; path: string; stateKeys?: string[] }
 	): Promise<void> {
 		const resolvedDoc = document.token || document.url || doc;
 		const stateKeys = [doc, document.token || "", document.url || "", ...(context.stateKeys || [])];
@@ -1536,7 +1519,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			expectedMarkdown,
 			expectedRevisionId: document.revisionId,
 			context,
-			fallbackState,
 			refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
 		});
 	}
@@ -1595,7 +1577,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			expectedMarkdown?: string;
 			expectedRevisionId?: number;
 			previousRevisionId?: number;
-			fallbackState?: LarkSyncStateFile["documents"][string];
 			refreshPolicy?: RemoteStateRefreshPolicy;
 			context?: { mode: SyncMode; path: string };
 		} = {}
@@ -1628,7 +1609,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		if (!state && refreshPolicy.allowTimeoutFallback) {
-			state = latestState || options.fallbackState || await this.fetchRemoteDocumentState(doc, options.expectedMarkdown);
+			state = this.firstCompleteSyncState([latestState]);
+			if (!state) {
+				const refreshedState = await this.fetchRemoteDocumentState(doc);
+				state = this.firstCompleteSyncState([refreshedState]);
+			}
 		}
 
 		if (!state) {
@@ -1665,11 +1650,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private async fetchRemoteDocumentState(
 		doc: string,
 		baselineMarkdown?: string
-	): Promise<LarkSyncStateFile["documents"][string]> {
+	): Promise<LarkSyncStateFile["documents"][string] | undefined> {
 		const [remoteMarkdown, remoteXml] = await Promise.all([
 			this.fetchLarkDocumentMarkdown(doc),
 			this.fetchLarkDocumentWithIds(doc)
 		]);
+		if (baselineMarkdown && !await isRemoteXmlContentEquivalent(remoteXml.content, baselineMarkdown)) {
+			return undefined;
+		}
+
 		return await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml, baselineMarkdown);
 	}
 
@@ -1714,13 +1703,26 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private getCompletePlanNextState(plan: SyncPlan): LarkSyncStateFile["documents"][string] | undefined {
 		const nextState = this.getPlanNextState(plan);
-		if (!nextState
-			|| nextState.units.length === 0
-			|| !nextState.units.every((unit) => Boolean(unit.blockId))) {
+		if (!this.isCompleteSyncState(nextState)) {
 			return undefined;
 		}
 
 		return nextState;
+	}
+
+	private firstCompleteSyncState(
+		states: Array<LarkSyncStateFile["documents"][string] | undefined>
+	): LarkSyncStateFile["documents"][string] | undefined {
+		return states.find((state) => this.isCompleteSyncState(state));
+	}
+
+	private isCompleteSyncState(state: LarkSyncStateFile["documents"][string] | undefined): boolean {
+		if (!state) {
+			return false;
+		}
+
+		return state.units.length > 0
+			&& state.units.every((unit) => Boolean(unit.blockId));
 	}
 
 	private getRemoteStateRefreshPolicy(mode: SyncMode): RemoteStateRefreshPolicy {
@@ -1846,32 +1848,46 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		await this.runLarkCli(args);
 	}
 
-	private async ensureRemoteDocumentMatches(
+	private async executeSkippedSyncPlan(
 		doc: string,
-		expectedMarkdown: string,
-		context: { mode: SyncMode; path: string }
-	): Promise<void> {
-		const result = await this.runLarkCli([
-			"docs",
-			"+fetch",
-			"--api-version",
-			"v2",
-			"--as",
-			"user",
-			"--doc",
-			doc,
-			"--doc-format",
-			"markdown",
-			"--json"
-		]);
-		const remoteContent = result.data?.document?.content || "";
+		content: string,
+		plan: SyncPlan,
+		context: { mode: SyncMode; path: string; stateKeys?: string[]; previousRevisionId?: number }
+	): Promise<Partial<BoundLarkDocument>> {
+		const remoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
 		const [remoteSignature, expectedSignature] = await Promise.all([
-			createSyncContentSignature(remoteContent),
-			createSyncContentSignature(expectedMarkdown)
+			createSyncContentSignature(remoteMarkdown.content),
+			createSyncContentSignature(content)
 		]);
-		if (!isSyncContentSignatureEquivalent(remoteSignature, expectedSignature)) {
-			throw new LocalizedSyncError(this.formatSyncFailure(context.mode, context.path, "remote-content-mismatch"));
+		if (isSyncContentSignatureEquivalent(remoteSignature, expectedSignature)) {
+			await this.saveSyncPlanStateForDocument(doc, {}, plan, context.stateKeys || []);
+			return {};
 		}
+
+		const remoteXml = await this.fetchLarkDocumentWithIds(doc);
+		const remoteState = await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+		const repairPlan = await buildSyncPlan({
+			doc: remoteState.doc,
+			markdown: content,
+			contentFileName: "sync.md",
+			strategy: "precise",
+			state: remoteState
+		});
+		if (repairPlan.mode === "skipped") {
+			await this.saveSyncPlanStateForDocument(remoteState.doc, {}, repairPlan, context.stateKeys || []);
+			return {};
+		}
+		if (repairPlan.mode === "precise") {
+			return await this.executeSyncPlan(remoteState.doc, content, repairPlan, {
+				...context,
+				previousRevisionId: remoteState.revisionId
+			});
+		}
+		if (repairPlan.mode === "blocked") {
+			throw new LocalizedSyncError(this.formatSyncFailure(context.mode, context.path, repairPlan.reason));
+		}
+
+		throw new LocalizedSyncError(this.formatSyncFailure(context.mode, context.path, "remote-content-mismatch"));
 	}
 
 	private async syncOrRecreateDocument(
