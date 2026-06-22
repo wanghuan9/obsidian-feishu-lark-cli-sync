@@ -36,6 +36,7 @@ export interface DocumentSyncState {
 	revisionId?: number;
 	contentHash: string;
 	titleBlockId?: string;
+	titleHash?: string;
 	units: SyncUnitState[];
 	updatedAt: string;
 }
@@ -68,6 +69,7 @@ export interface LarkOverwriteCommand {
 	command: "overwrite";
 	docFormat: "markdown" | "xml";
 	contentFileName: string;
+	revisionId?: number;
 }
 
 export interface LarkBlockReplaceCommand {
@@ -77,6 +79,7 @@ export interface LarkBlockReplaceCommand {
 	blockId: string;
 	contentFileName: string;
 	content?: string;
+	revisionId?: number;
 }
 
 export interface LarkBlockInsertAfterCommand {
@@ -86,12 +89,14 @@ export interface LarkBlockInsertAfterCommand {
 	blockId: string;
 	contentFileName: string;
 	content?: string;
+	revisionId?: number;
 }
 
 export interface LarkBlockDeleteCommand {
 	doc: string;
 	command: "block_delete";
 	blockId: string;
+	revisionId?: number;
 }
 
 export type SyncPlan =
@@ -359,6 +364,10 @@ export function buildUpdateCommandArgs(command: LarkUpdateCommand): string[] {
 			break;
 	}
 
+	if ("revisionId" in command && command.revisionId !== undefined) {
+		args.push("--revision-id", String(command.revisionId));
+	}
+
 	args.push("--json");
 	return args;
 }
@@ -387,9 +396,14 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		return createBlockedOrOverwriteSyncPlan(input, contentHash, "block-mapping-missing");
 	}
 
+	const titleChange = await createTitleSyncChange(input, contentHash, units);
 	const precisePlan = finalizeCandidateSyncPlan(
 		input,
-		optimizeSyncPlan(input, await buildPreciseReplacePlan(input, contentHash, units), units)
+		optimizeSyncPlan(
+			input,
+			applyTitleSyncChange(input, await buildPreciseReplacePlan(input, contentHash, units), titleChange, contentHash),
+			units
+		)
 	);
 	if (precisePlan) {
 		return precisePlan;
@@ -397,7 +411,11 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 
 	const insertPlan = finalizeCandidateSyncPlan(
 		input,
-		optimizeSyncPlan(input, await buildPreciseInsertPlan(input, contentHash, units), units)
+		optimizeSyncPlan(
+			input,
+			applyTitleSyncChange(input, await buildPreciseInsertPlan(input, contentHash, units), titleChange, contentHash),
+			units
+		)
 	);
 	if (insertPlan) {
 		return insertPlan;
@@ -407,7 +425,7 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		input,
 		optimizeSyncPlan(
 			input,
-			await buildPreciseMixedInsertReplacePlan(input, contentHash, units),
+			applyTitleSyncChange(input, await buildPreciseMixedInsertReplacePlan(input, contentHash, units), titleChange, contentHash),
 			units
 		)
 	);
@@ -417,13 +435,138 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 
 	const deletePlan = finalizeCandidateSyncPlan(
 		input,
-		optimizeSyncPlan(input, await buildPreciseDeletePlan(input, contentHash, units), units)
+		optimizeSyncPlan(
+			input,
+			applyTitleSyncChange(input, await buildPreciseDeletePlan(input, contentHash, units), titleChange, contentHash),
+			units
+		)
 	);
 	if (deletePlan) {
 		return deletePlan;
 	}
 
 	return createBlockedOrOverwriteSyncPlan(input, contentHash, "diff-too-complex");
+}
+
+interface TitleSyncChange {
+	titleHash?: string;
+	command?: LarkUpdateCommand;
+	reason?: SyncFailureReason;
+}
+
+async function createTitleSyncChange(
+	input: BuildSyncPlanInput,
+	contentHash: string,
+	units: MarkdownSyncUnit[]
+): Promise<TitleSyncChange> {
+	if (!input.state) {
+		return {};
+	}
+
+	const title = readMarkdownDocumentTitle(input.markdown);
+	const titleHash = title === undefined ? undefined : await createContentHash(normalizeFingerprintText(title));
+	if (!isDocumentTitleChanged(input.state, titleHash, contentHash, units)) {
+		return { titleHash };
+	}
+
+	if (!input.state.titleBlockId || title === undefined) {
+		return { titleHash, reason: "block-mapping-missing" };
+	}
+
+	return {
+		titleHash,
+		command: {
+			doc: input.doc,
+			command: "block_replace",
+			docFormat: "xml",
+			blockId: input.state.titleBlockId,
+			contentFileName: input.contentFileName,
+			content: createTitleXmlContent(title)
+		}
+	};
+}
+
+function isDocumentTitleChanged(
+	state: DocumentSyncState,
+	titleHash: string | undefined,
+	contentHash: string,
+	units: MarkdownSyncUnit[]
+): boolean {
+	if (titleHash === undefined) {
+		return false;
+	}
+
+	if (state.titleHash !== undefined) {
+		return state.titleHash !== titleHash;
+	}
+
+	if (state.titleBlockId) {
+		return state.contentHash !== contentHash;
+	}
+
+	return areStateUnitsEquivalentToMarkdownUnits(state.units, units);
+}
+
+function areStateUnitsEquivalentToMarkdownUnits(
+	previousUnits: SyncUnitState[],
+	nextUnits: MarkdownSyncUnit[]
+): boolean {
+	if (previousUnits.length !== nextUnits.length) {
+		return false;
+	}
+
+	return previousUnits.every((unit, index) => {
+		const nextUnit = nextUnits[index];
+		return Boolean(nextUnit) && unit.kind === nextUnit?.kind && unit.hash === nextUnit.hash;
+	});
+}
+
+function applyTitleSyncChange(
+	input: BuildSyncPlanInput,
+	plan: SyncPlan | null,
+	titleChange: TitleSyncChange,
+	contentHash: string
+): SyncPlan | null {
+	if (titleChange.reason) {
+		return createBlockedOrOverwriteSyncPlan(input, contentHash, titleChange.reason);
+	}
+
+	if (!plan || plan.mode === "blocked" || plan.mode === "overwrite") {
+		return plan;
+	}
+
+	const nextState = withTitleHash(plan.nextState, titleChange.titleHash);
+	if (!titleChange.command) {
+		return nextState && nextState !== plan.nextState ? { ...plan, nextState } : plan;
+	}
+
+	return {
+		mode: "precise",
+		commands: [titleChange.command, ...plan.commands],
+		contentHash: plan.contentHash,
+		nextState: nextState
+			? {
+				...nextState,
+				contentHash: plan.contentHash,
+				titleHash: titleChange.titleHash,
+				updatedAt: new Date().toISOString()
+			}
+			: undefined
+	};
+}
+
+function withTitleHash(
+	state: DocumentSyncState | undefined,
+	titleHash: string | undefined
+): DocumentSyncState | undefined {
+	if (!state || titleHash === undefined || state.titleHash === titleHash) {
+		return state;
+	}
+
+	return {
+		...state,
+		titleHash
+	};
 }
 
 function createBlockedOrOverwriteSyncPlan(
@@ -640,13 +783,16 @@ export async function createDocumentSyncStateFromRemote(
 	revisionId?: number
 ): Promise<DocumentSyncState> {
 	const contentHash = await createContentHash(markdown);
+	const title = readMarkdownDocumentTitle(markdown);
+	const titleHash = title === undefined ? undefined : await createContentHash(normalizeFingerprintText(title));
 	const markdownUnits = await createMarkdownSyncUnits(markdown);
-	return createDocumentSyncStateFromParsedRemote(doc, contentHash, markdownUnits, remoteXml, revisionId);
+	return createDocumentSyncStateFromParsedRemote(doc, contentHash, titleHash, markdownUnits, remoteXml, revisionId);
 }
 
 function createDocumentSyncStateFromParsedRemote(
 	doc: string,
 	contentHash: string,
+	titleHash: string | undefined,
 	markdownUnits: MarkdownSyncUnit[],
 	remoteXml: string,
 	revisionId?: number
@@ -660,7 +806,8 @@ function createDocumentSyncStateFromParsedRemote(
 			markdownUnits,
 			remoteUnits,
 			revisionId,
-			titleBlockId
+			titleBlockId,
+			titleHash
 		);
 	}
 
@@ -685,7 +832,8 @@ function createDocumentSyncStateFromParsedRemote(
 			markdownUnits,
 			remoteUnits,
 			revisionId,
-			titleBlockId
+			titleBlockId,
+			titleHash
 		);
 	}
 
@@ -694,6 +842,7 @@ function createDocumentSyncStateFromParsedRemote(
 		revisionId,
 		contentHash,
 		titleBlockId,
+		titleHash,
 		units: units as SyncUnitState[],
 		updatedAt: new Date().toISOString()
 	};
@@ -705,7 +854,8 @@ function createDocumentSyncStateFromPartialMapping(
 	markdownUnits: MarkdownSyncUnit[],
 	remoteUnits: RemoteSyncUnit[],
 	revisionId?: number,
-	titleBlockId?: string
+	titleBlockId?: string,
+	titleHash?: string
 ): DocumentSyncState {
 	const mappedRemoteUnits = mapRemoteUnitsToMarkdownUnits(markdownUnits, remoteUnits);
 	const units = markdownUnits.map((unit, index) => {
@@ -719,7 +869,11 @@ function createDocumentSyncStateFromPartialMapping(
 	});
 
 	if (units.every((unit) => !unit.blockId)) {
-		return createDocumentSyncState(doc, contentHash, revisionId);
+		return {
+			...createDocumentSyncState(doc, contentHash, revisionId),
+			titleBlockId,
+			titleHash
+		};
 	}
 
 	return {
@@ -727,6 +881,7 @@ function createDocumentSyncStateFromPartialMapping(
 		revisionId,
 		contentHash,
 		titleBlockId,
+		titleHash,
 		units,
 		updatedAt: new Date().toISOString()
 	};
@@ -1335,6 +1490,10 @@ function createHeadingXmlContent(markdown: string): string {
 	return `<h${level}>${escapeXmlText(match[2]!.trim())}</h${level}>`;
 }
 
+function createTitleXmlContent(title: string): string {
+	return `<title>${escapeXmlText(title)}</title>`;
+}
+
 function joinInsertedUnitContent(units: MarkdownSyncUnit[]): string {
 	return units.reduce((content, unit, index) => {
 		if (index === 0) {
@@ -1940,6 +2099,17 @@ function stripMarkdownTitle(markdown: string): string {
 	return lines.join("\n");
 }
 
+function readMarkdownDocumentTitle(markdown: string): string | undefined {
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	let index = 0;
+	while (index < lines.length && (lines[index] || "").trim() === "") {
+		index += 1;
+	}
+
+	const match = (lines[index] || "").match(/^#\s+(.+?)[ \t#]*$/);
+	return match?.[1]?.trim();
+}
+
 function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; content: string }> {
 	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
 	const blocks: Array<{ kind: string; content: string }> = [];
@@ -2231,7 +2401,10 @@ function createMarkdownListFingerprint(content: string): string {
 }
 
 function isMarkdownTableSeparatorLine(line: string): boolean {
-	return /^\|?\s*:?-{1,}:?\s*(?:\|\s*:?-{1,}:?\s*)+\|?$/.test(line);
+	const cells = line.split("|")
+		.map((cell) => cell.trim())
+		.filter((cell) => cell);
+	return cells.length > 0 && cells.every((cell) => /^:?-{1,}:?$/.test(cell));
 }
 
 function createXmlFingerprint(kind: string, content: string): string {
@@ -2246,7 +2419,7 @@ function createXmlFingerprint(kind: string, content: string): string {
 	const text = content
 		.replace(/<br\s*\/?>/gi, "\n")
 		.replace(/<[^>]+>/g, "");
-	return normalizeFingerprintText(decodeXmlEntities(text));
+	return normalizeFingerprintText(text);
 }
 
 function createXmlTableFingerprint(content: string): string {
@@ -2254,7 +2427,7 @@ function createXmlTableFingerprint(content: string): string {
 		const rowContent = rowMatch[1] || "";
 		const cells = Array.from(rowContent.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi), (cellMatch) => {
 			const text = (cellMatch[1] || "").replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "");
-			return normalizeFingerprintText(decodeXmlEntities(text));
+			return normalizeFingerprintText(text);
 		});
 		return cells.join("|");
 	});
@@ -2263,8 +2436,8 @@ function createXmlTableFingerprint(content: string): string {
 }
 
 function normalizeFingerprintText(content: string): string {
-	return content
-		.replace(/\\([~`*_{}\[\]()#+\-.!|>])/g, "$1")
+	return decodeXmlEntities(content)
+		.replace(/\\([~`*_{}\[\]()#+\-.!|<>])/g, "$1")
 		.replace(/`([^`]+)`/g, "$1")
 		.replace(/\*\*([^*]+)\*\*/g, "$1")
 		.replace(/__([^_]+)__/g, "$1")

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { win32 } from "node:path";
 import esbuild from "esbuild";
 
 await esbuild.build({
@@ -45,6 +46,7 @@ const env = {
 	LOCALAPPDATA: "",
 	PATH: "C:\\Windows"
 };
+const windowsLarkCli = win32.join("C:\\node", "lark-cli.cmd");
 const candidates = getDefaultLarkCliCandidates(env, "C:\\Users\\me");
 assert.equal(candidates[0].replace(/\//g, "\\"), "C:\\node\\lark-cli.cmd");
 assert.equal(candidates.includes("npm\\lark-cli.cmd"), false);
@@ -57,16 +59,22 @@ assert.equal(pathEntries.includes(""), false);
 const resolvedDefault = await resolveLarkCliPathFromSetting("lark-cli", {
 	env,
 	homeDir: "C:\\Users\\me",
-	canExecute: async (path) => path === "C:\\node\\lark-cli.cmd",
+	canExecute: async (path) => path === windowsLarkCli,
 	pathExists: async () => false,
 	isDirectory: async () => false,
 	resolveCommandFromLoginShell: async () => ""
 });
-assert.equal(resolvedDefault, "C:\\node\\lark-cli.cmd");
+assert.equal(resolvedDefault, windowsLarkCli);
 
 const commandEnv = buildCommandEnvironment("lark-cli", { env, homeDir: "C:\\Users\\me" });
 assert.match(commandEnv.PATH || "", /C:\\node/);
 assert.match(commandEnv.PATH || "", /C:\\Windows/);
+
+if (process.platform !== "win32") {
+	const nonWindowsEnv = { PATH: "/usr/bin" };
+	assert.equal(getDefaultPathEntries(nonWindowsEnv, "/Users/me").some((entry) => entry.startsWith("C:\\")), false);
+	assert.equal(getDefaultLarkCliCandidates(nonWindowsEnv, "/Users/me").some((entry) => entry.endsWith(".cmd")), false);
+}
 
 if (process.platform === "win32") {
 	assert.equal(shouldUseCommandShell("C:\\node\\lark-cli.cmd"), true);

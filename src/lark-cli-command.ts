@@ -1,4 +1,4 @@
-import { delimiter, dirname, join } from "path";
+import { delimiter, dirname, join, win32 } from "path";
 import { homedir } from "os";
 
 export const LARK_CLI_COMMAND = "lark-cli";
@@ -133,13 +133,17 @@ export function getDefaultPathEntries(
 	env: Record<string, string | undefined> = process.env,
 	home = homedir()
 ): string[] {
-	return [
+	const windowsEntries = isWindowsPathEnvironment(env) ? [
 		env.NVM_SYMLINK || "",
-		env.APPDATA ? join(env.APPDATA, "npm") : "",
-		env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "npm") : "",
-		env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Programs", "nodejs") : "",
+		env.APPDATA ? win32.join(env.APPDATA, "npm") : "",
+		env.LOCALAPPDATA ? win32.join(env.LOCALAPPDATA, "npm") : "",
+		env.LOCALAPPDATA ? win32.join(env.LOCALAPPDATA, "Programs", "nodejs") : "",
 		"C:\\nvm4w\\nodejs",
-		"C:\\Program Files\\nodejs",
+		"C:\\Program Files\\nodejs"
+	] : [];
+
+	return [
+		...windowsEntries,
 		join(home, ".npm-global/bin"),
 		join(home, ".local/bin"),
 		join(home, "bin"),
@@ -151,12 +155,16 @@ export function getDefaultLarkCliCandidates(
 	env: Record<string, string | undefined> = process.env,
 	home = homedir()
 ): string[] {
+	const windowsCandidates = isWindowsPathEnvironment(env) ? [
+		env.NVM_SYMLINK ? win32.join(env.NVM_SYMLINK, "lark-cli.cmd") : "",
+		env.APPDATA ? win32.join(env.APPDATA, "npm", "lark-cli.cmd") : "",
+		env.LOCALAPPDATA ? win32.join(env.LOCALAPPDATA, "npm", "lark-cli.cmd") : "",
+		env.LOCALAPPDATA ? win32.join(env.LOCALAPPDATA, "Programs", "nodejs", "lark-cli.cmd") : "",
+		...WINDOWS_LARK_CLI_SHIMS
+	] : [];
+
 	return [
-		env.NVM_SYMLINK ? join(env.NVM_SYMLINK, "lark-cli.cmd") : "",
-		env.APPDATA ? join(env.APPDATA, "npm", "lark-cli.cmd") : "",
-		env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "npm", "lark-cli.cmd") : "",
-		env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Programs", "nodejs", "lark-cli.cmd") : "",
-		...WINDOWS_LARK_CLI_SHIMS,
+		...windowsCandidates,
 		join(home, ".npm-global/bin/lark-cli"),
 		join(home, ".local/bin/lark-cli"),
 		join(home, "bin/lark-cli"),
@@ -218,4 +226,9 @@ export function uniquePathEntries(entries: string[]): string[] {
 
 function isAbsoluteCommandPath(path: string): boolean {
 	return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+function isWindowsPathEnvironment(env: Record<string, string | undefined>): boolean {
+	return process.platform === "win32"
+		|| Boolean(env.NVM_SYMLINK || env.APPDATA || env.LOCALAPPDATA);
 }
