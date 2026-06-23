@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-feishu-lark-cli-sync",
-	"version": "0.1.6",
+	"version": "0.1.7",
 	"description": "Obsidian plugin that publishes and syncs Markdown notes to Feishu/Lark Docs through lark-cli.",
 	"main": "main.js",
 	"type": "module",
