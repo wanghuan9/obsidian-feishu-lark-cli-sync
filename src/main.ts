@@ -1516,22 +1516,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			if (plan.mode === "precise") {
-				const optimisticState = context.mode !== "pre-push" ? this.getCompletePlanNextState(plan) : undefined;
-				if (optimisticState) {
-					await this.persistDocumentState(this.withRevisionId(optimisticState, latestDocument.revisionId), [
-						doc,
-						latestDocument.token || "",
-						latestDocument.url || "",
-						...(context.stateKeys || [])
-					]);
-				} else {
-					await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
-						expectedMarkdown: content,
-						expectedRevisionId: latestDocument.revisionId,
-						context,
-						refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
-					});
-				}
+				await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
+					expectedMarkdown: content,
+					expectedRevisionId: latestDocument.revisionId,
+					context,
+					refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
+				});
 			} else if (plan.mode === "overwrite") {
 				await this.saveOverwrittenDocumentState(
 					doc,
@@ -1829,20 +1819,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return STRICT_REMOTE_STATE_REFRESH_POLICY;
-	}
-
-	private withRevisionId(
-		state: LarkSyncStateFile["documents"][string],
-		revisionId?: number
-	): LarkSyncStateFile["documents"][string] {
-		if (revisionId === undefined || state.revisionId === revisionId) {
-			return state;
-		}
-
-		return {
-			...state,
-			revisionId
-		};
 	}
 
 	private async persistDocumentState(
