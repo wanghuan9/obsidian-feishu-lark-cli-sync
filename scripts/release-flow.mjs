@@ -23,6 +23,31 @@ const MANIFEST_REQUIRED_FIELDS = [
 	"description",
 	"author"
 ];
+const RELEASE_NOTE_SECTION_ORDER = [
+	"added",
+	"fixed",
+	"improved"
+];
+const RELEASE_NOTE_SECTION_TITLES = {
+	added: "Added",
+	fixed: "Fixed",
+	improved: "Improved"
+};
+const RELEASE_NOTE_TYPE_SECTIONS = {
+	feat: "added",
+	feature: "added",
+	add: "added",
+	fix: "fixed",
+	bugfix: "fixed",
+	perf: "improved",
+	refactor: "improved",
+	chore: "improved",
+	docs: "improved",
+	test: "improved",
+	build: "improved",
+	ci: "improved",
+	style: "improved"
+};
 const SEMVER_PATTERN = /^(\d+)\.(\d+)\.(\d+)$/;
 
 async function main() {
@@ -218,19 +243,56 @@ async function generateReleaseNotes(version, previousTag) {
 	const result = await run("git", ["log", "--pretty=format:%s", range], {
 		silent: true
 	});
-	const entries = result.stdout
+	const subjects = result.stdout
 		.split("\n")
 		.map((line) => line.trim())
-		.filter(Boolean)
-		.map((line) => `- ${line}`);
-	const body = entries.length > 0 ? entries.join("\n") : "- No code changes since the previous release tag.";
+		.filter(Boolean);
+	const body = formatReleaseNoteSections(subjects);
 
 	return `# ${version}
 
-## Changes
-
 ${body}
 `;
+}
+
+function formatReleaseNoteSections(subjects) {
+	const sections = Object.fromEntries(RELEASE_NOTE_SECTION_ORDER.map((section) => [section, []]));
+
+	for (const subject of subjects) {
+		const entry = parseReleaseNoteEntry(subject);
+		sections[entry.section].push(`- ${entry.text}`);
+	}
+
+	const blocks = RELEASE_NOTE_SECTION_ORDER
+		.filter((section) => sections[section].length > 0)
+		.map((section) => `## ${RELEASE_NOTE_SECTION_TITLES[section]}\n\n${sections[section].join("\n")}`);
+
+	if (blocks.length > 0) {
+		return blocks.join("\n\n");
+	}
+	return "## Improved\n\n- No code changes since the previous release tag.";
+}
+
+function parseReleaseNoteEntry(subject) {
+	const match = subject.match(/^([a-z]+)(?:\([^)]+\))?!?:\s*(.+)$/i);
+	const type = match?.[1]?.toLowerCase() || "";
+	const description = match?.[2] || subject;
+	const section = RELEASE_NOTE_TYPE_SECTIONS[type] || "improved";
+	const text = normalizeReleaseNoteText(description);
+
+	return {
+		section,
+		text
+	};
+}
+
+function normalizeReleaseNoteText(description) {
+	const withoutScope = description.replace(/^(?:\[[^\]]+\]|\([^)]+\))\s*/u, "");
+	const trimmed = withoutScope.trim().replace(/\.$/, "");
+	if (!trimmed) {
+		return "Updated release content";
+	}
+	return `${trimmed.slice(0, 1).toUpperCase()}${trimmed.slice(1)}`;
 }
 
 async function confirm(prompt, message) {
