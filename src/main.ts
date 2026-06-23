@@ -61,6 +61,7 @@ const DEFAULT_SETTINGS: LarkCliSyncSettings = {
 	larkCliPath: "lark-cli",
 	targetTokenOrUrl: "",
 	folderBindings: {},
+	publishedFolders: {},
 	titleSource: "file-name",
 	openAfterSync: true,
 	updateFrontmatter: true,
@@ -112,6 +113,7 @@ interface LarkCliSyncSettings {
 	larkCliPath: string;
 	targetTokenOrUrl: string;
 	folderBindings: Record<string, BoundLarkDocument>;
+	publishedFolders: Record<string, PublishedFolderBinding>;
 	titleSource: TitleSource;
 	openAfterSync: boolean;
 	updateFrontmatter: boolean;
@@ -128,6 +130,11 @@ interface BoundLarkDocument {
 	containerKind?: RemoteParentKind;
 	remoteParentPath?: string;
 	remoteRoot?: string;
+}
+
+interface PublishedFolderBinding {
+	rootParent: RemoteParent;
+	remoteRoot: string;
 }
 
 interface LarkDocumentUpdateResult extends Partial<BoundLarkDocument> {
@@ -195,6 +202,23 @@ interface IndexedFolderPreparedFile {
 interface RemoteParent {
 	token: string;
 	kind: RemoteParentKind;
+}
+
+interface RemoteFolderPathResolution {
+	parent: RemoteParent;
+	createdBinding: boolean;
+}
+
+interface PublishedFolderResolution {
+	folderPath: string;
+	binding: PublishedFolderBinding;
+	inferred: boolean;
+}
+
+interface FolderDocumentParent {
+	parent: RemoteParent;
+	remoteRoot: string;
+	remoteParentPath: string;
 }
 
 interface SyncFileOptions {
@@ -483,6 +507,10 @@ export default class LarkCliSyncPlugin extends Plugin {
 			folderBindings: {
 				...DEFAULT_SETTINGS.folderBindings,
 				...(savedSettings?.folderBindings || {})
+			},
+			publishedFolders: {
+				...DEFAULT_SETTINGS.publishedFolders,
+				...(savedSettings?.publishedFolders || {})
 			}
 		};
 	}
@@ -562,7 +590,15 @@ export default class LarkCliSyncPlugin extends Plugin {
 			}
 
 			const content = await this.readNoteForLark(file);
-			const result = await this.createLarkDocument(file, content);
+			const publishedFolder = await this.resolvePublishedFolderParentForFile(file);
+			const result = publishedFolder
+				? this.withRemoteParentMetadata(
+					await this.createLarkDocument(file, content, publishedFolder.parent),
+					publishedFolder.remoteRoot,
+					publishedFolder.remoteParentPath,
+					publishedFolder.parent
+				)
+				: await this.createLarkDocument(file, content);
 			await this.saveCreatedDocumentStateFromBaseline(result, content);
 
 			if (options.updateFrontmatter) {
@@ -1062,6 +1098,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				});
 
 				await this.syncFolderEntries(folderPath, folderRoot, entries);
+				this.savePublishedFolderBinding(folderPath, rootParent, folderRoot);
+				await this.saveSettings();
 
 				new Notice(this.t("noticePublishedFolderToLark", { count: String(entries.length) }), 8000);
 			});
@@ -1073,6 +1111,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		preparedFiles: FolderPreparedFile[]
 	): Promise<Map<string, RemoteParent>> {
 		const parentsByPath = new Map<string, RemoteParent>();
+		let hasFolderBindingChanges = false;
 		const parentPaths = uniquePathEntries(preparedFiles.map((preparedFile) => {
 			return preparedFile.remoteParentPath;
 		})).sort((left, right) => {
@@ -1080,7 +1119,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		});
 
 		for (const parentPath of parentPaths) {
-			parentsByPath.set(parentPath, await this.ensureRemoteFolderPath(rootParent, parentPath));
+			const resolution = await this.ensureRemoteFolderPath(rootParent, parentPath);
+			parentsByPath.set(parentPath, resolution.parent);
+			hasFolderBindingChanges = hasFolderBindingChanges || resolution.createdBinding;
+		}
+
+		if (hasFolderBindingChanges) {
+			await this.saveSettings();
 		}
 
 		return parentsByPath;
@@ -2059,13 +2104,105 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		return parentPath(path);
 	}
 
-	private async ensureRemoteFolderPath(rootParent: RemoteParent, folderPath: string): Promise<RemoteParent> {
+	private async resolvePublishedFolderParentForFile(file: TFile): Promise<FolderDocumentParent | null> {
+		const publishedFolder = this.findPublishedFolderForFile(file);
+		if (!publishedFolder) {
+			return null;
+		}
+
+		const remoteParentPath = this.getRemoteParentPath(publishedFolder.folderPath, file, publishedFolder.binding.remoteRoot);
+		const resolution = await this.ensureRemoteFolderPath(publishedFolder.binding.rootParent, remoteParentPath);
+		if (publishedFolder.inferred || resolution.createdBinding) {
+			await this.saveSettings();
+		}
+
+		return {
+			parent: resolution.parent,
+			remoteRoot: publishedFolder.binding.remoteRoot,
+			remoteParentPath
+		};
+	}
+
+	private findPublishedFolderForFile(file: TFile): PublishedFolderResolution | null {
+		let folderPath = this.parentPath(file.path);
+		while (folderPath) {
+			const normalizedFolderPath = this.normalizeLinkPath(folderPath);
+			const existingBinding = this.settings.publishedFolders[normalizedFolderPath];
+			const binding = existingBinding || this.inferPublishedFolderBinding(normalizedFolderPath);
+			if (binding) {
+				this.settings.publishedFolders[normalizedFolderPath] = binding;
+				return {
+					folderPath,
+					binding,
+					inferred: !existingBinding
+				};
+			}
+
+			folderPath = this.parentPath(folderPath);
+		}
+
+		return null;
+	}
+
+	private inferPublishedFolderBinding(folderPath: string): PublishedFolderBinding | null {
+		const remoteRoot = this.getSelectedFolderName(folderPath);
+		for (const bindingKey of Object.keys(this.settings.folderBindings)) {
+			const bindingPath = this.getFolderBindingPath(bindingKey);
+			if (bindingPath !== remoteRoot) {
+				continue;
+			}
+
+			return {
+				rootParent: this.getFolderBindingRootParent(bindingKey),
+				remoteRoot
+			};
+		}
+
+		return null;
+	}
+
+	private getFolderBindingPath(bindingKey: string): string {
+		const segments = bindingKey.split("|");
+		return this.normalizeLinkPath(segments[3] || "");
+	}
+
+	private getFolderBindingRootParent(bindingKey: string): RemoteParent {
+		const segments = bindingKey.split("|");
+		return {
+			kind: this.normalizeRemoteParentKind(segments[1]),
+			token: segments[2] || ""
+		};
+	}
+
+	private normalizeRemoteParentKind(kind: string | undefined): RemoteParentKind {
+		if (kind === "wiki" || kind === "drive" || kind === "my_library" || kind === "unknown") {
+			return kind;
+		}
+
+		return "unknown";
+	}
+
+	private savePublishedFolderBinding(folderPath: string, rootParent: RemoteParent, remoteRoot: string): void {
+		this.settings.publishedFolders[this.normalizeLinkPath(folderPath)] = {
+			rootParent,
+			remoteRoot
+		};
+	}
+
+	private async ensureRemoteFolderPath(
+		rootParent: RemoteParent,
+		folderPath: string
+	): Promise<RemoteFolderPathResolution> {
 		const normalizedFolderPath = this.normalizeLinkPath(folderPath);
 		if (!normalizedFolderPath) {
-			return rootParent;
+			return {
+				parent: rootParent,
+				createdBinding: false
+			};
 		}
 
 		let parent = rootParent;
+		let createdBinding = false;
 		const segments = normalizedFolderPath.split("/").filter(Boolean);
 		for (let index = 0; index < segments.length; index += 1) {
 			const partialPath = segments.slice(0, index + 1).join("/");
@@ -2082,14 +2219,17 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 			const folderBinding = await this.createRemoteFolderPage(segments[index] || "Untitled", parent);
 			this.settings.folderBindings[bindingKey] = folderBinding;
-			await this.saveSettings();
+			createdBinding = true;
 			parent = {
 				token: folderBinding.token,
 				kind: folderBinding.containerKind || parent.kind
 			};
 		}
 
-		return parent;
+		return {
+			parent,
+			createdBinding
+		};
 	}
 
 	private async createRemoteFolderPage(name: string, parent: RemoteParent): Promise<BoundLarkDocument> {
