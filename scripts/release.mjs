@@ -3,23 +3,10 @@ import { execFile } from "child_process";
 import { access, readFile, stat } from "fs/promises";
 import { constants } from "fs";
 import { promisify } from "util";
+import { RELEASE_ASSETS } from "./release-assets.mjs";
 
 const execFileAsync = promisify(execFile);
 
-const REQUIRED_RELEASE_ASSETS = [
-	"main.js",
-	"manifest.json",
-	"styles.css"
-];
-const HELPER_RELEASE_ASSETS = [
-	"lark-sync-core.mjs",
-	"lark-cli-command.mjs",
-	"sync-pre-push.mjs"
-];
-const RELEASE_ASSETS = [
-	...REQUIRED_RELEASE_ASSETS,
-	...HELPER_RELEASE_ASSETS
-];
 const RELEASE_NOTES_DIR = "release-notes";
 const mode = process.argv.includes("--publish") ? "publish" : "check";
 
