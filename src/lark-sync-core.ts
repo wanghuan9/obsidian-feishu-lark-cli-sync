@@ -314,11 +314,18 @@ export function removeLarkBinding(content: string): string {
 	const frontmatter = content.slice(frontmatterStart, frontmatterEnd);
 	const body = content.slice(frontmatterEnd + endMatch[0].length);
 	const filteredLines = removeYamlObjects(frontmatter.split(/\r?\n/), FRONTMATTER_BINDING_KEYS);
-	if (filteredLines.every((line) => line.trim() === "")) {
+	const filteredFrontmatter = filteredLines.join("\n").trim();
+	if (!filteredFrontmatter) {
 		return body.replace(/^\s+/, "");
 	}
 
-	return `---\n${filteredLines.join("\n").trim()}\n---\n${body}`;
+	const trimmedBody = body.replace(/^\s+/, "");
+	const bodyTitle = readMarkdownDocumentTitle(trimmedBody);
+	if (bodyTitle) {
+		return `# ${bodyTitle}\n\n${filteredFrontmatter}\n\n${stripMarkdownTitle(trimmedBody)}`;
+	}
+
+	return `${filteredFrontmatter}\n\n${trimmedBody}`;
 }
 
 export function buildUpdateDocumentArgs(doc: string, fileName: string): string[] {
@@ -2231,7 +2238,7 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 		const parentTagName = stack[depth - 1]?.tagName;
 		const grandparentTagName = stack[depth - 2]?.tagName;
 		const blockId = readRemoteBlockId(attributes);
-		const normalizedKind = normalizeRemoteBlockKind(tagName);
+		const normalizedKind = normalizeRemoteSyncUnitKind(tagName, attributes);
 		const isTopLevelBlock = blockId
 			&& normalizedKind
 			&& !isRemoteListContainer(tagName)
@@ -2369,8 +2376,12 @@ function createMarkdownTableFingerprint(content: string): string {
 	return content.replace(/\r\n/g, "\n").split("\n")
 		.map((line) => normalizeMarkdownTableRow(line))
 		.filter((line) => line && !isMarkdownTableSeparatorLine(line))
-		.map((line) => line.split("|").map((cell) => normalizeFingerprintText(cell)).join("|"))
+		.map((line) => line.split("|").map((cell) => normalizeMarkdownTableCellFingerprint(cell)).join("|"))
 		.join("\n");
+}
+
+function normalizeMarkdownTableCellFingerprint(cell: string): string {
+	return normalizeFingerprintText(cell.replace(/<br\s*\/?>/gi, "\n"));
 }
 
 function normalizeMarkdownTableRow(line: string): string {
@@ -2416,6 +2427,10 @@ function createXmlFingerprint(kind: string, content: string): string {
 		return createXmlTableFingerprint(content);
 	}
 
+	if (kind === "code" && isMermaidWhiteboardXml(content)) {
+		return normalizeFingerprintText(readXmlElementText(content));
+	}
+
 	const text = content
 		.replace(/<br\s*\/?>/gi, "\n")
 		.replace(/<[^>]+>/g, "");
@@ -2455,6 +2470,28 @@ function decodeXmlEntities(content: string): string {
 		.replace(/&quot;/g, "\"")
 		.replace(/&#39;/g, "'")
 		.replace(/&amp;/g, "&");
+}
+
+function normalizeRemoteSyncUnitKind(tagName: string, attributes: string): string {
+	if (isMermaidWhiteboardTag(tagName, attributes)) {
+		return "code";
+	}
+
+	return normalizeRemoteBlockKind(tagName);
+}
+
+function isMermaidWhiteboardTag(tagName: string, attributes: string): boolean {
+	return tagName === "whiteboard" && readXmlAttribute(attributes, "type") === "mermaid";
+}
+
+function isMermaidWhiteboardXml(content: string): boolean {
+	const match = content.match(/^<whiteboard\b([^>]*)>/i);
+	return Boolean(match && isMermaidWhiteboardTag("whiteboard", match[1] || ""));
+}
+
+function readXmlElementText(content: string): string {
+	const withoutOpenTag = content.replace(/^<[A-Za-z][A-Za-z0-9-]*\b[^>]*>/, "");
+	return withoutOpenTag.replace(/<\/[A-Za-z][A-Za-z0-9-]*>\s*$/, "");
 }
 
 function normalizeRemoteBlockKind(tagName: string): string {

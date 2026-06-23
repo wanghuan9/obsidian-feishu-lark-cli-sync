@@ -7,6 +7,8 @@
 	"scripts": {
 		"build": "node scripts/generate-embedded-helpers.mjs && tsc --noEmit && node esbuild.config.mjs production",
 		"dev": "node scripts/generate-embedded-helpers.mjs && node esbuild.config.mjs",
+		"release:check": "node scripts/release.mjs",
+		"release:publish": "node scripts/release.mjs --publish",
 		"test": "node scripts/generate-embedded-helpers.mjs && tsc --noEmit && node test/test-link-rewrite.mjs && node test/test-folder-path.mjs && node test/test-note-content.mjs && node test/test-lark-cli-command.mjs && node test/test-lark-sync-core.mjs && node test/test-pre-push.mjs",
 		"version": "node scripts/version-bump.mjs && git add manifest.json versions.json"
 	},

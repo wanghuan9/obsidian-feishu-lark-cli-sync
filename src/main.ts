@@ -1283,9 +1283,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				await this.writeBinding(entry.file, nextBindingWithParent);
 			}
 
-			if (strategy === "overwrite") {
-				await this.saveCreatedDocumentStateFromBaseline(nextBindingWithParent, rewrittenContent);
-			}
 		}
 
 		return false;
@@ -1519,14 +1516,30 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			if (plan.mode === "precise") {
-				await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
-					expectedMarkdown: content,
-					expectedRevisionId: latestDocument.revisionId,
-					context,
-					refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
-				});
+				const optimisticState = context.mode !== "pre-push" ? this.getCompletePlanNextState(plan) : undefined;
+				if (optimisticState) {
+					await this.persistDocumentState(this.withRevisionId(optimisticState, latestDocument.revisionId), [
+						doc,
+						latestDocument.token || "",
+						latestDocument.url || "",
+						...(context.stateKeys || [])
+					]);
+				} else {
+					await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
+						expectedMarkdown: content,
+						expectedRevisionId: latestDocument.revisionId,
+						context,
+						refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
+					});
+				}
 			} else if (plan.mode === "overwrite") {
-				await this.saveOverwrittenDocumentState(doc, latestDocument, content, context);
+				await this.saveOverwrittenDocumentState(
+					doc,
+					latestDocument,
+					content,
+					context,
+					this.getPlanNextState(plan)
+				);
 			} else {
 				await this.saveSyncPlanStateForDocument(doc, latestDocument, plan, context.stateKeys || []);
 			}
@@ -1569,13 +1582,16 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		doc: string,
 		document: LarkDocumentUpdateResult,
 		expectedMarkdown: string,
-		context: { mode: SyncMode; path: string; stateKeys?: string[] }
+		context: { mode: SyncMode; path: string; stateKeys?: string[] },
+		fallbackState?: LarkSyncStateFile["documents"][string]
 	): Promise<void> {
 		const resolvedDoc = document.token || document.url || doc;
 		const stateKeys = [doc, document.token || "", document.url || "", ...(context.stateKeys || [])];
 		await this.saveRemoteDocumentState(resolvedDoc, stateKeys, {
 			expectedMarkdown,
 			expectedRevisionId: document.revisionId,
+			fallbackState,
+			allowIncompleteFallback: context.mode !== "pre-push",
 			context,
 			refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
 		});
@@ -1594,11 +1610,30 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		binding: BoundLarkDocument,
 		baselineMarkdown?: string
 	): Promise<void> {
+		if (baselineMarkdown !== undefined) {
+			await this.saveSyncStateFromBaselineAndRemoteIds(binding, baselineMarkdown);
+			return;
+		}
+
 		const doc = binding.token || binding.url;
 		const [remoteMarkdown, remoteXml] = await Promise.all([
 			this.fetchLarkDocumentMarkdown(doc),
 			this.fetchLarkDocumentWithIds(doc)
 		]);
+		await this.saveRemoteDocumentStateFromFetched(remoteMarkdown, remoteXml, [doc, binding.token, binding.url], baselineMarkdown);
+	}
+
+	private async saveSyncStateFromBaselineAndRemoteIds(
+		binding: BoundLarkDocument,
+		baselineMarkdown: string
+	): Promise<void> {
+		const doc = binding.token || binding.url;
+		const remoteXml = await this.fetchLarkDocumentWithIds(doc);
+		const remoteMarkdown = {
+			doc: remoteXml.doc,
+			content: baselineMarkdown,
+			revisionId: remoteXml.revisionId
+		};
 		await this.saveRemoteDocumentStateFromFetched(remoteMarkdown, remoteXml, [doc, binding.token, binding.url], baselineMarkdown);
 	}
 
@@ -1635,6 +1670,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			expectedMarkdown?: string;
 			expectedRevisionId?: number;
 			previousRevisionId?: number;
+			fallbackState?: LarkSyncStateFile["documents"][string];
+			allowIncompleteFallback?: boolean;
 			refreshPolicy?: RemoteStateRefreshPolicy;
 			context?: { mode: SyncMode; path: string };
 		} = {}
@@ -1672,6 +1709,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				const refreshedState = await this.fetchRemoteDocumentState(doc);
 				state = this.firstCompleteSyncState([refreshedState]);
 			}
+		}
+		if (!state && options.allowIncompleteFallback) {
+			state = latestState || options.fallbackState;
 		}
 
 		if (!state) {
@@ -2493,6 +2533,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			const stderr = String((error as Error & { stderr?: string }).stderr || "").trim();
 			if (stderr) {
 				return this.formatStderr(stderr);
+			}
+		}
+
+		if (error instanceof Error && "stdout" in error) {
+			const stdout = String((error as Error & { stdout?: string }).stdout || "").trim();
+			if (stdout) {
+				return this.formatStderr(stdout);
 			}
 		}
 

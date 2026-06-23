@@ -45,10 +45,9 @@ assert.deepEqual(readBindingFromMarkdown(markdown), {
 	url: "https://example.feishu.cn/docx/abc"
 });
 
-assert.equal(removeLarkBinding(markdown), `---
-tags:
+assert.equal(removeLarkBinding(markdown), `tags:
   - sync
----
+
 Body`);
 
 assert.equal(removeLarkBinding(`---
@@ -308,6 +307,40 @@ assert.equal((await buildSyncPlan({
 	strategy: "precise",
 	state: tableState
 })).mode, "skipped");
+
+const tableWithBreakRemoteXml = [
+	"<title id=\"doc-token\">Note</title>",
+	"<table id=\"blk-1\"><tr><th>字段</th><th>说明</th></tr>",
+	"<tr><td>biz_no</td><td>规则 trace <br/>直销单 trace</td></tr></table>"
+].join("");
+const tableWithBreakMarkdown = "# Note\n\n| 字段 | 说明 |\n| --- | --- |\n| biz_no | 规则 trace <br>直销单 trace |";
+assert.equal(await isRemoteXmlContentEquivalent(tableWithBreakRemoteXml, tableWithBreakMarkdown), true);
+const tableWithBreakSignature = await createSyncContentSignature(tableWithBreakMarkdown);
+const tableWithBreakState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	tableWithBreakMarkdown,
+	tableWithBreakRemoteXml,
+	9
+);
+assert.ok(isDocumentStateContentEquivalent(tableWithBreakState, tableWithBreakSignature));
+assert.equal(tableWithBreakState.units[0].blockId, "blk-1");
+
+const mermaidWhiteboardRemoteXml = [
+	"<title id=\"doc-token\">Note</title>",
+	"<whiteboard id=\"mermaid-1\" token=\"wb-token\" type=\"mermaid\">flowchart TD\nA --&gt; B</whiteboard>"
+].join("");
+const mermaidWhiteboardMarkdown = "# Note\n\n```mermaid\nflowchart TD\nA --> B\n```";
+assert.equal(await isRemoteXmlContentEquivalent(mermaidWhiteboardRemoteXml, mermaidWhiteboardMarkdown), true);
+const mermaidWhiteboardSignature = await createSyncContentSignature(mermaidWhiteboardMarkdown);
+const mermaidWhiteboardState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	mermaidWhiteboardMarkdown,
+	mermaidWhiteboardRemoteXml,
+	10
+);
+assert.ok(isDocumentStateContentEquivalent(mermaidWhiteboardState, mermaidWhiteboardSignature));
+assert.equal(mermaidWhiteboardState.units[0].kind, "code");
+assert.equal(mermaidWhiteboardState.units[0].blockId, "mermaid-1");
 
 const genericTableRemoteXml = [
 	"<title id=\"doc-token\">Note</title>",
