@@ -512,6 +512,9 @@ async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs) {
 		remoteXml.content,
 		remoteXml.revisionId
 	);
+	if (!isCompleteNextState(state)) {
+		return state;
+	}
 
 	const stateKey = getDocumentStateKey(remoteDoc);
 	syncState.documents[stateKey] = {

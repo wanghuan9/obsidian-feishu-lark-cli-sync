@@ -29,9 +29,10 @@ async function run() {
 		await execFileAsync("git", ["commit", "-m", "init"], { cwd: workspace });
 
 		await testPreciseSkip(workspace);
+		await testPreciseRepairsEmptyStateBeforeSkip(workspace);
 		await testPreciseBootstrapFromRemote(workspace);
 		await testPreciseBootstrapAfterTrim(workspace);
-		await testPreciseBootstrapNoopWithoutBlockIds(workspace);
+		await testPreciseBootstrapBlocksWithoutBlockIds(workspace);
 		await testPreciseBlockedWhenBootstrapFails(workspace);
 		await testPreciseReplaceRefreshesState(workspace);
 		await testPreciseInsertRefreshesState(workspace);
@@ -69,6 +70,21 @@ async function testPreciseSkip(workspace) {
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+fetch .*--api-version v2/);
 	assert.doesNotMatch(log, /docs \+update/);
+}
+
+async function testPreciseRepairsEmptyStateBeforeSkip(workspace) {
+	await resetWorkspaceFiles(workspace);
+	const contentForLark = "# bound\n\nBody";
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncState(workspace, "https://example.feishu.cn/docx/doc-token", contentForLark);
+	await clearLog(workspace);
+	await runHook(workspace);
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+fetch .*--doc-format markdown/);
+	assert.match(log, /docs \+fetch .*--detail with-ids/);
+	assert.doesNotMatch(log, /docs \+update/);
+	const state = await readSyncState(workspace);
+	assert.deepEqual(state.documents["doc-token"].units.map((unit) => unit.blockId), ["blk-1"]);
 }
 
 async function testPreciseBootstrapFromRemote(workspace) {
@@ -136,25 +152,27 @@ async function testPreciseBlockedWhenBootstrapFails(workspace) {
 	assert.doesNotMatch(log, /docs \+update/);
 }
 
-async function testPreciseBootstrapNoopWithoutBlockIds(workspace) {
+async function testPreciseBootstrapBlocksWithoutBlockIds(workspace) {
 	await resetWorkspaceFiles(workspace);
 	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Body"));
 	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
 	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "zh-CN" });
 	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
 	await clearLog(workspace);
-	await runHook(workspace, {
+	const result = await runHook(workspace, {
+		reject: false,
 		env: {
 			LARK_CLI_NO_BLOCK_IDS: "1"
 		}
 	});
+	assert.notEqual(result.exitCode, 0);
+	assert.match(result.stderr, /缺少远端 block 映射/);
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+fetch .*--doc-format markdown/);
 	assert.match(log, /docs \+fetch .*--detail with-ids/);
 	assert.doesNotMatch(log, /docs \+update/);
 	const state = await readSyncState(workspace);
-	assert.ok(state.documents["doc-token"]);
-	assert.equal(state.documents["doc-token"].units.length, 0);
+	assert.equal(state.documents["doc-token"], undefined);
 }
 
 async function testPreciseReplaceRefreshesState(workspace) {

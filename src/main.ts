@@ -17,6 +17,7 @@ import {
 	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
+	createIncompleteDocumentSyncStateFromMarkdown,
 	createSyncContentSignature,
 	extractDocumentToken,
 	formatSyncFailureMessage,
@@ -1581,6 +1582,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			expectedMarkdown,
 			expectedRevisionId: document.revisionId,
 			fallbackState,
+			fallbackMarkdown: expectedMarkdown,
 			allowIncompleteFallback: context.mode !== "pre-push",
 			context,
 			refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
@@ -1661,6 +1663,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			expectedRevisionId?: number;
 			previousRevisionId?: number;
 			fallbackState?: LarkSyncStateFile["documents"][string];
+			fallbackMarkdown?: string;
 			allowIncompleteFallback?: boolean;
 			refreshPolicy?: RemoteStateRefreshPolicy;
 			context?: { mode: SyncMode; path: string };
@@ -1701,7 +1704,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 		}
 		if (!state && options.allowIncompleteFallback) {
-			state = latestState || options.fallbackState;
+			state = await this.selectIncompleteFallbackState(doc, latestState, options);
+		}
+		if (state && options.allowIncompleteFallback && state.units.length === 0 && options.fallbackMarkdown) {
+			state = await this.createIncompleteFallbackState(doc, {
+				...options,
+				fallbackState: state
+			});
 		}
 
 		if (!state) {
@@ -1714,6 +1723,44 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		await this.persistDocumentState(state, [doc, ...stateKeys]);
+	}
+
+	private async selectIncompleteFallbackState(
+		doc: string,
+		latestState: LarkSyncStateFile["documents"][string] | undefined,
+		options: {
+			expectedRevisionId?: number;
+			fallbackState?: LarkSyncStateFile["documents"][string];
+			fallbackMarkdown?: string;
+		}
+	): Promise<LarkSyncStateFile["documents"][string] | undefined> {
+		if (latestState && latestState.units.length > 0) {
+			return latestState;
+		}
+
+		return await this.createIncompleteFallbackState(doc, {
+			...options,
+			fallbackState: latestState || options.fallbackState
+		});
+	}
+
+	private async createIncompleteFallbackState(
+		doc: string,
+		options: {
+			expectedRevisionId?: number;
+			fallbackState?: LarkSyncStateFile["documents"][string];
+			fallbackMarkdown?: string;
+		}
+	): Promise<LarkSyncStateFile["documents"][string] | undefined> {
+		if (this.isCompleteSyncState(options.fallbackState) || !options.fallbackMarkdown) {
+			return options.fallbackState;
+		}
+
+		return await createIncompleteDocumentSyncStateFromMarkdown(
+			doc,
+			options.fallbackMarkdown,
+			options.expectedRevisionId ?? options.fallbackState?.revisionId
+		);
 	}
 
 	private async fetchRemoteDocumentStateAfterExpectedRevision(
@@ -1849,7 +1896,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			remoteXml.content,
 			remoteXml.revisionId
 		);
-		await this.persistDocumentState(state, [doc, remoteDoc, ...stateKeys]);
+		if (this.isCompleteSyncState(state)) {
+			await this.persistDocumentState(state, [doc, remoteDoc, ...stateKeys]);
+		}
 		return state;
 	}
 

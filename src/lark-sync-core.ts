@@ -389,7 +389,7 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		return createBlockedOrOverwriteSyncPlan(input, contentHash, "block-mapping-missing");
 	}
 
-	if (input.state?.contentHash === contentHash) {
+	if (input.state?.contentHash === contentHash && input.state.units.length > 0) {
 		return {
 			mode: "skipped",
 			commands: [],
@@ -1153,6 +1153,26 @@ export async function createSyncContentSignature(markdown: string): Promise<Sync
 			kind: unit.kind,
 			hash: unit.hash
 		}))
+	};
+}
+
+export async function createIncompleteDocumentSyncStateFromMarkdown(
+	doc: string,
+	markdown: string,
+	revisionId?: number
+): Promise<DocumentSyncState> {
+	const signature = await createSyncContentSignature(markdown);
+	return {
+		doc,
+		revisionId,
+		contentHash: signature.contentHash,
+		units: signature.units.map((unit, index) => ({
+			stableId: `${index}:${unit.kind}`,
+			kind: unit.kind,
+			hash: unit.hash,
+			blockId: ""
+		})),
+		updatedAt: new Date().toISOString()
 	};
 }
 
@@ -2406,7 +2426,9 @@ function createMarkdownCodeFingerprint(content: string): string {
 
 function createMarkdownListFingerprint(content: string): string {
 	return content.replace(/\r\n/g, "\n").split("\n")
-		.map((line) => normalizeFingerprintText(line.replace(/^\s*(?:[-+*]|\d+\.)\s+/, "")))
+		.map((line) => normalizeFingerprintText(line
+			.replace(/^\s*(?:[-+*]|\d+\.)\s+/, "")
+			.replace(/^\[(?: |x|X)\]\s+/, "")))
 		.filter((line) => line)
 		.join("\n");
 }
@@ -2475,6 +2497,10 @@ function decodeXmlEntities(content: string): string {
 function normalizeRemoteSyncUnitKind(tagName: string, attributes: string): string {
 	if (isMermaidWhiteboardTag(tagName, attributes)) {
 		return "code";
+	}
+
+	if (tagName === "checkbox") {
+		return "list";
 	}
 
 	return normalizeRemoteBlockKind(tagName);

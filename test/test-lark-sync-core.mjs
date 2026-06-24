@@ -17,6 +17,7 @@ const {
 	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
+	createIncompleteDocumentSyncStateFromMarkdown,
 	createSyncContentSignature,
 	extractDocumentToken,
 	formatSyncFailureMessage,
@@ -211,6 +212,35 @@ assert.equal(overwritePlan.nextState.contentHash, contentHash);
 assert.deepEqual(overwritePlan.nextState.units, []);
 assert.ok(Date.parse(overwritePlan.nextState.updatedAt));
 
+const incompleteFallbackState = await createIncompleteDocumentSyncStateFromMarkdown(
+	"doc-token",
+	"# Note\n\nBody\n\n## Next",
+	10
+);
+assert.equal(incompleteFallbackState.revisionId, 10);
+assert.equal(incompleteFallbackState.contentHash, await createContentHash("# Note\n\nBody\n\n## Next"));
+assert.deepEqual(incompleteFallbackState.units.map((unit) => unit.kind), ["paragraph", "heading"]);
+assert.deepEqual(incompleteFallbackState.units.map((unit) => unit.blockId), ["", ""]);
+
+const emptyUnitsSameContentPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: overwritePlan.nextState
+});
+assert.equal(emptyUnitsSameContentPlan.mode, "blocked");
+assert.equal(emptyUnitsSameContentPlan.reason, "block-mapping-missing");
+
+const autoEmptyUnitsSameContentPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "auto",
+	state: overwritePlan.nextState
+});
+assert.equal(autoEmptyUnitsSameContentPlan.mode, "overwrite");
+
 const remoteXml = "<title id=\"doc-token\">Note</title><p id=\"blk-1\">Body</p><h2 id=\"blk-2\">Next</h2>";
 const mappedState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\nBody\n\n## Next", remoteXml, 7);
 assert.equal(mappedState.revisionId, 7);
@@ -267,6 +297,7 @@ const partialReplacePlan = await buildSyncPlan({
 assert.equal(partialReplacePlan.mode, "precise");
 assert.equal(partialReplacePlan.commands.length, 1);
 assert.equal(partialReplacePlan.commands[0].blockId, "blk-1");
+assert.equal(partialReplacePlan.nextState.units[1].blockId, "");
 
 const unmappedReplacePlan = await buildSyncPlan({
 	doc: "doc-token",
@@ -286,6 +317,21 @@ const autoUnmappedReplacePlan = await buildSyncPlan({
 	state: partialState
 });
 assert.equal(autoUnmappedReplacePlan.mode, "overwrite");
+
+const checkboxRemoteXml = [
+	"<title id=\"doc-token\">Note</title>",
+	"<checkbox id=\"chk-1\" done=\"false\">TBD-1：确认接口</checkbox>",
+	"<checkbox id=\"chk-2\" done=\"true\">TBD-2：确认库存</checkbox>",
+	"<p id=\"blk-after\">After</p>"
+].join("");
+const checkboxState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n- [ ] TBD-1：确认接口\n\n- [x] TBD-2：确认库存\n\nAfter",
+	checkboxRemoteXml,
+	9
+);
+assert.deepEqual(checkboxState.units.map((unit) => unit.kind), ["list", "list", "paragraph"]);
+assert.deepEqual(checkboxState.units.map((unit) => unit.blockId), ["chk-1", "chk-2", "blk-after"]);
 
 const incompleteState = {
 	...partialState,
