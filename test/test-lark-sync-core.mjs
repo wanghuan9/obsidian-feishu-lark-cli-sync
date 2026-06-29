@@ -23,6 +23,7 @@ const {
 	formatSyncFailureMessage,
 	getDocumentStateKey,
 	getDocumentStateKeys,
+	isDocumentStateBlockMappingAcceptable,
 	isDocumentStateContentEquivalent,
 	isRemoteXmlContentEquivalent,
 	normalizeStateCacheRetainLimit,
@@ -192,6 +193,15 @@ const normalizedRemoteState = await createDocumentSyncStateFromRemote(
 );
 assert.ok(isDocumentStateContentEquivalent(normalizedRemoteState, formattedSignature));
 assert.notEqual(normalizedRemoteState.contentHash, formattedSignature.contentHash);
+assert.equal(isDocumentStateBlockMappingAcceptable(normalizedRemoteState), true);
+
+const partialMappedState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\nAlpha\n\nBeta",
+	"<title id=\"title\">Note</title><p id=\"blk-1\">Alpha</p><p>Beta</p>"
+);
+assert.equal(isDocumentStateBlockMappingAcceptable(partialMappedState), false);
+assert.equal(partialMappedState.units.filter((unit) => !unit.blockId).length, 1);
 
 const overwritePlan = await buildSyncPlan({
 	doc: "doc-token",

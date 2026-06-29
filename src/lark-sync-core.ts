@@ -1212,8 +1212,33 @@ export async function isRemoteXmlContentEquivalent(remoteXml: string, markdown: 
 		}
 
 		return unit.kind === remoteUnit.kind
-			&& unit.fingerprint === remoteUnit.fingerprint;
+		&& unit.fingerprint === remoteUnit.fingerprint;
 	});
+}
+
+export function isDocumentStateBlockMappingAcceptable(
+	state: DocumentSyncState,
+	maxMissingBlockIds = 2,
+	maxMissingBlockRatio = 0.01
+): boolean {
+	if (state.units.length === 0) {
+		return false;
+	}
+
+	const missingBlockIds = state.units.filter((unit) => !unit.blockId).length;
+	if (missingBlockIds === 0) {
+		return true;
+	}
+
+	if (state.units.length < 50) {
+		return false;
+	}
+
+	const missingLimit = Math.min(
+		maxMissingBlockIds,
+		Math.max(1, Math.floor(state.units.length * maxMissingBlockRatio))
+	);
+	return missingBlockIds <= missingLimit;
 }
 
 function areSyncContentUnitsEquivalent(

@@ -18,10 +18,10 @@ import {
 	createContentHash,
 	createEmptySyncStateFile,
 	createSyncContentSignature,
+	isDocumentStateBlockMappingAcceptable,
 	getDocumentStateKey,
 	getDocumentStateKeys,
 	formatSyncFailureMessage,
-	isDocumentStateContentEquivalent,
 	isSyncContentSignatureEquivalent,
 	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
@@ -184,8 +184,8 @@ async function syncMarkdownTask(task, settings, syncState) {
 		const strategy = settings.syncStrategy || "auto";
 		let state = findDocumentState(syncState, task.stateKeys);
 		let syncDoc = state?.doc || task.doc;
-		if (strategy !== "overwrite" && (!state || state.units.length === 0)) {
-			state = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, task.stateKeys);
+		if (strategy !== "overwrite" && shouldRefreshPreciseSyncState(state)) {
+			state = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, task.stateKeys, contentForLark) || state;
 			syncDoc = state?.doc || syncDoc;
 		}
 		const plan = await buildSyncPlan({
@@ -196,8 +196,8 @@ async function syncMarkdownTask(task, settings, syncState) {
 			state
 		});
 		const stateKeys = task.stateKeys;
-		if (strategy !== "overwrite" && plan.mode === "blocked") {
-			const refreshedState = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, stateKeys);
+		if (strategy !== "overwrite" && shouldRetryPlanWithRefreshedState(plan)) {
+			const refreshedState = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, stateKeys, contentForLark);
 			if (refreshedState) {
 				const refreshedPlan = await buildSyncPlan({
 					doc: refreshedState.doc,
@@ -221,31 +221,6 @@ async function syncMarkdownTask(task, settings, syncState) {
 				}
 			}
 		}
-		if (strategy !== "overwrite" && plan.mode === "precise" && plan.commands.some((command) => {
-			return command.command === "block_insert_after";
-		})) {
-			const refreshedState = await tryBootstrapPreciseSyncState(settings, syncState, syncDoc, stateKeys);
-			if (refreshedState && refreshedState.contentHash !== state?.contentHash) {
-				const refreshedPlan = await buildSyncPlan({
-					doc: refreshedState.doc,
-					markdown: contentForLark,
-					contentFileName: "sync.md",
-					strategy,
-					state: refreshedState
-				});
-				await executeSyncPlanForTask(
-					task,
-					settings,
-					syncState,
-					refreshedState.doc,
-					contentForLark,
-					refreshedPlan,
-					stateKeys,
-					refreshedState.revisionId
-				);
-				return;
-			}
-		}
 
 		await executeSyncPlanForTask(task, settings, syncState, syncDoc, contentForLark, plan, stateKeys, state?.revisionId);
 	} catch (error) {
@@ -262,6 +237,20 @@ async function syncMarkdownTask(task, settings, syncState) {
 			detail
 		}));
 	}
+}
+
+function shouldRetryPlanWithRefreshedState(plan) {
+	if (plan.mode === "blocked" || plan.mode === "overwrite") {
+		return true;
+	}
+
+	return plan.mode === "precise" && plan.commands.some((command) => {
+		return command.command === "block_insert_after";
+	});
+}
+
+function shouldRefreshPreciseSyncState(state) {
+	return !state || !isDocumentStateBlockMappingAcceptable(state);
 }
 
 async function executeSyncPlanForTask(task, settings, syncState, doc, contentForLark, plan, stateKeys, baseRevisionId) {
@@ -401,15 +390,12 @@ function isCompleteNextState(nextState) {
 }
 
 async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedMarkdown, path, expectedRevisionId) {
-	const expectedSignature = expectedMarkdown
-		? await createSyncContentSignature(expectedMarkdown)
-		: undefined;
 	let state;
 	for (let attempt = 0; attempt < REMOTE_STATE_REFRESH_ATTEMPTS; attempt += 1) {
 		const remoteState = expectedRevisionId !== undefined
-			? await fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedSignature)
-			: await fetchRemoteDocumentState(settings, doc);
-		if (remoteState && (!expectedSignature || isDocumentStateContentEquivalent(remoteState, expectedSignature))) {
+			? await fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedMarkdown)
+			: await fetchRemoteDocumentState(settings, doc, expectedMarkdown);
+		if (remoteState && (!expectedMarkdown || isDocumentStateBlockMappingAcceptable(remoteState))) {
 			state = remoteState;
 			break;
 		}
@@ -435,48 +421,40 @@ async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedM
 	};
 }
 
-async function fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedSignature) {
-	const remoteMarkdown = await fetchLarkDocumentMarkdown(settings, doc);
-	if (!await isRemoteMarkdownRefreshAccepted(remoteMarkdown, expectedRevisionId, expectedSignature)) {
-		return undefined;
-	}
-
+async function fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedMarkdown) {
 	const remoteXml = await fetchLarkDocumentWithIds(settings, doc);
 	if (remoteXml.revisionId === undefined || remoteXml.revisionId < expectedRevisionId) {
 		return undefined;
 	}
 
-	return await createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+	const remoteMarkdown = expectedMarkdown
+		? { doc: remoteXml.doc, content: expectedMarkdown, revisionId: remoteXml.revisionId }
+		: await fetchLarkDocumentMarkdown(settings, doc);
+	const state = await createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+	return expectedMarkdown && !isDocumentStateBlockMappingAcceptable(state)
+		? undefined
+		: state;
 }
 
-async function isRemoteMarkdownRefreshAccepted(remoteMarkdown, expectedRevisionId, expectedSignature) {
-	if (remoteMarkdown.revisionId === undefined || remoteMarkdown.revisionId < expectedRevisionId) {
-		return false;
-	}
-
-	if (!expectedSignature) {
-		return true;
-	}
-
-	const remoteSignature = await createSyncContentSignature(remoteMarkdown.content);
-	return isSyncContentSignatureEquivalent(remoteSignature, expectedSignature);
-}
-
-async function fetchRemoteDocumentState(settings, doc) {
+async function fetchRemoteDocumentState(settings, doc, expectedMarkdown) {
+	const remoteMarkdownPromise = expectedMarkdown
+		? Promise.resolve(undefined)
+		: fetchLarkDocumentMarkdown(settings, doc);
 	const [remoteMarkdown, remoteXml] = await Promise.all([
-		fetchLarkDocumentMarkdown(settings, doc),
+		remoteMarkdownPromise,
 		fetchLarkDocumentWithIds(settings, doc)
 	]);
-	return await createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
+	return await createRemoteDocumentState(doc, remoteMarkdown, remoteXml, expectedMarkdown);
 }
 
-async function createRemoteDocumentState(doc, remoteMarkdown, remoteXml) {
-	const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+async function createRemoteDocumentState(doc, remoteMarkdown, remoteXml, expectedMarkdown) {
+	const remoteDoc = remoteXml.doc || remoteMarkdown?.doc || doc;
+	const baselineMarkdown = expectedMarkdown || remoteMarkdown?.content || "";
 	return await createDocumentSyncStateFromRemote(
 		remoteDoc,
-		remoteMarkdown.content,
+		baselineMarkdown,
 		remoteXml.content,
-		remoteXml.revisionId ?? remoteMarkdown.revisionId
+		remoteXml.revisionId ?? remoteMarkdown?.revisionId
 	);
 }
 
@@ -500,20 +478,24 @@ function readPositiveIntegerEnv(name, defaultValue) {
 	return parsedValue;
 }
 
-async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs) {
+async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs, expectedMarkdown) {
+	const remoteMarkdownPromise = expectedMarkdown
+		? Promise.resolve(undefined)
+		: fetchLarkDocumentMarkdown(settings, doc);
 	const [remoteMarkdown, remoteXml] = await Promise.all([
-		fetchLarkDocumentMarkdown(settings, doc),
+		remoteMarkdownPromise,
 		fetchLarkDocumentWithIds(settings, doc)
 	]);
-	const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+	const remoteDoc = remoteXml.doc || remoteMarkdown?.doc || doc;
+	const baselineMarkdown = expectedMarkdown || remoteMarkdown?.content || "";
 	const state = await createDocumentSyncStateFromRemote(
 		remoteDoc,
-		remoteMarkdown.content,
+		baselineMarkdown,
 		remoteXml.content,
 		remoteXml.revisionId
 	);
-	if (!isCompleteNextState(state)) {
-		return state;
+	if (!isDocumentStateBlockMappingAcceptable(state)) {
+		return undefined;
 	}
 
 	const stateKey = getDocumentStateKey(remoteDoc);

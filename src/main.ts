@@ -26,7 +26,7 @@ import {
 	FRONTMATTER_TOKEN_KEY,
 	FRONTMATTER_URL_KEY,
 	isDocumentStateContentEquivalent,
-	isRemoteXmlContentEquivalent,
+	isDocumentStateBlockMappingAcceptable,
 	isSyncContentSignatureEquivalent,
 	LEGACY_FRONTMATTER_SYNCED_AT_KEY,
 	LarkSyncStateFile,
@@ -1397,7 +1397,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		let state = this.findDocumentState([doc, ...(context.stateKeys || [])]);
 		let syncDoc = state?.doc || doc;
 		if (strategy !== "overwrite" && this.shouldRefreshPreciseSyncState(state)) {
-			state = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
+			state = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || [], content) || state;
 			syncDoc = state?.doc || syncDoc;
 		}
 		syncDoc = state?.doc || syncDoc;
@@ -1408,8 +1408,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			strategy,
 			state
 		});
-		if (strategy !== "overwrite" && plan.mode === "blocked") {
-			const refreshedState = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
+		if (strategy !== "overwrite" && this.shouldRetryPlanWithRefreshedState(plan)) {
+			const refreshedState = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || [], content);
 			if (refreshedState) {
 				const refreshedPlan = await buildSyncPlan({
 					doc: refreshedState.doc,
@@ -1426,24 +1426,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				}
 			}
 		}
-		if (strategy !== "overwrite" && plan.mode === "precise" && plan.commands.some((command) => {
-			return command.command === "block_insert_after";
-		})) {
-			const refreshedState = await this.tryBootstrapPreciseSyncState(syncDoc, context.stateKeys || []);
-			if (refreshedState && refreshedState.contentHash !== state?.contentHash) {
-				const refreshedPlan = await buildSyncPlan({
-					doc: refreshedState.doc,
-					markdown: content,
-					contentFileName: "sync.md",
-					strategy,
-					state: refreshedState
-				});
-				return await this.executeSyncPlan(refreshedState.doc, content, refreshedPlan, {
-					...context,
-					previousRevisionId: refreshedState.revisionId
-				});
-			}
-		}
 
 		return await this.executeSyncPlan(syncDoc, content, plan, {
 			...context,
@@ -1451,12 +1433,18 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		});
 	}
 
-	private shouldRefreshPreciseSyncState(state: LarkSyncStateFile["documents"][string] | undefined): boolean {
-		if (!state || state.units.length === 0) {
+	private shouldRetryPlanWithRefreshedState(plan: SyncPlan): boolean {
+		if (plan.mode === "blocked" || plan.mode === "overwrite") {
 			return true;
 		}
 
-		return state.units.some((unit) => !unit.blockId);
+		return plan.mode === "precise" && plan.commands.some((command) => {
+			return command.command === "block_insert_after";
+		});
+	}
+
+	private shouldRefreshPreciseSyncState(state: LarkSyncStateFile["documents"][string] | undefined): boolean {
+		return !state || !isDocumentStateBlockMappingAcceptable(state);
 	}
 
 	private findDocumentState(docs: string[]): LarkSyncStateFile["documents"][string] | undefined {
@@ -1696,7 +1684,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 		}
 
-		if (!state && refreshPolicy.allowTimeoutFallback) {
+		if (!state && refreshPolicy.allowTimeoutFallback && !options.expectedMarkdown) {
 			state = this.firstCompleteSyncState([latestState]);
 			if (!state) {
 				const refreshedState = await this.fetchRemoteDocumentState(doc);
@@ -1774,12 +1762,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			return undefined;
 		}
 
-		if (expectedMarkdown && !await isRemoteXmlContentEquivalent(remoteXml.content, expectedMarkdown)) {
+		const remoteMarkdown = expectedMarkdown
+			? { doc: remoteXml.doc, content: expectedMarkdown, revisionId: remoteXml.revisionId }
+			: await this.fetchLarkDocumentMarkdown(doc);
+		const state = await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml, expectedMarkdown);
+		if (expectedMarkdown && !isDocumentStateBlockMappingAcceptable(state)) {
 			return undefined;
 		}
 
-		const remoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
-		return await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml, expectedMarkdown);
+		return state;
 	}
 
 	private async fetchRemoteDocumentState(
@@ -1790,11 +1781,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			this.fetchLarkDocumentMarkdown(doc),
 			this.fetchLarkDocumentWithIds(doc)
 		]);
-		if (baselineMarkdown && !await isRemoteXmlContentEquivalent(remoteXml.content, baselineMarkdown)) {
+		const state = await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml, baselineMarkdown);
+		if (baselineMarkdown && !isDocumentStateBlockMappingAcceptable(state)) {
 			return undefined;
 		}
 
-		return await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml, baselineMarkdown);
+		return state;
 	}
 
 	private async createRemoteDocumentState(
@@ -1803,7 +1795,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		remoteXml: { doc?: string; content: string; revisionId?: number },
 		baselineMarkdown?: string
 	): Promise<LarkSyncStateFile["documents"][string]> {
-		const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+		const remoteDoc = remoteXml.doc || remoteMarkdown?.doc || doc;
 		return await createDocumentSyncStateFromRemote(
 			remoteDoc,
 			baselineMarkdown || remoteMarkdown.content,
@@ -1883,23 +1875,29 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private async tryBootstrapPreciseSyncState(
 		doc: string,
-		stateKeys: string[]
+		stateKeys: string[],
+		expectedMarkdown?: string
 	): Promise<LarkSyncStateFile["documents"][string] | undefined> {
+		const remoteMarkdownPromise = expectedMarkdown
+			? Promise.resolve(undefined)
+			: this.fetchLarkDocumentMarkdown(doc);
 		const [remoteMarkdown, remoteXml] = await Promise.all([
-			this.fetchLarkDocumentMarkdown(doc),
+			remoteMarkdownPromise,
 			this.fetchLarkDocumentWithIds(doc)
 		]);
-		const remoteDoc = remoteXml.doc || remoteMarkdown.doc || doc;
+		const remoteDoc = remoteXml.doc || remoteMarkdown?.doc || doc;
+		const baselineMarkdown = expectedMarkdown || remoteMarkdown?.content || "";
 		const state = await createDocumentSyncStateFromRemote(
 			remoteDoc,
-			remoteMarkdown.content,
+			baselineMarkdown,
 			remoteXml.content,
 			remoteXml.revisionId
 		);
-		if (this.isCompleteSyncState(state)) {
+		if (isDocumentStateBlockMappingAcceptable(state)) {
 			await this.persistDocumentState(state, [doc, remoteDoc, ...stateKeys]);
+			return state;
 		}
-		return state;
+		return undefined;
 	}
 
 	private async fetchLarkDocumentMarkdown(doc: string): Promise<{ doc?: string; content: string; revisionId?: number }> {
