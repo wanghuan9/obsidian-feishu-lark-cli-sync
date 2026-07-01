@@ -319,13 +319,24 @@ export function removeLarkBinding(content: string): string {
 		return body.replace(/^\s+/, "");
 	}
 
+	const quotedFrontmatter = createMetadataBlockquote(filteredFrontmatter);
 	const trimmedBody = body.replace(/^\s+/, "");
 	const bodyTitle = readMarkdownDocumentTitle(trimmedBody);
 	if (bodyTitle) {
-		return `# ${bodyTitle}\n\n${filteredFrontmatter}\n\n${stripMarkdownTitle(trimmedBody)}`;
+		return `# ${bodyTitle}\n\n${quotedFrontmatter}\n\n${stripMarkdownTitle(trimmedBody)}`;
 	}
 
-	return `${filteredFrontmatter}\n\n${trimmedBody}`;
+	return `${quotedFrontmatter}\n\n${trimmedBody}`;
+}
+
+function createMetadataBlockquote(frontmatter: string): string {
+	return frontmatter.split(/\r?\n/)
+		.map((line) => `> ${normalizeMetadataBlockquoteLine(line)}`.trimEnd())
+		.join("\n");
+}
+
+function normalizeMetadataBlockquoteLine(line: string): string {
+	return line.trimEnd().replace(/^\s+((?:[-+*]|\d+\.)\s+)/, "$1");
 }
 
 export function buildUpdateDocumentArgs(doc: string, fileName: string): string[] {
@@ -1218,8 +1229,8 @@ export async function isRemoteXmlContentEquivalent(remoteXml: string, markdown: 
 
 export function isDocumentStateBlockMappingAcceptable(
 	state: DocumentSyncState,
-	maxMissingBlockIds = 2,
-	maxMissingBlockRatio = 0.01
+	maxMissingBlockIds = 20,
+	maxMissingBlockRatio = 0.4
 ): boolean {
 	if (state.units.length === 0) {
 		return false;
@@ -1236,7 +1247,7 @@ export function isDocumentStateBlockMappingAcceptable(
 
 	const missingLimit = Math.min(
 		maxMissingBlockIds,
-		Math.max(1, Math.floor(state.units.length * maxMissingBlockRatio))
+		Math.max(2, Math.floor(state.units.length * maxMissingBlockRatio))
 	);
 	return missingBlockIds <= missingLimit;
 }

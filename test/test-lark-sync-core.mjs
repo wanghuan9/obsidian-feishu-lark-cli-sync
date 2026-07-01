@@ -47,8 +47,8 @@ assert.deepEqual(readBindingFromMarkdown(markdown), {
 	url: "https://example.feishu.cn/docx/abc"
 });
 
-assert.equal(removeLarkBinding(markdown), `tags:
-  - sync
+assert.equal(removeLarkBinding(markdown), `> tags:
+> - sync
 
 Body`);
 
@@ -57,6 +57,25 @@ lark_doc_url: "https://example.feishu.cn/docx/abc"
 lark_doc_token: "abc"
 ---
 Body`), "Body");
+
+assert.equal(removeLarkBinding(`---
+需求: ITC-75612 牛商堂留货 - M3 回收单展示改造
+PRD: https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d §8
+Demo:
+  - 列表: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-list-demo.html
+  - 详情: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-detail-demo.html
+---
+# Existing
+
+Body`), `# Existing
+
+> 需求: ITC-75612 牛商堂留货 - M3 回收单展示改造
+> PRD: https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d §8
+> Demo:
+> - 列表: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-list-demo.html
+> - 详情: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-detail-demo.html
+
+Body`);
 
 assert.equal(
 	prepareNoteContentForLark({ basename: "Note" }, "Body", "file-name"),
@@ -202,6 +221,68 @@ const partialMappedState = await createDocumentSyncStateFromRemote(
 );
 assert.equal(isDocumentStateBlockMappingAcceptable(partialMappedState), false);
 assert.equal(partialMappedState.units.filter((unit) => !unit.blockId).length, 1);
+
+const partiallyMappedLargeState = {
+	doc: "doc-token",
+	contentHash: "hash",
+	updatedAt: "2026-06-12T00:00:00.000Z",
+	units: Array.from({ length: 134 }, (_, index) => ({
+		stableId: `${index}:paragraph`,
+		kind: "paragraph",
+		hash: `hash-${index}`,
+		blockId: index < 2 ? "" : `blk-${index}`
+	}))
+};
+assert.equal(isDocumentStateBlockMappingAcceptable(partiallyMappedLargeState), true);
+
+const mostlyUnmappedLargeState = {
+	...partiallyMappedLargeState,
+	units: partiallyMappedLargeState.units.map((unit, index) => ({
+		...unit,
+		blockId: index < 60 ? "" : unit.blockId
+	}))
+};
+assert.equal(isDocumentStateBlockMappingAcceptable(mostlyUnmappedLargeState), false);
+
+const metadataQuoteState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"> 需求: ITC-75612 牛商堂留货 - M3 回收单展示改造",
+		"> PRD: https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d §8",
+		"> Demo:",
+		"> - 列表: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-list-demo.html",
+		"> - 详情: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-detail-demo.html",
+		"> 负责人: B",
+		"> 分支: feature/ITC-75612",
+		"> 状态: 设计中",
+		"> 依赖: A 侧 `holding_item` 建表完成（表结构见 [留货规则 Wiki](https://atrenew.feishu.cn/wiki/G6wVwAt9MiS4sdk8AwwcNEtenYb)）",
+		"",
+		"## 1. 背景",
+		"",
+		"正文"
+	].join("\n"),
+	[
+		"<title id=\"title\">Note</title>",
+		"<blockquote id=\"blk-meta\">",
+		"<p>需求: ITC-75612 牛商堂留货 - M3 回收单展示改造</p>",
+		"<p>PRD: <a href=\"https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d\">https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d</a> §8</p>",
+		"<p>Demo:</p>",
+		"<ul>",
+		"<li>列表: <a href=\"https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612\">https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612</a>_牛商堂留货/recycle-order-list-demo.html</li>",
+		"<li>详情: <a href=\"https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612\">https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612</a>_牛商堂留货/recycle-order-detail-demo.html</li>",
+		"</ul>",
+		"<p>负责人: B</p>",
+		"<p>分支: feature/ITC-75612</p>",
+		"<p>状态: 设计中</p>",
+		"<p>依赖: A 侧 <code>holding_item</code> 建表完成（表结构见 <a href=\"https://atrenew.feishu.cn/wiki/G6wVwAt9MiS4sdk8AwwcNEtenYb\">留货规则 Wiki</a>）</p>",
+		"</blockquote>",
+		"<h2 id=\"blk-heading\">1. 背景</h2>",
+		"<p id=\"blk-body\">正文</p>"
+	].join("")
+);
+assert.deepEqual(metadataQuoteState.units.map((unit) => unit.blockId), ["blk-meta", "blk-heading", "blk-body"]);
 
 const overwritePlan = await buildSyncPlan({
 	doc: "doc-token",
