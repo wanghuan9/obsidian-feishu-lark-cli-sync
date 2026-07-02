@@ -13,8 +13,11 @@ await esbuild.build({
 
 const {
 	buildCommandEnvironment,
+	formatUnsupportedLarkCliVersion,
 	getDefaultLarkCliCandidates,
 	getDefaultPathEntries,
+	isSupportedLarkCliVersion,
+	parseLarkCliVersion,
 	resolveLarkCliPathFromSetting,
 	shouldUseCommandShell,
 	stripWrappingQuotes,
@@ -37,6 +40,12 @@ assert.deepEqual(withDocsApiVersion(["docs", "+media-download", "--token", "tok"
 	"tok"
 ]);
 assert.throws(() => withDocsApiVersion(["docs", "+update", "--api-version", "v1"]), /--api-version v2/);
+assert.equal(parseLarkCliVersion("lark-cli version 1.0.54"), "1.0.54");
+assert.equal(parseLarkCliVersion("1.0.53"), "1.0.53");
+assert.equal(isSupportedLarkCliVersion("1.0.53"), false);
+assert.equal(isSupportedLarkCliVersion("1.0.54"), true);
+assert.equal(isSupportedLarkCliVersion("1.0.55"), true);
+assert.equal(formatUnsupportedLarkCliVersion("1.0.53"), "lark-cli 版本过低：1.0.53，请升级到大于 1.0.53 的版本。");
 assert.equal(stripWrappingQuotes('"C:\\nvm4w\\nodejs\\lark-cli.cmd"'), "C:\\nvm4w\\nodejs\\lark-cli.cmd");
 assert.deepEqual(uniquePathEntries(["a", "", "a", "b"]), ["a", "b"]);
 

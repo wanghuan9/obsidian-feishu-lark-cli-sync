@@ -55,6 +55,8 @@ async function run() {
 		await testStateCacheTrim(workspace);
 		await testSameDocumentAliasesRunSerially(workspace);
 		await testConcurrentFailureWaitsForStartedTasks(workspace);
+		await testUnsupportedLarkCliVersionFailsEarly(workspace);
+		await testLarkCliVersionCheckPersistsAndSkips(workspace);
 		await testMacSystemNotificationOnFailure(workspace);
 		await testWindowsSystemNotificationOnFailure(workspace);
 	} finally {
@@ -655,6 +657,45 @@ async function testConcurrentFailureWaitsForStartedTasks(workspace) {
 	assert.equal(state.documents["second-token"], undefined);
 }
 
+async function testUnsupportedLarkCliVersionFailsEarly(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise" });
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	const result = await runHook(workspace, {
+		reject: false,
+		env: {
+			LARK_CLI_VERSION: "1.0.53"
+		}
+	});
+	assert.notEqual(result.exitCode, 0);
+	assert.match(result.stderr, /lark-cli 版本过低：1\.0\.53，请升级到大于 1\.0\.53 的版本。/);
+	const log = await readLog(workspace);
+	assert.match(log, /^version$/m);
+	assert.doesNotMatch(log, /docs \+fetch|docs \+update/);
+}
+
+async function testLarkCliVersionCheckPersistsAndSkips(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "overwrite" });
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	await runHook(workspace);
+	const firstLog = await readLog(workspace);
+	assert.match(firstLog, /^version$/m);
+	const settings = JSON.parse(await readFile(settingsPath(workspace), "utf8"));
+	assert.deepEqual(settings.larkCliVersionCheck, {
+		executable: larkCliExecutablePath(workspace),
+		version: "1.0.54"
+	});
+
+	await clearLog(workspace);
+	await runHook(workspace);
+	const secondLog = await readLog(workspace);
+	assert.doesNotMatch(secondLog, /^version$/m);
+	assert.match(secondLog, /docs \+update/);
+}
+
 async function testMacSystemNotificationOnFailure(workspace) {
 	await resetWorkspaceFiles(workspace);
 	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Changed"));
@@ -794,17 +835,25 @@ async function spawnHook(workspace, stdin, envOverrides) {
 
 async function writeSettings(workspace, settings) {
 	await writeFile(
-		join(workspace, ".obsidian", "plugins", "feishu-lark-cli-sync", "data.json"),
+		settingsPath(workspace),
 		JSON.stringify({
 			autoSyncMode: "pre-push",
 			titleSource: "file-name",
-			larkCliPath: process.platform === "win32"
-				? join(workspace, "bin", "lark-cli.cmd")
-				: join(workspace, "bin", "lark-cli"),
+			larkCliPath: larkCliExecutablePath(workspace),
 			...settings
 		}, null, 2),
 		"utf8"
 	);
+}
+
+function settingsPath(workspace) {
+	return join(workspace, ".obsidian", "plugins", "feishu-lark-cli-sync", "data.json");
+}
+
+function larkCliExecutablePath(workspace) {
+	return process.platform === "win32"
+		? join(workspace, "bin", "lark-cli.cmd")
+		: join(workspace, "bin", "lark-cli");
 }
 
 async function writeSyncState(workspace, doc, content) {
@@ -859,6 +908,10 @@ async function writeFakeLarkCli(workspace) {
 const fs = require("fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.LARK_CLI_LOG, args.join(" ") + "\\n");
+if (args[0] === "version") {
+  process.stdout.write(process.env.LARK_CLI_VERSION || "1.0.54");
+  process.exit(0);
+}
 const docIndex = args.indexOf("--doc");
 const doc = docIndex >= 0 ? args[docIndex + 1] : "";
 if (process.env.LARK_CLI_LOCK_DIR && args.includes("+update") && doc.includes("doc-token")) {
