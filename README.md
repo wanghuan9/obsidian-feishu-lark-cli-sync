@@ -55,7 +55,7 @@ lark-cli auth login
 lark-cli auth status
 ```
 
-请使用 `lark-cli >= 1.0.53`。旧版本可能导致创建的文档标题显示为 `Untitled`、同步报错等问题。如果版本过低，请升级：
+请使用 `lark-cli > 1.0.53`。旧版本可能导致创建的文档标题显示为 `Untitled`、同步报错等问题。如果版本过低，请升级：
 
 ```bash
 npm install -g @larksuite/cli@latest

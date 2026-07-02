@@ -7,6 +7,9 @@ import { tmpdir } from "os";
 import { promisify } from "util";
 import {
 	buildCommandEnvironment,
+	formatUnsupportedLarkCliVersion,
+	isSupportedLarkCliVersion,
+	parseLarkCliVersion,
 	resolveLarkCliPathFromSetting,
 	shouldUseCommandShell,
 	withDocsApiVersion
@@ -58,6 +61,10 @@ const WINDOWS_NOTIFICATION_EXECUTABLE_ENV = "FEISHU_LARK_CLI_SYNC_POWERSHELL_PAT
 let larkCliRequestQueue = Promise.resolve();
 let larkCliActiveRequestCount = 0;
 let lastLarkCliRequestAt = 0;
+let checkedLarkCliVersionExecutable = "";
+let pendingLarkCliVersionExecutable = "";
+let pendingLarkCliVersionCheck = null;
+let settingsPath = "";
 
 async function main() {
 	const repoRoot = await git(["rev-parse", "--show-toplevel"]);
@@ -595,10 +602,38 @@ function sanitizeFileName(name) {
 }
 
 async function readSettings(repoRoot) {
-	const settingsPath = join(repoRoot, ".obsidian", "plugins", PLUGIN_ID, "data.json");
+	settingsPath = join(repoRoot, ".obsidian", "plugins", PLUGIN_ID, "data.json");
 	try {
 		const rawSettings = await readFile(settingsPath, "utf8");
 		return JSON.parse(rawSettings);
+	} catch {
+		return {};
+	}
+}
+
+async function writeLarkCliVersionCheck(versionCheck) {
+	if (!settingsPath) {
+		return;
+	}
+
+	const tempPath = `${settingsPath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+	await mkdir(dirname(settingsPath), { recursive: true });
+	try {
+		const latestSettings = await readLatestSettingsForWrite();
+		await writeFile(tempPath, JSON.stringify({
+			...latestSettings,
+			larkCliVersionCheck: versionCheck
+		}, null, 2), "utf8");
+		await rename(tempPath, settingsPath);
+	} catch (error) {
+		await rm(tempPath, { force: true });
+		throw error;
+	}
+}
+
+async function readLatestSettingsForWrite() {
+	try {
+		return JSON.parse(await readFile(settingsPath, "utf8"));
 	} catch {
 		return {};
 	}
@@ -708,6 +743,7 @@ async function runLarkCliWithRetry(settings, args, cwd) {
 async function runLarkCliOnce(settings, args, cwd) {
 	const executable = await resolveLarkCliPath(settings);
 	const env = buildCommandEnvironment(executable);
+	await ensureSupportedLarkCliVersion(settings, executable, env);
 	const { stdout } = await execFileAsync(executable, args, {
 		cwd,
 		env,
@@ -719,6 +755,51 @@ async function runLarkCliOnce(settings, args, cwd) {
 		throw new Error(formatLarkError(result));
 	}
 	return result;
+}
+
+async function ensureSupportedLarkCliVersion(settings, executable, env) {
+	if (checkedLarkCliVersionExecutable === executable) {
+		return;
+	}
+
+	const cachedCheck = settings.larkCliVersionCheck;
+	if (cachedCheck?.executable === executable && isSupportedLarkCliVersion(cachedCheck.version)) {
+		checkedLarkCliVersionExecutable = executable;
+		return;
+	}
+
+	if (pendingLarkCliVersionCheck && pendingLarkCliVersionExecutable === executable) {
+		return await pendingLarkCliVersionCheck;
+	}
+
+	pendingLarkCliVersionExecutable = executable;
+	pendingLarkCliVersionCheck = checkLarkCliVersion(settings, executable, env);
+	try {
+		await pendingLarkCliVersionCheck;
+	} finally {
+		pendingLarkCliVersionExecutable = "";
+		pendingLarkCliVersionCheck = null;
+	}
+}
+
+async function checkLarkCliVersion(settings, executable, env) {
+	const { stdout } = await execFileAsync(executable, ["version"], {
+		env,
+		shell: shouldUseCommandShell(executable),
+		maxBuffer: 1024 * 1024
+	});
+	const version = parseLarkCliVersion(stdout);
+	if (!isSupportedLarkCliVersion(version)) {
+		throw new Error(formatUnsupportedLarkCliVersion(version, readLanguage(settings)));
+	}
+
+	const versionCheck = {
+		executable,
+		version
+	};
+	settings.larkCliVersionCheck = versionCheck;
+	await writeLarkCliVersionCheck(versionCheck);
+	checkedLarkCliVersionExecutable = executable;
 }
 
 function isLarkRateLimitError(error) {

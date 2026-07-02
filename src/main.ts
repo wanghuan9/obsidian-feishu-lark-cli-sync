@@ -43,7 +43,10 @@ import {
 } from "./lark-sync-core";
 import {
 	buildCommandEnvironment as buildLarkCommandEnvironment,
+	formatUnsupportedLarkCliVersion,
+	isSupportedLarkCliVersion,
 	LARK_CLI_COMMAND,
+	parseLarkCliVersion,
 	resolveLarkCliPathFromSetting,
 	shouldUseCommandShell,
 	uniquePathEntries,
@@ -112,6 +115,7 @@ type RemoteParentKind = "wiki" | "drive" | "my_library" | "unknown";
 interface LarkCliSyncSettings {
 	language: Language;
 	larkCliPath: string;
+	larkCliVersionCheck?: LarkCliVersionCheck;
 	targetTokenOrUrl: string;
 	folderBindings: Record<string, BoundLarkDocument>;
 	publishedFolders: Record<string, PublishedFolderBinding>;
@@ -122,6 +126,11 @@ interface LarkCliSyncSettings {
 	autoSyncDelaySeconds: number;
 	syncStrategy: SyncStrategy;
 	stateCacheRetainLimit: number;
+}
+
+interface LarkCliVersionCheck {
+	executable: string;
+	version: string;
 }
 
 interface BoundLarkDocument {
@@ -427,6 +436,9 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private cachedCommandEnvironmentShellPath = "";
 	private cachedLoginShellPath: string | null = null;
 	private pendingLoginShellPath: Promise<string> | null = null;
+	private checkedLarkCliVersionExecutable = "";
+	private pendingLarkCliVersionExecutable = "";
+	private pendingLarkCliVersionCheck: Promise<void> | null = null;
 	private larkCliRequestQueue: Promise<void> = Promise.resolve();
 	private larkCliActiveRequestCount = 0;
 	private lastLarkCliRequestAt = 0;
@@ -518,6 +530,10 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		this.clearLarkCliCommandCache();
+		await this.saveData(this.settings);
+	}
+
+	private async saveSettingsWithoutClearingCommandCache(): Promise<void> {
 		await this.saveData(this.settings);
 	}
 
@@ -2521,6 +2537,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private async runLarkCliOnce(args: string[], options: LarkCommandOptions): Promise<LarkCommandResult> {
 		const executable = await this.resolveLarkCliPath();
 		const env = await this.buildCommandEnvironment(executable);
+		await this.ensureSupportedLarkCliVersion(executable, env);
 		const { stdout } = await execFileAsync(executable, withDocsApiVersion(args), {
 			cwd: options.cwd,
 			env,
@@ -2534,6 +2551,50 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return result;
+	}
+
+	private async ensureSupportedLarkCliVersion(executable: string, env: NodeJS.ProcessEnv): Promise<void> {
+		if (this.checkedLarkCliVersionExecutable === executable) {
+			return;
+		}
+
+		const cachedCheck = this.settings.larkCliVersionCheck;
+		if (cachedCheck?.executable === executable && isSupportedLarkCliVersion(cachedCheck.version)) {
+			this.checkedLarkCliVersionExecutable = executable;
+			return;
+		}
+
+		if (this.pendingLarkCliVersionCheck && this.pendingLarkCliVersionExecutable === executable) {
+			return await this.pendingLarkCliVersionCheck;
+		}
+
+		this.pendingLarkCliVersionExecutable = executable;
+		this.pendingLarkCliVersionCheck = this.checkLarkCliVersion(executable, env);
+		try {
+			await this.pendingLarkCliVersionCheck;
+		} finally {
+			this.pendingLarkCliVersionExecutable = "";
+			this.pendingLarkCliVersionCheck = null;
+		}
+	}
+
+	private async checkLarkCliVersion(executable: string, env: NodeJS.ProcessEnv): Promise<void> {
+		const { stdout } = await execFileAsync(executable, ["version"], {
+			env,
+			shell: shouldUseCommandShell(executable),
+			maxBuffer: 1024 * 1024
+		});
+		const version = parseLarkCliVersion(stdout);
+		if (!isSupportedLarkCliVersion(version)) {
+			throw new Error(formatUnsupportedLarkCliVersion(version, this.settings.language));
+		}
+
+		this.settings.larkCliVersionCheck = {
+			executable,
+			version
+		};
+		await this.saveSettingsWithoutClearingCommandCache();
+		this.checkedLarkCliVersionExecutable = executable;
 	}
 
 	private isLarkRateLimitError(error: unknown): boolean {
@@ -2742,6 +2803,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		this.cachedLoginShellPath = null;
 		this.pendingLarkCliPath = null;
 		this.pendingLoginShellPath = null;
+		this.checkedLarkCliVersionExecutable = "";
+		this.pendingLarkCliVersionExecutable = "";
+		this.pendingLarkCliVersionCheck = null;
 	}
 
 	private getShellCandidates(): string[] {

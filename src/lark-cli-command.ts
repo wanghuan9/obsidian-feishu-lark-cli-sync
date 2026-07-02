@@ -3,7 +3,7 @@ import { homedir } from "os";
 
 export const LARK_CLI_COMMAND = "lark-cli";
 export const LARK_DOCS_API_VERSION = "v2";
-export const MIN_LARK_CLI_VERSION = "1.0.55";
+export const MIN_EXCLUSIVE_LARK_CLI_VERSION = "1.0.53";
 
 const WINDOWS_LARK_CLI_SHIMS = [
 	"C:\\nvm4w\\nodejs\\lark-cli.cmd",
@@ -196,6 +196,29 @@ export function withDocsApiVersion(args: string[]): string[] {
 	];
 }
 
+export function parseLarkCliVersion(output: string): string {
+	return output.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0] || "";
+}
+
+export function isSupportedLarkCliVersion(version: string): boolean {
+	return compareSemverCore(version, MIN_EXCLUSIVE_LARK_CLI_VERSION) > 0;
+}
+
+export function formatUnsupportedLarkCliVersion(
+	version: string,
+	language: "zh-CN" | "en" = "zh-CN"
+): string {
+	if (language === "en") {
+		return version
+			? `lark-cli ${version} is too old. Requires > ${MIN_EXCLUSIVE_LARK_CLI_VERSION}.`
+			: `lark-cli is too old. Requires > ${MIN_EXCLUSIVE_LARK_CLI_VERSION}.`;
+	}
+
+	return version
+		? `lark-cli 版本过低：${version}，需 > ${MIN_EXCLUSIVE_LARK_CLI_VERSION}。`
+		: `lark-cli 版本过低，需 > ${MIN_EXCLUSIVE_LARK_CLI_VERSION}。`;
+}
+
 export function shouldUseCommandShell(executable: string): boolean {
 	return process.platform === "win32" && /\.(cmd|bat)$/i.test(executable);
 }
@@ -231,4 +254,43 @@ function isAbsoluteCommandPath(path: string): boolean {
 function isWindowsPathEnvironment(env: Record<string, string | undefined>): boolean {
 	return process.platform === "win32"
 		|| Boolean(env.NVM_SYMLINK || env.APPDATA || env.LOCALAPPDATA);
+}
+
+function compareSemverCore(left: string, right: string): number {
+	const leftParts = parseSemverCore(left);
+	const rightParts = parseSemverCore(right);
+	if (!leftParts || !rightParts) {
+		return -1;
+	}
+
+	for (let index = 0; index < 3; index += 1) {
+		const leftPart = leftParts[index] ?? 0;
+		const rightPart = rightParts[index] ?? 0;
+		const difference = leftPart - rightPart;
+		if (difference !== 0) {
+			return difference;
+		}
+	}
+
+	return 0;
+}
+
+function parseSemverCore(version: string): [number, number, number] | null {
+	const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
+	if (!match) {
+		return null;
+	}
+
+	const major = Number.parseInt(match[1] || "", 10);
+	const minor = Number.parseInt(match[2] || "", 10);
+	const patch = Number.parseInt(match[3] || "", 10);
+	if (!Number.isFinite(major) || !Number.isFinite(minor) || !Number.isFinite(patch)) {
+		return null;
+	}
+
+	return [
+		major,
+		minor,
+		patch
+	];
 }
