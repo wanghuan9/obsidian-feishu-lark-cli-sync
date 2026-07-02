@@ -151,25 +151,31 @@ interface LarkDocumentUpdateResult extends Partial<BoundLarkDocument> {
 	revisionId?: number;
 }
 
+interface LarkCommandDocument {
+	document_id?: string;
+	url?: string;
+	revision_id?: number;
+	content?: string;
+}
+
+interface LarkCommandFolder {
+	token?: string;
+	url?: string;
+}
+
+interface LarkCommandNode {
+	node_token?: string;
+	obj_token?: string;
+	url?: string;
+}
+
 interface LarkCommandResult {
 	ok: boolean;
 	data?: {
 		token?: string;
-			document?: {
-				document_id?: string;
-				url?: string;
-				revision_id?: number;
-				content?: string;
-			};
-		folder?: {
-			token?: string;
-			url?: string;
-		};
-		node?: {
-			node_token?: string;
-			obj_token?: string;
-			url?: string;
-		};
+		document?: LarkCommandDocument;
+		folder?: LarkCommandFolder;
+		node?: LarkCommandNode;
 		node_token?: string;
 		obj_token?: string;
 		url?: string;
@@ -2544,7 +2550,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			shell: shouldUseCommandShell(executable),
 			maxBuffer: 20 * 1024 * 1024
 		});
-		const result = JSON.parse(stdout) as LarkCommandResult;
+		const result = this.parseLarkCommandResult(stdout);
 
 		if (!result.ok) {
 			throw new Error(this.formatLarkError(result));
@@ -2647,28 +2653,115 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private formatStderr(stderr: string): string {
-		try {
-			const parsed = JSON.parse(stderr) as LarkCommandResult;
-			if (parsed.error?.message) {
-				return this.formatLarkError(parsed);
-			}
-		} catch {
-			// stderr is often plain text from node or shell.
+		const parsed = this.tryParseLarkCommandResult(stderr);
+		if (parsed?.error?.message) {
+			return this.formatLarkError(parsed);
 		}
 
 		const embeddedJson = this.extractEmbeddedJson(stderr);
 		if (embeddedJson) {
-			try {
-				const parsed = JSON.parse(embeddedJson) as LarkCommandResult;
-				if (parsed.error?.message) {
-					return this.formatLarkError(parsed);
-				}
-			} catch {
-				// Keep the original stderr when the embedded block is not lark-cli JSON.
+			const embeddedResult = this.tryParseLarkCommandResult(embeddedJson);
+			if (embeddedResult?.error?.message) {
+				return this.formatLarkError(embeddedResult);
 			}
 		}
 
 		return stderr.slice(0, MAX_STDERR_LENGTH);
+	}
+
+	private parseLarkCommandResult(rawJson: string): LarkCommandResult {
+		const parsed: unknown = JSON.parse(rawJson);
+		if (!this.isLarkCommandResult(parsed)) {
+			throw new Error("lark-cli returned an invalid JSON response.");
+		}
+
+		return parsed;
+	}
+
+	private tryParseLarkCommandResult(rawJson: string): LarkCommandResult | null {
+		try {
+			const parsed: unknown = JSON.parse(rawJson);
+			return this.isLarkCommandResult(parsed) ? parsed : null;
+		} catch {
+			return null;
+		}
+	}
+
+	private isLarkCommandResult(value: unknown): value is LarkCommandResult {
+		if (!this.isRecord(value) || typeof value.ok !== "boolean") {
+			return false;
+		}
+
+		const data = value.data;
+		const error = value.error;
+		return (data === undefined || this.isLarkCommandData(data))
+			&& (error === undefined || this.isLarkCommandError(error));
+	}
+
+	private isLarkCommandData(value: unknown): value is LarkCommandResult["data"] {
+		if (!this.isRecord(value)) {
+			return false;
+		}
+
+		return this.isOptionalString(value.token)
+			&& this.isOptionalString(value.node_token)
+			&& this.isOptionalString(value.obj_token)
+			&& this.isOptionalString(value.url)
+			&& this.isOptionalLarkCommandDocument(value.document)
+			&& this.isOptionalLarkCommandFolder(value.folder)
+			&& this.isOptionalLarkCommandNode(value.node)
+			&& this.isOptionalLarkCommandNode(value.wiki_node);
+	}
+
+	private isLarkCommandError(value: unknown): value is LarkCommandResult["error"] {
+		return this.isRecord(value)
+			&& this.isOptionalString(value.message)
+			&& this.isOptionalString(value.hint);
+	}
+
+	private isOptionalLarkCommandDocument(value: unknown): value is LarkCommandDocument | undefined {
+		if (value === undefined) {
+			return true;
+		}
+
+		return this.isRecord(value)
+			&& this.isOptionalString(value.document_id)
+			&& this.isOptionalString(value.url)
+			&& this.isOptionalNumber(value.revision_id)
+			&& this.isOptionalString(value.content);
+	}
+
+	private isOptionalLarkCommandFolder(value: unknown): value is LarkCommandFolder | undefined {
+		if (value === undefined) {
+			return true;
+		}
+
+		return this.isRecord(value)
+			&& this.isOptionalString(value.token)
+			&& this.isOptionalString(value.url);
+	}
+
+	private isOptionalLarkCommandNode(value: unknown): value is LarkCommandNode | undefined {
+		if (value === undefined) {
+			return true;
+		}
+
+		return this.isRecord(value)
+			&& this.isOptionalString(value.node_token)
+			&& this.isOptionalString(value.obj_token)
+			&& this.isOptionalString(value.url);
+	}
+
+	private isRecord(value: unknown): value is Record<string, unknown> {
+		return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+	}
+
+	private isOptionalString(value: unknown): value is string | undefined {
+		return value === undefined || typeof value === "string";
+	}
+
+	private isOptionalNumber(value: unknown): value is number | undefined {
+		return value === undefined || typeof value === "number";
 	}
 
 	private extractEmbeddedJson(text: string): string {
