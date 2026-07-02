@@ -842,7 +842,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 			throw new Error(this.t("noticeNoDesktopVaultPath"));
 		}
 
-		return join(vaultPath, ".obsidian", "plugins", this.manifest.id);
+		return join(vaultPath, this.app.vault.configDir, "plugins", this.manifest.id);
 	}
 
 	private getLarkSyncStatePath(): string | null {
@@ -851,7 +851,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 			return null;
 		}
 
-		return join(vaultPath, ".obsidian", "plugins", this.manifest.id, LARK_SYNC_STATE_FILE_NAME);
+		return join(vaultPath, this.app.vault.configDir, "plugins", this.manifest.id, LARK_SYNC_STATE_FILE_NAME);
 	}
 
 	private async loadLarkSyncState(): Promise<LarkSyncStateFile> {
@@ -928,7 +928,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}
 
 		if (callbackError) {
-			throw callbackError;
+			throw this.toError(callbackError);
 		}
 	}
 
@@ -1329,7 +1329,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		await Promise.all(executing);
 		if (firstError) {
-			throw firstError;
+			throw this.toError(firstError);
 		}
 	}
 
@@ -2613,15 +2613,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private formatCommandError(error: unknown): string {
-		if (error instanceof Error && "stderr" in error) {
-			const stderr = String((error as Error & { stderr?: string }).stderr || "").trim();
+		if (this.hasCommandStderr(error)) {
+			const stderr = String(error.stderr || "").trim();
 			if (stderr) {
 				return this.formatStderr(stderr);
 			}
 		}
 
-		if (error instanceof Error && "stdout" in error) {
-			const stdout = String((error as Error & { stdout?: string }).stdout || "").trim();
+		if (this.hasCommandStdout(error)) {
+			const stdout = String(error.stdout || "").trim();
 			if (stdout) {
 				return this.formatStderr(stdout);
 			}
@@ -2632,6 +2632,18 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return String(error);
+	}
+
+	private hasCommandStderr(error: unknown): error is Error & { stderr: unknown } {
+		return error instanceof Error && "stderr" in error;
+	}
+
+	private hasCommandStdout(error: unknown): error is Error & { stdout: unknown } {
+		return error instanceof Error && "stdout" in error;
+	}
+
+	private toError(error: unknown): Error {
+		return error instanceof Error ? error : new Error(String(error));
 	}
 
 	private formatStderr(stderr: string): string {

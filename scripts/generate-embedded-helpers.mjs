@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "fs/promises";
-import builtins from "builtin-modules";
+import { builtinModules } from "node:module";
 import esbuild from "esbuild";
 
 await esbuild.build({
@@ -13,7 +13,7 @@ await esbuild.build({
 	target: "node20",
 	treeShaking: true,
 	external: [
-		...builtins
+		...builtinModules
 	]
 });
 
@@ -28,7 +28,7 @@ await esbuild.build({
 	target: "node20",
 	treeShaking: true,
 	external: [
-		...builtins
+		...builtinModules
 	]
 });
 
