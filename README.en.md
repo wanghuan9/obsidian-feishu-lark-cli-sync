@@ -51,7 +51,7 @@ lark-cli auth login
 lark-cli auth status
 ```
 
-Use `lark-cli > 1.0.53`. Older versions may create documents with the title `Untitled` or cause sync errors. If your version is too old, upgrade it:
+Use `lark-cli >= 1.0.53`. Older versions may create documents with the title `Untitled` or cause sync errors. If your version is too old, upgrade it:
 
 ```bash
 npm install -g @larksuite/cli@latest

@@ -1,32 +1,36 @@
 # Feishu Lark CLI Sync
 
-An Obsidian desktop plugin that publishes and syncs Markdown notes to Feishu/Lark Docs through the local `lark-cli`.
+[简体中文](./README.md) | [English](./README.en.md)
 
-It is useful when Obsidian is your local source of truth and Feishu/Lark is where the team reads, comments, and collaborates.
+通过本机 `lark-cli` 将 Obsidian Markdown 笔记发布、同步到飞书 / Lark 云文档的桌面端插件。
 
-## Features
+适合把 Obsidian 作为本地写作源，再把内容同步给团队在飞书 / Lark 中阅读、协作、评论的工作流。
 
-- **Single-note sync**: publish or update the current Markdown note as a Feishu/Lark Docx document.
-- **Folder sync**: right-click a folder and sync all Markdown files while preserving the folder hierarchy.
-- **Block-level incremental sync**: update only changed blocks for small edits, without rewriting the whole document, so Feishu/Lark history can be preserved.
-- **Full overwrite sync**: clear and rewrite the remote document when the local Markdown file should be the complete source of truth.
-- **Automatic sync strategy**: use the automatic strategy by default; small changes are synced incrementally, while large or complex changes fall back to full overwrite when safe incremental sync is not possible.
-- **Auto sync triggers**: sync after save, or sync bound notes before `git push` through a Git `pre-push` hook.
-- **Internal link rewriting**: uploaded content rewrites Markdown and Obsidian internal links into Feishu/Lark document references.
+Feishu Lark CLI Sync publishes and synchronizes Obsidian Markdown notes to Feishu / Lark cloud documents through the local `lark-cli`. It is designed for users who write in Obsidian and share the rendered result with their team in Feishu / Lark.
 
-## Installation
+## 功能
 
-### Obsidian Community Plugins (Recommended)
+- **单篇同步**：将当前 Markdown 笔记创建或同步为飞书 / Lark Docx 文档。
+- **目录同步**：右键目录同步全部 Markdown 文件，并在飞书 / Lark 中保留目录层级。
+- **按块增量同步**：小改动只更新变动块，不重写整篇文档，可保留飞书 / Lark 的操作历史。
+- **全量覆盖同步**：需要完全以本地 Markdown 为准时，可清空并重写远端文档。
+- **自动同步策略**：默认使用自动策略；小改动按块增量同步，改动较大、结构复杂或无法安全增量时自动降级为全量覆盖。
+- **自动同步触发**：支持保存后同步，也支持 Git `pre-push` hook 在推送代码前同步已绑定文档。
+- **内部链接改写**：上传到飞书 / Lark 的内容会把目录内 Markdown 链接、Obsidian Wiki 链接改写成远端文档引用。
 
-After the plugin is published to the community plugin browser:
+## 安装
 
-1. Open Obsidian -> Settings -> Community plugins -> Browse.
-2. Search for `Feishu Lark CLI Sync`.
-3. Click Install and enable the plugin.
+### Obsidian 社区插件市场（推荐）
 
-### Manual Installation
+插件发布到社区插件市场后，推荐通过 Obsidian 直接安装：
 
-If the plugin is not available from the community plugin browser, install it from source with the install script:
+1. 打开 Obsidian → 设置 → 社区插件 → 浏览。
+2. 搜索 `Feishu Lark CLI Sync`。
+3. 点击安装并启用。
+
+### 手动安装
+
+如果暂时无法通过社区插件市场安装，可以下载源码后使用一键安装脚本：
 
 ```bash
 git clone https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync.git
@@ -34,13 +38,15 @@ cd obsidian-feishu-lark-cli-sync
 ./install.sh "/path/to/your/vault"
 ```
 
-Replace `/path/to/your/vault` with your Obsidian vault path. If no path is provided, the script will prompt for it.
+把 `/path/to/your/vault` 替换成你的 Obsidian 仓库路径。不传路径时，脚本会提示你输入。
 
-After installation, restart Obsidian and enable `Feishu Lark CLI Sync` in Settings -> Community plugins.
+安装完成后，重启 Obsidian，在设置 → 社区插件中启用 `Feishu Lark CLI Sync`。
 
-## Prerequisites
+启用后可以在插件设置页配置 `lark-cli`、默认上传位置、同步策略和 Git hook。
 
-Install and log in to `lark-cli` first:
+## 使用前准备
+
+先安装并登录 `lark-cli`：
 
 ```bash
 npm install -g @larksuite/cli
@@ -49,32 +55,32 @@ lark-cli auth login
 lark-cli auth status
 ```
 
-Use `lark-cli > 1.0.53`. Older versions may create documents with the title `Untitled` or cause sync errors. If your version is too old, upgrade it:
+请使用 `lark-cli >= 1.0.53`。旧版本可能导致创建的文档标题显示为 `Untitled`、同步报错等问题。如果版本过低，请升级：
 
 ```bash
 npm install -g @larksuite/cli@latest
 ```
 
-If Obsidian cannot find `lark-cli`, set the absolute path in the plugin settings:
+如果 Obsidian 找不到 `lark-cli`，在插件设置里的 `lark-cli 路径` 填写绝对路径：
 
 ```bash
 which lark-cli
 ```
 
-## Usage
+## 使用
 
-### Single-note Sync
+### 单篇同步
 
-Open a Markdown file, then click the ribbon icon or use the file context menu:
+打开 Markdown 文件后，可以点击左侧栏图标，或在文件右键菜单中选择：
 
-- `Lark: Sync to Feishu/Lark`: create a document when no binding exists, or update the bound remote document.
-- `Lark: Overwrite to Feishu/Lark`: clear and rewrite the remote document with the local Markdown content.
+- `Lark: 同步到飞书`：没有绑定时创建新文档；已有绑定时更新远端文档。
+- `Lark: 覆盖到飞书`：强制以本地 Markdown 为准，清空并重写远端文档。
 
-![Obsidian actions](./docs/images/obsidian-actions.png)
+![Obsidian 操作入口](./docs/images/obsidian-actions.png)
 
-Sync is one-way from Obsidian to Feishu/Lark. The local Markdown note is the source.
+同步方向是单向的：**Obsidian Markdown 是源内容，飞书 / Lark 文档是输出结果**。
 
-Default binding example:
+默认绑定信息示例：
 
 ```yaml
 ---
@@ -82,73 +88,75 @@ lark_doc_url: "https://example.feishu.cn/docx/xxxx"
 ---
 ```
 
-### Folder Sync
+### 目录同步
 
-Right-click a folder and choose `Lark: Sync folder to Feishu/Lark`. The plugin creates the matching remote hierarchy, syncs Markdown files, and rewrites internal links in the uploaded content.
+对目录右键，选择 `Lark: 同步目录到飞书`。插件会在飞书 / Lark 中创建对应目录层级，同步目录下的 Markdown 文件，并把目录内链接改写成远端文档引用。
 
-Supported link forms:
+支持的链接形式：
 
 ```md
-Detailed design: 02-database.md
-[Component design](03-components.md#section)
-[[04-api|API design]]
+详细设计见 02-database.md。
+[组件设计](03-components.md#section)
+[[04-api|接口设计]]
 ```
 
-Local notes remain unchanged.
+本地 Markdown 不会因为链接改写而被修改。
 
-### Auto Sync
+### 自动同步
 
-Auto sync only handles already bound documents. For first-time use, run `Lark: Sync to Feishu/Lark` in Obsidian to publish the document and write the `lark_doc_url` binding; subsequent save-after-sync or Git hook sync can then find and update that file.
+自动同步只处理已绑定文档。首次使用时，需要先在 Obsidian 中执行 `Lark: 同步到飞书` 发布文档，并写入 `lark_doc_url`
+绑定链接；后续保存后同步或 Git hook 才能识别并同步该文件。
 
-#### Trigger Modes
+#### 触发方式
 
-Choose one mode in settings:
+在设置中可选择：
 
-- `Off`: manual sync only.
-- `Sync after save`: while Obsidian is running, sync bound Markdown notes after file save events.
-- `Git pre-push hook`: sync bound Markdown notes before `git push`.
+- `关闭`：只手动同步。
+- `保存后同步`：Obsidian 运行期间，已绑定 Markdown 文件发生保存事件后自动同步。
+- `Git pre-push hook`：执行 `git push` 前同步已绑定 Markdown 文件。
 
-#### When It Takes Effect
+#### 生效场景
 
-`Sync after save` depends on Obsidian receiving file change events, so it works in these cases:
+`保存后同步` 依赖 Obsidian 捕获文件变更事件，适用于以下场景：
 
-- Editing and saving directly in Obsidian: auto sync is triggered.
-- Editing with another editor while Obsidian is running and watching the vault: auto sync can be triggered.
-- Editing with another editor while Obsidian is not running or the vault is not open: auto sync is not triggered.
+- 在 Obsidian 中直接编辑并保存：可以自动同步。
+- 用其他编辑器修改文件，但 Obsidian 同时保持运行并监听该 vault：可以自动同步。
+- 用其他编辑器修改文件，且 Obsidian 未运行或未打开该 vault：不会触发自动同步。
 
-`Git pre-push hook` depends only on the Git push command. It does not require Obsidian or any editor to be running, and is useful when sync should be part of the publishing flow before `git push`.
+`Git pre-push hook` 只依赖 Git 推送命令，不依赖 Obsidian 或其他编辑器是否运行。适合把同步作为提交发布流程的一部分，确保执行
+`git push` 前先同步已绑定文档。
 
-For Git hook mode, click `Install hook` in the `Git Hook` settings section. If sync fails, the current `git push` is blocked.
+使用 Git hook 时，在设置页 `Git Hook` 区域点击 `安装 hook`。如果同步失败，本次 `git push` 会被阻断。
 
-## Settings
+## 设置
 
-- `Default target`: Wiki URL, wiki node token, folder token, or blank for the personal library.
-- `Title source`: use the first Markdown heading or the file name.
-- `Write binding to frontmatter`: store the remote document URL in note frontmatter.
-- `Sync strategy`: use automatic strategy by default; small changes use incremental sync, while large, complex, or unsafe incremental changes automatically fall back to full overwrite.
-- `Sync state cache`: controls how many document states are kept for safe precise sync.
+- `默认上传位置`：Wiki URL、Wiki 节点 token、文件夹 token；留空则上传到个人文档库。
+- `标题来源`：使用第一个 Markdown 标题，或使用文件名。
+- `写入 frontmatter 绑定信息`：发布后把飞书文档 URL 写入笔记 frontmatter。
+- `同步策略`：默认自动策略；小改动增量同步，改动较大、结构复杂或无法安全增量时自动全量覆盖。
+- `同步状态缓存`：控制安全增量同步状态最多保留多少篇文档。
 
-## Incremental Sync And Feishu/Lark History
+## 增量同步与飞书历史记录
 
-The plugin splits Markdown into top-level content blocks and records the mapping between those blocks and Feishu/Lark document block ids. Later syncs prefer incremental updates for changed blocks, such as replacing a paragraph, inserting a new paragraph, or deleting an outdated paragraph.
+插件会把 Markdown 拆成顶层内容块，并记录这些块与飞书 / Lark 文档 block id 的映射。后续同步时，优先只对发生变化的块执行增量更新，例如替换某个段落、插入新增段落或删除过期段落。
 
-This block-level sync does not clear and rewrite the whole document, so Feishu/Lark can keep the corresponding edit history, recent update records, and collaboration context. The remote document is rewritten only when you choose `Overwrite to Feishu/Lark`, or when the automatic strategy decides that the change is too large, too complex, or unsafe for incremental sync.
+这种按块同步不会清空并重写整篇文档，因此飞书 / Lark 侧能继续保留对应的操作历史、最近更新记录和协作上下文。只有在选择 `全量覆盖`，或自动策略判断本次改动较大、结构复杂、无法安全增量时，才会降级为重写远端文档。
 
-![Feishu/Lark history preservation](./docs/images/lark-history.png)
+![飞书历史记录保留效果](./docs/images/lark-history.png)
 
-Safe precise sync state is stored at:
+安全增量同步状态保存在：
 
 ```text
 .obsidian/plugins/feishu-lark-cli-sync/lark-sync-state.json
 ```
 
-## Notes
+## 说明
 
-- The plugin uses the local `lark-cli` and does not store App Secret, access token, or OAuth configuration.
-- Auto sync only handles already bound notes and never auto-publishes unbound files.
-- If the remote Feishu/Lark document was edited manually, merge those edits back into the local Markdown file first. This plugin treats local Markdown as the source of truth.
+- 插件通过本机 `lark-cli` 调用飞书 / Lark，不保存 App Secret、access token 或 OAuth 配置。
+- 自动同步只处理已绑定文档，不会自动发布未绑定笔记。
+- 如果飞书 / Lark 上有人工修改，请先合并回本地 Markdown；本插件以本地内容为准。
 
-## Development
+## 开发
 
 ```bash
 npm install
@@ -156,14 +164,14 @@ npm run build
 npm test
 ```
 
-After changing source files, run `npm run build` again to regenerate `main.js` and `lark-sync-core.mjs`.
+修改源码后，需要重新执行 `npm run build` 生成 `main.js` 和 `lark-sync-core.mjs`。
 
-Install to a local vault:
+本地安装到指定 vault：
 
 ```bash
 ./install.sh "/path/to/your/vault"
 ```
 
-## License
+## 许可
 
 MIT License
