@@ -669,7 +669,7 @@ async function testUnsupportedLarkCliVersionFailsEarly(workspace) {
 		}
 	});
 	assert.notEqual(result.exitCode, 0);
-	assert.match(result.stderr, /lark-cli 版本过低：1\.0\.53，需 > 1\.0\.53。/);
+	assert.match(result.stderr, /lark-cli 版本过低：1\.0\.53，请升级到大于 1\.0\.53 的版本。/);
 	const log = await readLog(workspace);
 	assert.match(log, /^version$/m);
 	assert.doesNotMatch(log, /docs \+fetch|docs \+update/);

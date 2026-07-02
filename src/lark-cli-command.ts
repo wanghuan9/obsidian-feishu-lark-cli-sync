@@ -210,13 +210,13 @@ export function formatUnsupportedLarkCliVersion(
 ): string {
 	if (language === "en") {
 		return version
-			? `lark-cli ${version} is too old. Requires > ${MIN_EXCLUSIVE_LARK_CLI_VERSION}.`
-			: `lark-cli is too old. Requires > ${MIN_EXCLUSIVE_LARK_CLI_VERSION}.`;
+			? `lark-cli ${version} is too old. Please upgrade to a version greater than ${MIN_EXCLUSIVE_LARK_CLI_VERSION}.`
+			: `lark-cli is too old. Please upgrade to a version greater than ${MIN_EXCLUSIVE_LARK_CLI_VERSION}.`;
 	}
 
 	return version
-		? `lark-cli 版本过低：${version}，需 > ${MIN_EXCLUSIVE_LARK_CLI_VERSION}。`
-		: `lark-cli 版本过低，需 > ${MIN_EXCLUSIVE_LARK_CLI_VERSION}。`;
+		? `lark-cli 版本过低：${version}，请升级到大于 ${MIN_EXCLUSIVE_LARK_CLI_VERSION} 的版本。`
+		: `lark-cli 版本过低，请升级到大于 ${MIN_EXCLUSIVE_LARK_CLI_VERSION} 的版本。`;
 }
 
 export function shouldUseCommandShell(executable: string): boolean {
