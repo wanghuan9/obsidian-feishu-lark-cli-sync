@@ -4,13 +4,10 @@ export const CORE_OBSIDIAN_ASSETS = [
 	"styles.css"
 ];
 
-export const HELPER_RELEASE_ASSETS = [
+export const HELPER_GENERATED_FILES = [
 	"lark-sync-core.mjs",
 	"lark-cli-command.mjs",
 	"sync-pre-push.mjs"
 ];
 
-export const RELEASE_ASSETS = [
-	...CORE_OBSIDIAN_ASSETS,
-	...HELPER_RELEASE_ASSETS
-];
+export const RELEASE_ASSETS = CORE_OBSIDIAN_ASSETS;

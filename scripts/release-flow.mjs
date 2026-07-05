@@ -4,7 +4,7 @@ import { access, mkdir, readFile, stat, writeFile } from "fs/promises";
 import { constants } from "fs";
 import readline from "readline/promises";
 import { promisify } from "util";
-import { CORE_OBSIDIAN_ASSETS, RELEASE_ASSETS } from "./release-assets.mjs";
+import { CORE_OBSIDIAN_ASSETS, HELPER_GENERATED_FILES, RELEASE_ASSETS } from "./release-assets.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -338,6 +338,7 @@ async function validateLocalReleasePackage(version) {
 	validateVersionFiles(version, packageJson, manifest, versions);
 	validateManifest(manifest);
 	await validateAssetFiles(CORE_OBSIDIAN_ASSETS, "Obsidian core asset");
+	await validateAssetFiles(HELPER_GENERATED_FILES, "Generated helper file");
 	await validateAssetFiles(RELEASE_ASSETS, "Release asset");
 }
 
@@ -374,7 +375,7 @@ async function validateAssetFiles(files, label) {
 }
 
 async function stageReleaseFiles(releaseNotesPath) {
-	await run("git", ["add", "--", ...VERSION_FILES, releaseNotesPath, ...RELEASE_ASSETS]);
+	await run("git", ["add", "--", ...VERSION_FILES, releaseNotesPath, ...RELEASE_ASSETS, ...HELPER_GENERATED_FILES]);
 }
 
 async function validateRemoteReleasePackage(version) {
@@ -400,7 +401,8 @@ async function assertReleaseFilesUnchanged(releaseNotesPath) {
 	const files = [
 		...VERSION_FILES,
 		releaseNotesPath,
-		...RELEASE_ASSETS
+		...RELEASE_ASSETS,
+		...HELPER_GENERATED_FILES
 	];
 	const result = await runResult("git", ["diff", "--quiet", "--", ...files], {
 		silent: true
