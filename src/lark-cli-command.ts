@@ -1,5 +1,6 @@
 import { delimiter, dirname, join, win32 } from "path";
 import { homedir } from "os";
+import process from "process";
 
 export const LARK_CLI_COMMAND = "lark-cli";
 export const LARK_DOCS_API_VERSION = "v2";

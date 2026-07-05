@@ -5,6 +5,7 @@ import { access, chmod, copyFile, mkdir, readFile, rename, stat } from "fs/promi
 import { mkdtemp, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { homedir, tmpdir } from "os";
+import process from "process";
 import { promisify } from "util";
 import {
 	getRemoteParentPath as getSelectedRemoteParentPath,
@@ -15,7 +16,6 @@ import {
 	buildSyncPlan,
 	buildUpdateCommandArgs,
 	createDocumentSyncStateFromRemote,
-	createContentHash,
 	createEmptySyncStateFile,
 	createIncompleteDocumentSyncStateFromMarkdown,
 	createSyncContentSignature,
@@ -45,7 +45,6 @@ import {
 	buildCommandEnvironment as buildLarkCommandEnvironment,
 	formatUnsupportedLarkCliVersion,
 	isSupportedLarkCliVersion,
-	LARK_CLI_COMMAND,
 	parseLarkCliVersion,
 	resolveLarkCliPathFromSetting,
 	shouldUseCommandShell,
@@ -437,7 +436,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private cachedLarkCliPath: string | null = null;
 	private cachedLarkCliPathSetting = "";
 	private pendingLarkCliPath: Promise<string> | null = null;
-	private cachedCommandEnvironment: NodeJS.ProcessEnv | null = null;
+	private cachedCommandEnvironment: Record<string, string | undefined> | null = null;
 	private cachedCommandEnvironmentExecutable = "";
 	private cachedCommandEnvironmentShellPath = "";
 	private cachedLoginShellPath: string | null = null;
@@ -511,10 +510,11 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		const savedSettings = await this.loadData() as Partial<LarkCliSyncSettings> | null;
-		const savedSettingsWithoutTrimThreshold = {
+		const savedData: unknown = await this.loadData();
+		const savedSettings = this.isRecord(savedData) ? savedData as Partial<LarkCliSyncSettings> : {};
+		const savedSettingsWithoutTrimThreshold: Partial<LarkCliSyncSettings> & { stateCacheTrimThreshold?: unknown } = {
 			...(savedSettings || {})
-		} as Partial<LarkCliSyncSettings> & { stateCacheTrimThreshold?: unknown };
+		};
 		delete savedSettingsWithoutTrimThreshold.stateCacheTrimThreshold;
 		this.settings = {
 			...DEFAULT_SETTINGS,
@@ -868,7 +868,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 
 		try {
 			const rawState = await readFile(statePath, "utf8");
-			const state = JSON.parse(rawState) as Partial<LarkSyncStateFile>;
+			const state: unknown = JSON.parse(rawState);
 			if (this.isValidLarkSyncStateFile(state)) {
 				return {
 					version: 1,
@@ -986,13 +986,15 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}
 	}
 
-	private isValidLarkSyncStateFile(state: Partial<LarkSyncStateFile>): state is LarkSyncStateFile {
-		if (state.version !== 1 || !state.documents || Array.isArray(state.documents) || typeof state.documents !== "object") {
+	private isValidLarkSyncStateFile(state: unknown): state is LarkSyncStateFile {
+		if (!this.isRecord(state)
+			|| state.version !== 1
+			|| !this.isRecord(state.documents)) {
 			return false;
 		}
 
 		return Object.values(state.documents).every((documentState) => {
-			return Boolean(documentState)
+			return this.isRecord(documentState)
 				&& typeof documentState.doc === "string"
 				&& typeof documentState.contentHash === "string"
 				&& Array.isArray(documentState.units)
@@ -1001,7 +1003,7 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	private isFileNotFoundError(error: unknown): boolean {
-		return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
+		return error instanceof Error && "code" in error && error.code === "ENOENT";
 	}
 
 	private trimSyncStateCacheIfNeeded(state: LarkSyncStateFile): LarkSyncStateFile {
@@ -1015,7 +1017,11 @@ export default class LarkCliSyncPlugin extends Plugin {
 	}
 
 	private normalizePositiveInteger(value: unknown, fallback: number): number {
-		const numericValue = typeof value === "number" ? value : Number.parseInt(String(value || ""), 10);
+		const numericValue = typeof value === "number"
+			? value
+			: typeof value === "string"
+				? Number.parseInt(value, 10)
+				: Number.NaN;
 		if (!Number.isFinite(numericValue)) {
 			return fallback;
 		}
@@ -2620,14 +2626,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private formatCommandError(error: unknown): string {
 		if (this.hasCommandStderr(error)) {
-			const stderr = String(error.stderr || "").trim();
+			const stderr = this.commandOutputToString(error.stderr).trim();
 			if (stderr) {
 				return this.formatStderr(stderr);
 			}
 		}
 
 		if (this.hasCommandStdout(error)) {
-			const stdout = String(error.stdout || "").trim();
+			const stdout = this.commandOutputToString(error.stdout).trim();
 			if (stdout) {
 				return this.formatStderr(stdout);
 			}
@@ -2646,6 +2652,16 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private hasCommandStdout(error: unknown): error is Error & { stdout: unknown } {
 		return error instanceof Error && "stdout" in error;
+	}
+
+	private commandOutputToString(output: unknown): string {
+		if (typeof output === "string") {
+			return output;
+		}
+		if (Buffer.isBuffer(output)) {
+			return output.toString("utf8");
+		}
+		return "";
 	}
 
 	private toError(error: unknown): Error {
@@ -2970,7 +2986,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		this.selfWrittenPaths.set(file.path, Date.now());
-		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
 			delete frontmatter.lark_doc;
 			delete frontmatter[FRONTMATTER_TOKEN_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];

@@ -273,7 +273,11 @@ export function trimSyncStateCache(
 }
 
 export function normalizeStateCacheRetainLimit(value: unknown, fallback = 100): number {
-	const numericValue = typeof value === "number" ? value : Number.parseInt(String(value || ""), 10);
+	const numericValue = typeof value === "number"
+		? value
+		: typeof value === "string"
+			? Number.parseInt(value, 10)
+			: Number.NaN;
 	if (!Number.isFinite(numericValue)) {
 		return fallback;
 	}
@@ -283,7 +287,11 @@ export function normalizeStateCacheRetainLimit(value: unknown, fallback = 100): 
 
 export function normalizeStateCacheTrimThreshold(retainLimit: number, trimThreshold?: unknown): number {
 	if (trimThreshold !== undefined) {
-		const numericValue = typeof trimThreshold === "number" ? trimThreshold : Number.parseInt(String(trimThreshold || ""), 10);
+		const numericValue = typeof trimThreshold === "number"
+			? trimThreshold
+			: typeof trimThreshold === "string"
+				? Number.parseInt(trimThreshold, 10)
+				: Number.NaN;
 		if (Number.isFinite(numericValue)) {
 			return Math.max(retainLimit + 1, Math.floor(numericValue));
 		}
@@ -829,7 +837,7 @@ function createDocumentSyncStateFromParsedRemote(
 		);
 	}
 
-	const units = markdownUnits.map((unit, index) => {
+	const units: Array<SyncUnitState | null> = markdownUnits.map((unit, index) => {
 		const remoteUnit = remoteUnits[index];
 		if (!remoteUnit || remoteUnit.kind !== unit.kind) {
 			return null;
@@ -861,7 +869,7 @@ function createDocumentSyncStateFromParsedRemote(
 		contentHash,
 		titleBlockId,
 		titleHash,
-		units: units as SyncUnitState[],
+		units: units.filter((unit): unit is SyncUnitState => Boolean(unit)),
 		updatedAt: new Date().toISOString()
 	};
 }
@@ -2254,7 +2262,7 @@ function readMarkdownBlockKind(line: string): string {
 		return "list";
 	}
 
-	if (/^\s*\|/.test(line)) {
+	if (/^\s*[|]/.test(line)) {
 		return "table";
 	}
 
@@ -2290,9 +2298,6 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 			continue;
 		}
 
-		const depth = stack.length;
-		const parentTagName = stack[depth - 1]?.tagName;
-		const grandparentTagName = stack[depth - 2]?.tagName;
 		const blockId = readRemoteBlockId(attributes);
 		const normalizedKind = normalizeRemoteSyncUnitKind(tagName, attributes);
 		const isTopLevelBlock = blockId
@@ -2510,7 +2515,7 @@ function createXmlTableFingerprint(content: string): string {
 
 function normalizeFingerprintText(content: string): string {
 	return decodeXmlEntities(content)
-		.replace(/\\([~`*_{}\[\]()#+\-.!|<>])/g, "$1")
+		.replace(/\\([~`*_{[\]}()#+\-.!|<>])/g, "$1")
 		.replace(/`([^`]+)`/g, "$1")
 		.replace(/\*\*([^*]+)\*\*/g, "$1")
 		.replace(/__([^_]+)__/g, "$1")

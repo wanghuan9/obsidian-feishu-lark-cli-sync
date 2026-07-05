@@ -605,7 +605,8 @@ async function readSettings(repoRoot) {
 	settingsPath = join(repoRoot, ".obsidian", "plugins", PLUGIN_ID, "data.json");
 	try {
 		const rawSettings = await readFile(settingsPath, "utf8");
-		return JSON.parse(rawSettings);
+		const settings = JSON.parse(rawSettings);
+		return isRecord(settings) ? settings : {};
 	} catch {
 		return {};
 	}
@@ -633,7 +634,8 @@ async function writeLarkCliVersionCheck(versionCheck) {
 
 async function readLatestSettingsForWrite() {
 	try {
-		return JSON.parse(await readFile(settingsPath, "utf8"));
+		const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+		return isRecord(settings) ? settings : {};
 	} catch {
 		return {};
 	}
@@ -750,7 +752,7 @@ async function runLarkCliOnce(settings, args, cwd) {
 		shell: shouldUseCommandShell(executable),
 		maxBuffer: 20 * 1024 * 1024
 	});
-	const result = JSON.parse(stdout);
+	const result = parseLarkCommandResult(stdout);
 	if (!result.ok) {
 		throw new Error(formatLarkError(result));
 	}
@@ -853,10 +855,17 @@ function formatLarkError(result) {
 }
 
 function formatCommandError(error) {
-	if (error instanceof Error && "stderr" in error) {
-		const stderr = String(error.stderr || "").trim();
+	if (hasCommandStderr(error)) {
+		const stderr = commandOutputToString(error.stderr).trim();
 		if (stderr) {
 			return stderr.slice(0, MAX_STDERR_LENGTH);
+		}
+	}
+
+	if (hasCommandStdout(error)) {
+		const stdout = commandOutputToString(error.stdout).trim();
+		if (stdout) {
+			return stdout.slice(0, MAX_STDERR_LENGTH);
 		}
 	}
 
@@ -865,6 +874,46 @@ function formatCommandError(error) {
 	}
 
 	return String(error);
+}
+
+function hasCommandStderr(error) {
+	return error instanceof Error && "stderr" in error;
+}
+
+function hasCommandStdout(error) {
+	return error instanceof Error && "stdout" in error;
+}
+
+function commandOutputToString(output) {
+	if (typeof output === "string") {
+		return output;
+	}
+	if (Buffer.isBuffer(output)) {
+		return output.toString("utf8");
+	}
+	return "";
+}
+
+function parseLarkCommandResult(rawJson) {
+	const parsed = JSON.parse(rawJson);
+	if (!isLarkCommandResult(parsed)) {
+		throw new Error("lark-cli returned an invalid JSON response.");
+	}
+
+	return parsed;
+}
+
+function isLarkCommandResult(value) {
+	if (!isRecord(value) || typeof value.ok !== "boolean") {
+		return false;
+	}
+
+	return (value.data === undefined || isRecord(value.data))
+		&& (value.error === undefined || isRecord(value.error));
+}
+
+function isRecord(value) {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function readLanguage(settings) {
@@ -967,7 +1016,7 @@ async function readStdin() {
 }
 
 main().catch(async (error) => {
-	const message = error.message || String(error);
+	const message = error instanceof Error ? error.message : String(error);
 	console.error(message);
 	await notifySystemFailure(message);
 	process.exit(1);
