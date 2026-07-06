@@ -7,6 +7,7 @@ import { tmpdir } from "os";
 import { promisify } from "util";
 import {
 	buildCommandEnvironment,
+	formatMissingLarkCli,
 	formatUnsupportedLarkCliVersion,
 	isSupportedLarkCliVersion,
 	parseLarkCliVersion,
@@ -53,6 +54,7 @@ const REMOTE_STATE_REFRESH_DELAY_MS = readPositiveIntegerEnv(
 const LARK_CLI_MAX_CONCURRENT_REQUESTS = 3;
 const LARK_CLI_REQUEST_INTERVAL_MS = 350;
 const LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
+const LARK_CLI_VERSION_ARGS = [["-version"], ["-v"]];
 const SYSTEM_NOTIFICATION_TITLE = "Feishu Lark CLI Sync";
 const SYSTEM_NOTIFICATION_TIMEOUT_MS = 3000;
 const MAC_NOTIFICATION_EXECUTABLE_ENV = "FEISHU_LARK_CLI_SYNC_OSASCRIPT_PATH";
@@ -785,12 +787,17 @@ async function ensureSupportedLarkCliVersion(settings, executable, env) {
 }
 
 async function checkLarkCliVersion(settings, executable, env) {
-	const { stdout } = await execFileAsync(executable, ["version"], {
-		env,
-		shell: shouldUseCommandShell(executable),
-		maxBuffer: 1024 * 1024
-	});
-	const version = parseLarkCliVersion(stdout);
+	let versionOutput;
+	try {
+		versionOutput = await readLarkCliVersionOutput(executable, env);
+	} catch (error) {
+		if (isExecutableLaunchError(error)) {
+			throw new Error(formatMissingLarkCli(readLanguage(settings)));
+		}
+		throw error;
+	}
+
+	const version = parseLarkCliVersion(versionOutput);
 	if (!isSupportedLarkCliVersion(version)) {
 		throw new Error(formatUnsupportedLarkCliVersion(version, readLanguage(settings)));
 	}
@@ -802,6 +809,55 @@ async function checkLarkCliVersion(settings, executable, env) {
 	settings.larkCliVersionCheck = versionCheck;
 	await writeLarkCliVersionCheck(versionCheck);
 	checkedLarkCliVersionExecutable = executable;
+}
+
+async function readLarkCliVersionOutput(executable, env) {
+	let lastError = null;
+	let onlyUnsupportedVersionCommands = true;
+	for (const args of LARK_CLI_VERSION_ARGS) {
+		try {
+			const { stdout, stderr } = await execFileAsync(executable, args, {
+				env,
+				shell: shouldUseCommandShell(executable),
+				maxBuffer: 1024 * 1024
+			});
+			return `${commandOutputToString(stdout)}\n${commandOutputToString(stderr)}`;
+		} catch (error) {
+			lastError = error;
+			if (!isUnsupportedVersionCommandError(error)) {
+				onlyUnsupportedVersionCommands = false;
+			}
+		}
+	}
+
+	if (onlyUnsupportedVersionCommands) {
+		return "";
+	}
+	throw toError(lastError);
+}
+
+function isExecutableLaunchError(error) {
+	if (!(error instanceof Error) || !("code" in error)) {
+		return false;
+	}
+	return error.code === "ENOENT" || error.code === "EACCES";
+}
+
+function isUnsupportedVersionCommandError(error) {
+	const message = [
+		error instanceof Error ? error.message : String(error),
+		hasCommandStderr(error) ? commandOutputToString(error.stderr) : "",
+		hasCommandStdout(error) ? commandOutputToString(error.stdout) : ""
+	].join("\n").toLowerCase();
+	return message.includes("unknown command")
+		|| message.includes("unknown flag")
+		|| message.includes("unknown shorthand flag")
+		|| message.includes("unknown option")
+		|| message.includes("unrecognized option");
+}
+
+function toError(error) {
+	return error instanceof Error ? error : new Error(String(error));
 }
 
 function isLarkRateLimitError(error) {

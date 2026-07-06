@@ -43,6 +43,7 @@ import {
 } from "./lark-sync-core";
 import {
 	buildCommandEnvironment as buildLarkCommandEnvironment,
+	formatMissingLarkCli,
 	formatUnsupportedLarkCliVersion,
 	isSupportedLarkCliVersion,
 	parseLarkCliVersion,
@@ -104,6 +105,7 @@ const FOLDER_SYNC_PARALLEL_LIMIT = 3;
 const LARK_CLI_MAX_CONCURRENT_REQUESTS = 3;
 const LARK_CLI_REQUEST_INTERVAL_MS = 350;
 const LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
+const LARK_CLI_VERSION_ARGS = [["-version"], ["-v"]];
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
 
 type Language = "zh-CN" | "en";
@@ -2591,12 +2593,17 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async checkLarkCliVersion(executable: string, env: NodeJS.ProcessEnv): Promise<void> {
-		const { stdout } = await execFileAsync(executable, ["version"], {
-			env,
-			shell: shouldUseCommandShell(executable),
-			maxBuffer: 1024 * 1024
-		});
-		const version = parseLarkCliVersion(stdout);
+		let versionOutput: string;
+		try {
+			versionOutput = await this.readLarkCliVersionOutput(executable, env);
+		} catch (error) {
+			if (this.isExecutableLaunchError(error)) {
+				throw new Error(formatMissingLarkCli(this.settings.language));
+			}
+			throw error;
+		}
+
+		const version = parseLarkCliVersion(versionOutput);
 		if (!isSupportedLarkCliVersion(version)) {
 			throw new Error(formatUnsupportedLarkCliVersion(version, this.settings.language));
 		}
@@ -2607,6 +2614,51 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		};
 		await this.saveSettingsWithoutClearingCommandCache();
 		this.checkedLarkCliVersionExecutable = executable;
+	}
+
+	private async readLarkCliVersionOutput(executable: string, env: NodeJS.ProcessEnv): Promise<string> {
+		let lastError: unknown = null;
+		let onlyUnsupportedVersionCommands = true;
+		for (const args of LARK_CLI_VERSION_ARGS) {
+			try {
+				const { stdout, stderr } = await execFileAsync(executable, args, {
+					env,
+					shell: shouldUseCommandShell(executable),
+					maxBuffer: 1024 * 1024
+				});
+				return `${this.commandOutputToString(stdout)}\n${this.commandOutputToString(stderr)}`;
+			} catch (error) {
+				lastError = error;
+				if (!this.isUnsupportedVersionCommandError(error)) {
+					onlyUnsupportedVersionCommands = false;
+				}
+			}
+		}
+
+		if (onlyUnsupportedVersionCommands) {
+			return "";
+		}
+		throw this.toError(lastError);
+	}
+
+	private isExecutableLaunchError(error: unknown): boolean {
+		if (!(error instanceof Error) || !("code" in error)) {
+			return false;
+		}
+		return error.code === "ENOENT" || error.code === "EACCES";
+	}
+
+	private isUnsupportedVersionCommandError(error: unknown): boolean {
+		const message = [
+			error instanceof Error ? error.message : String(error),
+			this.hasCommandStderr(error) ? this.commandOutputToString(error.stderr) : "",
+			this.hasCommandStdout(error) ? this.commandOutputToString(error.stdout) : ""
+		].join("\n").toLowerCase();
+		return message.includes("unknown command")
+			|| message.includes("unknown flag")
+			|| message.includes("unknown shorthand flag")
+			|| message.includes("unknown option")
+			|| message.includes("unrecognized option");
 	}
 
 	private isLarkRateLimitError(error: unknown): boolean {

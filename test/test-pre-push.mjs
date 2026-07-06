@@ -41,13 +41,13 @@ async function run() {
 		await testPreciseRefreshRetriesStaleRemote(workspace);
 		await testPreciseRefreshUsesUpdateRevisionBeforeFetchingWithIds(workspace);
 		await testPreciseRefreshFailsOnStaleRemote(workspace);
-			await testPreciseRefreshAllowsNormalizedRemoteMarkdown(workspace);
-			await testPreciseSkipAllowsNormalizedRemoteMarkdown(workspace);
-			await testPreciseSkipRepairsRemoteHeadingDrift(workspace);
-			await testAutoOverwriteRefreshesStateBeforeUpdate(workspace);
-			await testAutoUsesAcceptablePartialStateForSmallChange(workspace);
-			await testPreciseSkipDeletesRemoteInsertedHeading(workspace);
-			await testPreciseRefreshBeforeUpdateAvoidsDuplicateInsert(workspace);
+		await testPreciseRefreshAllowsNormalizedRemoteMarkdown(workspace);
+		await testPreciseSkipAllowsNormalizedRemoteMarkdown(workspace);
+		await testPreciseSkipRepairsRemoteHeadingDrift(workspace);
+		await testAutoOverwriteRefreshesStateBeforeUpdate(workspace);
+		await testAutoUsesAcceptablePartialStateForSmallChange(workspace);
+		await testPreciseSkipDeletesRemoteInsertedHeading(workspace);
+		await testPreciseRefreshBeforeUpdateAvoidsDuplicateInsert(workspace);
 		await testOverwriteDoesNotPersistEmptyState(workspace);
 		await testOverwriteUpdates(workspace);
 		await testUnboundFilesDoNotBlock(workspace);
@@ -55,7 +55,9 @@ async function run() {
 		await testStateCacheTrim(workspace);
 		await testSameDocumentAliasesRunSerially(workspace);
 		await testConcurrentFailureWaitsForStartedTasks(workspace);
+		await testMissingLarkCliFailsWithInstallPrompt(workspace);
 		await testUnsupportedLarkCliVersionFailsEarly(workspace);
+		await testLarkCliVersionFallsBackToVersionFlag(workspace);
 		await testLarkCliVersionCheckPersistsAndSkips(workspace);
 		await testMacSystemNotificationOnFailure(workspace);
 		await testWindowsSystemNotificationOnFailure(workspace);
@@ -671,8 +673,40 @@ async function testUnsupportedLarkCliVersionFailsEarly(workspace) {
 	assert.notEqual(result.exitCode, 0);
 	assert.match(result.stderr, /lark-cli 版本过低：1\.0\.53，请升级到大于 1\.0\.53 的版本。/);
 	const log = await readLog(workspace);
-	assert.match(log, /^version$/m);
+	assert.match(log, /^-version$/m);
 	assert.doesNotMatch(log, /docs \+fetch|docs \+update/);
+}
+
+async function testMissingLarkCliFailsWithInstallPrompt(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeSettings(workspace, {
+		autoSyncMode: "pre-push",
+		larkCliPath: join(workspace, "bin", "missing-lark-cli"),
+		syncStrategy: "overwrite"
+	});
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	const result = await runHook(workspace, { reject: false });
+	assert.notEqual(result.exitCode, 0);
+	assert.match(result.stderr, /未检测到 lark-cli，请先安装 lark-cli。/);
+	const log = await readLog(workspace);
+	assert.equal(log, "");
+}
+
+async function testLarkCliVersionFallsBackToVersionFlag(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "overwrite" });
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_VERSION_COMMAND_UNSUPPORTED: "1"
+		}
+	});
+	const log = await readLog(workspace);
+	assert.match(log, /^-version$/m);
+	assert.match(log, /^-v$/m);
+	assert.match(log, /docs \+update/);
 }
 
 async function testLarkCliVersionCheckPersistsAndSkips(workspace) {
@@ -682,7 +716,7 @@ async function testLarkCliVersionCheckPersistsAndSkips(workspace) {
 	await clearLog(workspace);
 	await runHook(workspace);
 	const firstLog = await readLog(workspace);
-	assert.match(firstLog, /^version$/m);
+	assert.match(firstLog, /^-version$/m);
 	const settings = JSON.parse(await readFile(settingsPath(workspace), "utf8"));
 	assert.deepEqual(settings.larkCliVersionCheck, {
 		executable: larkCliExecutablePath(workspace),
@@ -692,7 +726,7 @@ async function testLarkCliVersionCheckPersistsAndSkips(workspace) {
 	await clearLog(workspace);
 	await runHook(workspace);
 	const secondLog = await readLog(workspace);
-	assert.doesNotMatch(secondLog, /^version$/m);
+	assert.doesNotMatch(secondLog, /^-version$/m);
 	assert.match(secondLog, /docs \+update/);
 }
 
@@ -908,7 +942,15 @@ async function writeFakeLarkCli(workspace) {
 const fs = require("fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.LARK_CLI_LOG, args.join(" ") + "\\n");
-if (args[0] === "version") {
+if (args[0] === "-version") {
+  if (process.env.LARK_CLI_VERSION_COMMAND_UNSUPPORTED) {
+    process.stderr.write('unknown option "-version"');
+    process.exit(1);
+  }
+  process.stdout.write(process.env.LARK_CLI_VERSION || "1.0.54");
+  process.exit(0);
+}
+if (args[0] === "-v") {
   process.stdout.write(process.env.LARK_CLI_VERSION || "1.0.54");
   process.exit(0);
 }

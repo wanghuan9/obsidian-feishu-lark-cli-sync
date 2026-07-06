@@ -220,6 +220,12 @@ export function formatUnsupportedLarkCliVersion(
 		: `lark-cli 版本过低，请升级到大于 ${MIN_EXCLUSIVE_LARK_CLI_VERSION} 的版本。`;
 }
 
+export function formatMissingLarkCli(language: "zh-CN" | "en" = "zh-CN"): string {
+	return language === "en"
+		? "lark-cli was not found. Please install lark-cli first."
+		: "未检测到 lark-cli，请先安装 lark-cli。";
+}
+
 export function shouldUseCommandShell(executable: string): boolean {
 	return process.platform === "win32" && /\.(cmd|bat)$/i.test(executable);
 }
