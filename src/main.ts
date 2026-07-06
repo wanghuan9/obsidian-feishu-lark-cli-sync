@@ -172,7 +172,7 @@ interface LarkCommandResult {
 	ok: boolean;
 	data?: {
 		token?: string;
-		document?: LarkCommandDocument;
+		"document"?: LarkCommandDocument;
 		folder?: LarkCommandFolder;
 		node?: LarkCommandNode;
 		node_token?: string;
@@ -1401,9 +1401,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			const result = await this.runLarkCli(args, { cwd: tempFile.directory });
-			const document = result.data?.document;
-			const token = document?.document_id;
-			const url = document?.url;
+			const commandDocument = result.data?.["document"];
+			const token = commandDocument?.document_id;
+			const url = commandDocument?.url;
 
 			if (!token || !url) {
 				throw new Error(this.t("errorNoDocumentToken"));
@@ -1523,12 +1523,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				const result = await this.runLarkCli(commandArgs, {
 					cwd: tempFile.directory
 				});
-				const document = result.data?.document;
-				nextRevisionId = document?.revision_id;
+				const commandDocument = result.data?.["document"];
+				nextRevisionId = commandDocument?.revision_id;
 				latestDocument = {
-					token: document?.document_id || latestDocument.token,
-					url: document?.url || latestDocument.url,
-					revisionId: document?.revision_id ?? latestDocument.revisionId
+					token: commandDocument?.document_id || latestDocument.token,
+					url: commandDocument?.url || latestDocument.url,
+					revisionId: commandDocument?.revision_id ?? latestDocument.revisionId
 				};
 			}
 
@@ -1943,9 +1943,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			"--json"
 		]);
 		return {
-			doc: result.data?.document?.document_id,
-			content: result.data?.document?.content || "",
-			revisionId: result.data?.document?.revision_id
+			doc: result.data?.["document"]?.document_id,
+			content: result.data?.["document"]?.content || "",
+			revisionId: result.data?.["document"]?.revision_id
 		};
 	}
 
@@ -1964,9 +1964,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			"--json"
 		]);
 		return {
-			doc: result.data?.document?.document_id,
-			content: result.data?.document?.content || "",
-			revisionId: result.data?.document?.revision_id
+			doc: result.data?.["document"]?.document_id,
+			content: result.data?.["document"]?.content || "",
+			revisionId: result.data?.["document"]?.revision_id
 		};
 	}
 
@@ -2386,9 +2386,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			const result = await this.runLarkCli(args, { cwd: tempFile.directory });
-			const document = result.data?.document;
-			const token = result.data?.wiki_node?.node_token || document?.document_id;
-			const url = document?.url || result.data?.url || "";
+			const commandDocument = result.data?.["document"];
+			const token = result.data?.wiki_node?.node_token || commandDocument?.document_id;
+			const url = commandDocument?.url || result.data?.url || "";
 
 			if (!token || !url) {
 				throw new Error(this.t("errorNoDocumentToken"));
@@ -2723,7 +2723,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			&& this.isOptionalString(value.node_token)
 			&& this.isOptionalString(value.obj_token)
 			&& this.isOptionalString(value.url)
-			&& this.isOptionalLarkCommandDocument(value.document)
+			&& this.isOptionalLarkCommandDocument(value["document"])
 			&& this.isOptionalLarkCommandFolder(value.folder)
 			&& this.isOptionalLarkCommandNode(value.node)
 			&& this.isOptionalLarkCommandNode(value.wiki_node);
