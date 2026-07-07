@@ -174,6 +174,8 @@ interface LarkCommandResult {
 	ok: boolean;
 	data?: {
 		token?: string;
+		comment_id?: string;
+		reply_id?: string;
 		"document"?: LarkCommandDocument;
 		folder?: LarkCommandFolder;
 		node?: LarkCommandNode;
@@ -577,6 +579,10 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}
 
 		await this.overwriteSyncFile(file);
+	}
+
+	async runLarkCliCommand(args: string[], options: LarkCommandOptions = {}): Promise<LarkCommandResult> {
+		return await this.runLarkCli(args, options);
 	}
 
 	private async syncFile(file: TFile): Promise<void> {
@@ -2848,6 +2854,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return this.isOptionalString(value.token)
+			&& this.isOptionalString(value.comment_id)
+			&& this.isOptionalString(value.reply_id)
 			&& this.isOptionalString(value.node_token)
 			&& this.isOptionalString(value.obj_token)
 			&& this.isOptionalString(value.url)
