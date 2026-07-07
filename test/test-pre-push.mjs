@@ -175,7 +175,7 @@ async function testPreciseBootstrapBlocksWithoutBlockIds(workspace) {
 	assert.match(result.stderr, /缺少远端 block 映射/);
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+fetch .*--detail with-ids/);
-	assert.doesNotMatch(log, /docs \+fetch .*--doc-format markdown/);
+	assert.match(log, /docs \+fetch .*--doc-format markdown/);
 	assert.doesNotMatch(log, /docs \+update/);
 	const state = await readSyncState(workspace);
 	assert.equal(state.documents["doc-token"], undefined);
@@ -358,18 +358,20 @@ async function testPreciseRefreshFailsOnStaleRemote(workspace) {
 	}]);
 	await clearLog(workspace);
 	const result = await runHook(workspace, {
+		reject: false,
 		env: {
 			LARK_CLI_FETCH_INSERTED_AFTER_UPDATE: "1",
 			LARK_CLI_STALE_MARKDOWN_FETCHES: "9"
 		}
 	});
-	assert.equal(result.exitCode, 0);
+	assert.notEqual(result.exitCode, 0);
+	assert.match(result.stderr, /remote update is not visible yet/);
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+update .*--command block_insert_after/);
 	assert.match(log, /--detail with-ids/);
 	const state = await readSyncState(workspace);
 	assert.equal(state.documents["doc-token"].units[0].blockId, "blk-1");
-	assert.equal(state.documents["doc-token"].units.length >= 1, true);
+	assert.equal(state.documents["doc-token"].units.length, 1);
 }
 
 async function testPreciseRefreshAllowsNormalizedRemoteMarkdown(workspace) {
@@ -445,7 +447,9 @@ async function testPreciseSkipRepairsRemoteHeadingDrift(workspace) {
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+fetch .*--doc-format markdown/);
 	assert.match(log, /docs \+fetch .*--detail with-ids/);
-	assert.match(log, /docs \+update .*--command block_replace .*--block-id blk-heading .*--revision-id 4/);
+	assert.match(log, /docs \+update .*--command block_replace .*--doc-format xml .*--block-id blk-heading .*--revision-id 4/);
+	assert.doesNotMatch(log, /--command block_insert_after .*--block-id blk-heading/);
+	assert.doesNotMatch(log, /--command block_delete .*--block-id blk-heading/);
 	assert.doesNotMatch(log, /--command overwrite/);
 }
 
@@ -475,7 +479,7 @@ async function testPreciseSkipDeletesRemoteInsertedHeading(workspace) {
 
 async function testAutoOverwriteRefreshesStateBeforeUpdate(workspace) {
 	await resetWorkspaceFiles(workspace);
-	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "## Title22\n\nBody"));
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "## Title\n\nBody"));
 	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
 	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "auto", language: "en" });
 	await writeSyncStateWithUnits(workspace, "https://example.feishu.cn/docx/doc-token", "# bound\n\nOld1\n\nOld2\n\nOld3\n\nOld4\n\nOld5\n\nOld6\n\nOld7\n\nOld8\n\nOld9", [
@@ -497,7 +501,9 @@ async function testAutoOverwriteRefreshesStateBeforeUpdate(workspace) {
 	});
 	const log = await readLog(workspace);
 	assert.match(log, /docs \+fetch .*--detail with-ids/);
-	assert.match(log, /docs \+update .*--command block_replace .*--block-id blk-heading/);
+	assert.match(log, /docs \+update .*--command block_replace .*--doc-format xml .*--block-id blk-heading/);
+	assert.doesNotMatch(log, /--command block_insert_after .*--block-id blk-heading/);
+	assert.doesNotMatch(log, /--command block_delete .*--block-id blk-heading/);
 	assert.doesNotMatch(log, /--command overwrite/);
 }
 
@@ -523,9 +529,11 @@ async function testAutoUsesAcceptablePartialStateForSmallChange(workspace) {
 		}
 	});
 	const log = await readLog(workspace);
-	assert.match(log, /docs \+update .*--command block_replace .*--block-id blk-heading/);
+	assert.match(log, /docs \+update .*--command block_replace .*--doc-format xml .*--block-id blk-heading/);
+	assert.doesNotMatch(log, /--command block_insert_after .*--block-id blk-heading/);
+	assert.doesNotMatch(log, /--command block_delete .*--block-id blk-heading/);
 	assert.match(log, /docs \+fetch .*--detail with-ids/);
-	assert.doesNotMatch(log, /docs \+fetch .*--doc-format markdown/);
+	assert.match(log, /docs \+fetch .*--doc-format markdown/);
 	assert.doesNotMatch(log, /--command overwrite/);
 }
 
@@ -574,10 +582,14 @@ async function testCanonicalStateKey(workspace) {
 		}
 	});
 	await clearLog(workspace);
-	await runHook(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_RETURN_DOC_TOKEN_FOR_URL: "1"
+		}
+	});
 	const state = await readSyncState(workspace);
-	assert.equal(state.documents["doc-token"], undefined);
-	assert.equal(state.documents["https://example.feishu.cn/docx/doc-token"].contentHash, "legacy-hash");
+	assert.ok(state.documents["doc-token"]);
+	assert.deepEqual(state.documents["doc-token"].units.map((unit) => unit.blockId), ["blk-1"]);
 	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
 	await clearLog(workspace);
 	await runHook(workspace);
@@ -600,12 +612,17 @@ async function testStateCacheTrim(workspace) {
 	});
 	await writeSyncStateRaw(workspace, createSizedSyncState(16));
 	await clearLog(workspace);
-	await runHook(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_RETURN_DOC_TOKEN_FOR_URL: "1"
+		}
+	});
 	const state = await readSyncState(workspace);
 	assert.equal(Object.keys(state.documents).length, 10);
 	assert.equal(state.documents["old-doc-000"], undefined);
-	assert.ok(state.documents["old-doc-006"]);
-	assert.equal(state.documents["doc-token"], undefined);
+	assert.equal(state.documents["old-doc-006"], undefined);
+	assert.ok(state.documents["old-doc-007"]);
+	assert.ok(state.documents["doc-token"]);
 }
 
 async function testSameDocumentAliasesRunSerially(workspace) {
@@ -625,7 +642,8 @@ async function testSameDocumentAliasesRunSerially(workspace) {
 	await clearLog(workspace);
 	const result = await runHook(workspace, {
 		env: {
-			LARK_CLI_LOCK_DIR: workspace
+			LARK_CLI_LOCK_DIR: workspace,
+			LARK_CLI_RETURN_DOC_TOKEN_FOR_URL: "1"
 		}
 	});
 	assert.equal(result.exitCode, 0);
@@ -656,7 +674,7 @@ async function testConcurrentFailureWaitsForStartedTasks(workspace) {
 	assert.match(log, /--doc https:\/\/example\.feishu\.cn\/docx\/doc-token/);
 	assert.match(log, /--doc https:\/\/example\.feishu\.cn\/docx\/second-token/);
 	const state = await readSyncState(workspace);
-	assert.equal(state.documents["second-token"], undefined);
+	assert.deepEqual(state.documents["second-token"].units.map((unit) => unit.blockId), ["blk-1"]);
 }
 
 async function testUnsupportedLarkCliVersionFailsEarly(workspace) {
@@ -793,12 +811,19 @@ async function testOverwriteUpdates(workspace) {
 
 async function testOverwriteDoesNotPersistEmptyState(workspace) {
 	await resetWorkspaceFiles(workspace);
+	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Changed"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
 	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "overwrite", language: "en" });
 	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
 	await clearLog(workspace);
-	await runHook(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_FETCH_CHANGED_AFTER_UPDATE: "1",
+			LARK_CLI_RETURN_DOC_TOKEN_FOR_URL: "1"
+		}
+	});
 	const state = await readSyncState(workspace);
-	assert.equal(state.documents["doc-token"], undefined);
+	assert.deepEqual(state.documents["doc-token"].units.map((unit) => unit.blockId), ["blk-1"]);
 }
 
 async function testUnboundFilesDoNotBlock(workspace) {
@@ -956,6 +981,8 @@ if (args[0] === "-v") {
 }
 const docIndex = args.indexOf("--doc");
 const doc = docIndex >= 0 ? args[docIndex + 1] : "";
+const safeDocKey = doc.replace(/[^A-Za-z0-9_-]/g, "_");
+const overwrittenMarkdownPath = process.env.LARK_CLI_LOG + ".overwrite-" + safeDocKey + ".md";
 if (process.env.LARK_CLI_LOCK_DIR && args.includes("+update") && doc.includes("doc-token")) {
   const lockPath = process.env.LARK_CLI_LOCK_DIR + "/doc-token.lock";
   if (fs.existsSync(lockPath)) {
@@ -993,8 +1020,12 @@ if (args.includes("+fetch")) {
     shouldReturnStaleWithIds = count < staleWithIdsLimit;
   }
   let markdown = "# bound\\n\\nBody";
-  if (doc.includes("second-token")) {
+  if (!isWithIds && fs.existsSync(overwrittenMarkdownPath)) {
+    markdown = fs.readFileSync(overwrittenMarkdownPath, "utf8");
+  } else if (doc.includes("second-token")) {
     markdown = "# second\\n\\nSecond";
+  } else if (process.env.LARK_CLI_FETCH_MANY_BLOCKS) {
+    markdown = "# bound\\n\\n## Title 22\\n\\n" + Array.from({ length: 100 }, (_, index) => "Body " + index).join("\\n\\n");
   } else if (process.env.LARK_CLI_FETCH_CHANGED_AFTER_UPDATE && fs.existsSync(changedAfterUpdatePath)) {
     markdown = "# bound\\n\\nChanged";
   } else if (shouldReturnStaleMarkdown) {
@@ -1012,7 +1043,13 @@ if (args.includes("+fetch")) {
   let revisionId = Number(process.env.LARK_CLI_BASE_REVISION_ID || "4");
   if (isWithIds && !process.env.LARK_CLI_NO_BLOCK_IDS) {
     content = "<title id=\\"doc-title\\">bound</title><p id=\\"blk-1\\">Body</p>";
-    if (process.env.LARK_CLI_FETCH_MANY_BLOCKS) {
+    if (fs.existsSync(overwrittenMarkdownPath)) {
+      const overwritten = fs.readFileSync(overwrittenMarkdownPath, "utf8");
+      const lines = overwritten.split(/\\r?\\n/);
+      const title = (lines.find((line) => /^#\\s+/.test(line)) || "# bound").replace(/^#\\s+/, "");
+      const body = lines.filter((line) => line.trim() && !/^#\\s+/.test(line)).join("\\n");
+      content = "<title id=\\"doc-title\\">" + title + "</title><p id=\\"blk-1\\">" + body + "</p>";
+    } else if (process.env.LARK_CLI_FETCH_MANY_BLOCKS) {
       content = "<title id=\\"doc-title\\">bound</title><h2 id=\\"blk-heading\\">Title 22</h2>"
         + Array.from({ length: 100 }, (_, index) => "<p id=\\"blk-" + index + "\\">Body " + index + "</p>").join("");
     }
@@ -1037,6 +1074,13 @@ if (args.includes("+fetch")) {
   }
   process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc, content, revision_id: revisionId } } }));
 } else {
+  const commandIndex = args.indexOf("--command");
+  const command = commandIndex >= 0 ? args[commandIndex + 1] : "";
+  const contentIndex = args.indexOf("--content");
+  const contentArg = contentIndex >= 0 ? args[contentIndex + 1] : "";
+  if (command === "overwrite" && contentArg.startsWith("@")) {
+    fs.writeFileSync(overwrittenMarkdownPath, fs.readFileSync(contentArg.slice(1), "utf8"));
+  }
   if (process.env.LARK_CLI_FETCH_CHANGED_AFTER_UPDATE && args.includes("+update")) {
     fs.writeFileSync(changedAfterUpdatePath, "1");
   }

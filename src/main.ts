@@ -1469,7 +1469,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return plan.mode === "precise" && plan.commands.some((command) => {
-			return command.command === "block_insert_after";
+			return command.command === "block_insert_after"
+				&& !this.isBlockDeletedByPlan(plan.commands, command.blockId);
+		});
+	}
+
+	private isBlockDeletedByPlan(commands: SyncPlan["commands"], blockId: string): boolean {
+		return commands.some((command) => {
+			return command.command === "block_delete"
+				&& command.blockId.split(",").includes(blockId);
 		});
 	}
 
@@ -1546,8 +1554,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					doc,
 					latestDocument,
 					content,
-					context,
-					this.getPlanNextState(plan)
+					context
 				);
 			} else {
 				await this.saveSyncPlanStateForDocument(doc, latestDocument, plan, context.stateKeys || []);
@@ -1591,20 +1598,17 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		doc: string,
 		document: LarkDocumentUpdateResult,
 		expectedMarkdown: string,
-		context: { mode: SyncMode; path: string; stateKeys?: string[] },
-		fallbackState?: LarkSyncStateFile["documents"][string]
+		context: { mode: SyncMode; path: string; stateKeys?: string[] }
 	): Promise<void> {
 		const resolvedDoc = document.token || document.url || doc;
 		const stateKeys = [doc, document.token || "", document.url || "", ...(context.stateKeys || [])];
-		await this.saveRemoteDocumentState(resolvedDoc, stateKeys, {
+		await this.saveRemoteDocumentStateFromBaselineAfterExpectedRevision(
+			resolvedDoc,
+			stateKeys,
 			expectedMarkdown,
-			expectedRevisionId: document.revisionId,
-			fallbackState,
-			fallbackMarkdown: expectedMarkdown,
-			allowIncompleteFallback: context.mode !== "pre-push",
-			context,
-			refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
-		});
+			document.revisionId,
+			context
+		);
 	}
 
 	private async saveCreatedDocumentState(binding: BoundLarkDocument): Promise<void> {
@@ -1645,6 +1649,54 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			revisionId: remoteXml.revisionId
 		};
 		await this.saveRemoteDocumentStateFromFetched(remoteMarkdown, remoteXml, [doc, binding.token, binding.url], baselineMarkdown);
+	}
+
+	private async saveRemoteDocumentStateFromBaselineAfterExpectedRevision(
+		doc: string,
+		stateKeys: string[],
+		baselineMarkdown: string,
+		expectedRevisionId: number | undefined,
+		context: { mode: SyncMode; path: string }
+	): Promise<void> {
+		const refreshPolicy = this.getRemoteStateRefreshPolicy(context.mode);
+		const expectedSignature = await createSyncContentSignature(baselineMarkdown);
+		for (let attempt = 0; attempt < refreshPolicy.attempts; attempt += 1) {
+			const remoteXml = await this.fetchLarkDocumentWithIds(doc);
+			if (expectedRevisionId !== undefined
+				&& (remoteXml.revisionId === undefined || remoteXml.revisionId < expectedRevisionId)) {
+				if (attempt < refreshPolicy.attempts - 1) {
+					await this.sleep(refreshPolicy.delayMs);
+				}
+				continue;
+			}
+
+			const actualRemoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
+			if (!await this.isRemoteMarkdownContentEquivalent(actualRemoteMarkdown.content, expectedSignature)) {
+				if (attempt < refreshPolicy.attempts - 1) {
+					await this.sleep(refreshPolicy.delayMs);
+				}
+				continue;
+			}
+
+			const stateMarkdown = {
+				doc: remoteXml.doc,
+				content: baselineMarkdown,
+				revisionId: remoteXml.revisionId
+			};
+			const state = await this.createRemoteDocumentState(doc, stateMarkdown, remoteXml, baselineMarkdown);
+			if (isDocumentStateBlockMappingAcceptable(state)) {
+				await this.persistDocumentState(state, [doc, ...stateKeys]);
+				return;
+			}
+
+			if (attempt < refreshPolicy.attempts - 1) {
+				await this.sleep(refreshPolicy.delayMs);
+			}
+		}
+
+		throw new LocalizedSyncError(
+			this.formatSyncFailure(context.mode, context.path, "remote-update-not-visible")
+		);
 	}
 
 	private async saveRemoteDocumentStateFromFetched(
@@ -1792,9 +1844,21 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			return undefined;
 		}
 
-		const remoteMarkdown = expectedMarkdown
-			? { doc: remoteXml.doc, content: expectedMarkdown, revisionId: remoteXml.revisionId }
-			: await this.fetchLarkDocumentMarkdown(doc);
+		const remoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
+		if (remoteMarkdown.revisionId !== undefined && remoteMarkdown.revisionId < expectedRevisionId) {
+			return undefined;
+		}
+
+		if (expectedMarkdown && expectedSignature) {
+			const isExpectedContentVisible = await this.isRemoteMarkdownContentEquivalent(
+				remoteMarkdown.content,
+				expectedSignature
+			);
+			if (!isExpectedContentVisible) {
+				return undefined;
+			}
+		}
+
 		const state = await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml, expectedMarkdown);
 		if (expectedMarkdown && !isDocumentStateBlockMappingAcceptable(state)) {
 			return undefined;
@@ -1811,6 +1875,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			this.fetchLarkDocumentMarkdown(doc),
 			this.fetchLarkDocumentWithIds(doc)
 		]);
+		if (baselineMarkdown) {
+			const expectedSignature = await createSyncContentSignature(baselineMarkdown);
+			if (!await this.isRemoteMarkdownContentEquivalent(remoteMarkdown.content, expectedSignature)) {
+				return undefined;
+			}
+		}
+
 		const state = await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml, baselineMarkdown);
 		if (baselineMarkdown && !isDocumentStateBlockMappingAcceptable(state)) {
 			return undefined;
@@ -1832,6 +1903,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			remoteXml.content,
 			remoteXml.revisionId ?? remoteMarkdown.revisionId
 		);
+	}
+
+	private async isRemoteMarkdownContentEquivalent(
+		remoteMarkdown: string,
+		expectedSignature: Awaited<ReturnType<typeof createSyncContentSignature>>
+	): Promise<boolean> {
+		const remoteSignature = await createSyncContentSignature(remoteMarkdown);
+		return isSyncContentSignatureEquivalent(remoteSignature, expectedSignature);
 	}
 
 	private isRemoteDocumentStateRefreshAccepted(
@@ -1908,15 +1987,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		stateKeys: string[],
 		expectedMarkdown?: string
 	): Promise<LarkSyncStateFile["documents"][string] | undefined> {
-		const remoteMarkdownPromise = expectedMarkdown
-			? Promise.resolve(undefined)
-			: this.fetchLarkDocumentMarkdown(doc);
 		const [remoteMarkdown, remoteXml] = await Promise.all([
-			remoteMarkdownPromise,
+			this.fetchLarkDocumentMarkdown(doc),
 			this.fetchLarkDocumentWithIds(doc)
 		]);
 		const remoteDoc = remoteXml.doc || remoteMarkdown?.doc || doc;
-		const baselineMarkdown = expectedMarkdown || remoteMarkdown?.content || "";
+		const baselineMarkdown = remoteMarkdown?.content || expectedMarkdown || "";
 		const state = await createDocumentSyncStateFromRemote(
 			remoteDoc,
 			baselineMarkdown,

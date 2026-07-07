@@ -575,6 +575,143 @@ assert.deepEqual(nestedListState.units.map((unit) => unit.blockId), [
 	"li-7"
 ]);
 assert.equal(nestedListState.units.filter((unit) => unit.kind === "list").length, 7);
+assert.equal(await isRemoteXmlContentEquivalent(
+	nestedListRemoteXml,
+	[
+		"# Note",
+		"",
+		"#### 4.4 jdx-titans 后台统一账号分页查询",
+		"",
+		"接口路径：`POST /backend/partner-account/page`",
+		"",
+		"1. **基础查询**：以 `partner_account` 为主表。",
+		"2. **主账号（accountType=1）**：",
+		"   - 名称：`partner_account.name`。",
+		"   - 手机号：`partner_account.phone`。",
+		"3. **子账号（accountType=2）**：",
+		"   - 手机号：`partner_account.phone` 匹配。",
+		"   - 权限筛选：匹配 `partner_account.permissions` JSON 中是否包含指定权限编码。"
+	].join("\n")
+), true);
+
+const nestedListWithPlaceholderState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"## Task",
+		"",
+		"- 文件:",
+		"  - `a.java`",
+		"  - `b.java`",
+		"- 依赖: Task 3",
+		"",
+		"## Next"
+	].join("\n"),
+	[
+		"<title id=\"doc-title\">Note</title>",
+		"<h2 id=\"blk-1\">Task</h2>",
+		"<p id=\"blk-extra\">远端结构化占位</p>",
+		"<ul><li id=\"blk-2\">文件:<ul><li id=\"blk-3\"><code>a.java</code></li><li id=\"blk-4\"><code>b.java</code></li></ul></li><li id=\"blk-5\">依赖: Task 3</li></ul>",
+		"<h2 id=\"blk-6\">Next</h2>"
+	].join(""),
+	17
+);
+assert.deepEqual(nestedListWithPlaceholderState.units.map((unit) => unit.blockId), [
+	"blk-1",
+	"blk-2",
+	"blk-3",
+	"blk-4",
+	"blk-5",
+	"blk-6"
+]);
+
+const lazyListContinuationState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"## Scope",
+		"",
+		"- 代码分支：`feature/ITC-75612`。",
+		"31饿啊",
+		"",
+		"## Next"
+	].join("\n"),
+	[
+		"<title id=\"doc-title\">Note</title>",
+		"<h2 id=\"blk-1\">Scope</h2>",
+		"<ul><li id=\"blk-2\">代码分支：<code>feature/ITC-75612</code>。<br/>31饿啊</li></ul>",
+		"<h2 id=\"blk-3\">Next</h2>"
+	].join(""),
+	18
+);
+assert.deepEqual(lazyListContinuationState.units.map((unit) => unit.kind), ["heading", "list", "heading"]);
+assert.deepEqual(lazyListContinuationState.units.map((unit) => unit.blockId), ["blk-1", "blk-2", "blk-3"]);
+assert.equal(await isRemoteXmlContentEquivalent(
+	[
+		"<title id=\"doc-title\">Note</title>",
+		"<h2 id=\"blk-1\">Scope</h2>",
+		"<ul><li id=\"blk-2\">代码分支：<code>feature/ITC-75612</code>。<br/>31饿啊</li></ul>",
+		"<h2 id=\"blk-3\">Next</h2>"
+	].join(""),
+	[
+		"# Note",
+		"",
+		"## Scope",
+		"",
+		"- 代码分支：`feature/ITC-75612`。",
+		"31饿啊",
+		"",
+		"## Next"
+	].join("\n")
+), true);
+
+const checkboxListState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"- 验收标准:",
+		"  - [x] A",
+		"  - [ ] B",
+		"- 子任务:",
+		"  - [x] C"
+	].join("\n"),
+	[
+		"<title id=\"doc-title\">Note</title>",
+		"<ul>",
+		"<li id=\"blk-1\">验收标准:<checkbox id=\"blk-2\" done=\"true\">A</checkbox><checkbox id=\"blk-3\" done=\"false\">B</checkbox></li>",
+		"<li id=\"blk-4\">子任务:<checkbox id=\"blk-5\" done=\"true\">C</checkbox></li>",
+		"</ul>"
+	].join(""),
+	19
+);
+assert.deepEqual(checkboxListState.units.map((unit) => unit.blockId), [
+	"blk-1",
+	"blk-2",
+	"blk-3",
+	"blk-4",
+	"blk-5"
+]);
+assert.equal(await isRemoteXmlContentEquivalent(
+	[
+		"<title id=\"doc-title\">Note</title>",
+		"<ul>",
+		"<li id=\"blk-1\">验收标准:<checkbox id=\"blk-2\" done=\"true\">A</checkbox><checkbox id=\"blk-3\" done=\"false\">B</checkbox></li>",
+		"<li id=\"blk-4\">子任务:<checkbox id=\"blk-5\" done=\"true\">C</checkbox></li>",
+		"</ul>"
+	].join(""),
+	[
+		"# Note",
+		"",
+		"- 验收标准:",
+		"  - [x] A",
+		"  - [ ] B",
+		"- 子任务:",
+		"  - [x] C"
+	].join("\n")
+), true);
 
 const indentedCodeRemoteXml = "<title id=\"doc-token\">Note</title><ul><li id=\"blk-1\">Hint</li></ul><pre id=\"blk-2\"><code>x</code></pre><h2 id=\"blk-3\">Next</h2>";
 const indentedCodeState = await createDocumentSyncStateFromRemote(
@@ -1148,6 +1285,51 @@ assert.deepEqual(rebuiltInsertPlan.commands, [{
 	content: "212122"
 }]);
 
+const twoStepInitialHeadingState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n## Old\n\nBody",
+	"<title id=\"doc-title\">Note</title><h2 id=\"blk-heading-old\">Old</h2><p id=\"blk-body\">Body</p>",
+	30
+);
+const twoStepHeadingRenamePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n## New\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: twoStepInitialHeadingState
+});
+assert.equal(twoStepHeadingRenamePlan.mode, "precise");
+assert.deepEqual(twoStepHeadingRenamePlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "xml",
+	blockId: "blk-heading-old",
+	contentFileName: "sync.md",
+	content: "<h2>New</h2>"
+}]);
+const twoStepStateAfterHeadingRename = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n## New\n\nBody",
+	"<title id=\"doc-title\">Note</title><h2 id=\"blk-heading-new\">New</h2><p id=\"blk-body\">Body</p>",
+	31
+);
+const twoStepInsertBelowRenamedHeadingPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n## New\n\n21\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: twoStepStateAfterHeadingRename
+});
+assert.equal(twoStepInsertBelowRenamedHeadingPlan.mode, "precise");
+assert.deepEqual(twoStepInsertBelowRenamedHeadingPlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "blk-heading-new",
+	contentFileName: "sync.md",
+	content: "21"
+}]);
+
 const rebuiltReplacePlan = await buildSyncPlan({
 	doc: "doc-token",
 	markdown: "# tasks-main\n\n## 实施任务清单（主功能）\n\n| 由 spec.md 6.2-6.5 章节生成 |\n| --- |\n| 分 6 批提交，每批是一个独立 review 单元 |\n| 核心原则: 自底向上 |\n\n## 分批总览更新\n\n| 批次 | 主题 |\n| --- | --- |\n| 1 | A |",
@@ -1187,24 +1369,14 @@ const rebuiltInsertReplacePlan = await buildSyncPlan({
 	state: rebuiltInsertState
 });
 assert.equal(rebuiltInsertReplacePlan.mode, "precise");
-assert.deepEqual(rebuiltInsertReplacePlan.commands, [
-	{
-		doc: "doc-token",
-		command: "block_replace",
-		docFormat: "xml",
-		blockId: "blk-3",
-		contentFileName: "sync.md",
-		content: "<h2>分批总览更新</h2>"
-	},
-	{
-		doc: "doc-token",
-		command: "block_insert_after",
-		docFormat: "markdown",
-		blockId: "blk-3",
-		contentFileName: "sync.md",
-		content: "212122"
-	}
-]);
+assert.deepEqual(rebuiltInsertReplacePlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "markdown",
+	blockId: "blk-3",
+	contentFileName: "sync.md",
+	content: "## 分批总览更新\n\n212122"
+}]);
 
 const headingInsertAroundHrState = await createDocumentSyncStateFromRemote(
 	"doc-token",

@@ -1426,10 +1426,10 @@ async function buildPreciseReplacePlan(
 				};
 			}
 
-			commands.push(createReplaceCommand(
+			commands.push(...createReplaceCommands(
 				input.doc,
 				input.contentFileName,
-				previousUnit.blockId,
+				previousUnit,
 				nextUnit
 			));
 		}
@@ -1534,21 +1534,25 @@ function createInsertedContent(units: MarkdownSyncUnit[]): { docFormat: "markdow
 	};
 }
 
-function createReplaceCommand(
+function createReplaceCommands(
 	doc: string,
 	contentFileName: string,
-	blockId: string,
+	previousUnit: SyncUnitState,
 	nextUnit: MarkdownSyncUnit
-): LarkUpdateCommand {
+): LarkUpdateCommand[] {
+	if (previousUnit.kind === "heading" && nextUnit.kind === "heading") {
+		return buildHeadingGapRewriteCommands(doc, contentFileName, [previousUnit], [nextUnit]) || [];
+	}
+
 	const content = createInsertedContent([nextUnit]);
-	return {
+	return [{
 		doc,
 		command: "block_replace",
 		docFormat: content.docFormat,
-		blockId,
+		blockId: previousUnit.blockId,
 		contentFileName,
 		content: content.content
-	};
+	}];
 }
 
 function createHeadingXmlContent(markdown: string): string {
@@ -1698,6 +1702,11 @@ function buildMixedGapCommands(
 		return buildDeleteCommands(doc, previousGap);
 	}
 
+	const headingRewriteCommands = buildHeadingGapRewriteCommands(doc, contentFileName, previousGap, nextGap);
+	if (headingRewriteCommands) {
+		return headingRewriteCommands;
+	}
+
 	if (previousGap.length !== nextGap.length) {
 		return buildMixedUnalignedGapCommands(doc, contentFileName, previousGap, nextGap, anchorBlockId);
 	}
@@ -1717,7 +1726,7 @@ function buildMixedGapCommands(
 			continue;
 		}
 
-		commands.push(createReplaceCommand(doc, contentFileName, previousUnit.blockId, nextUnit));
+		commands.push(...createReplaceCommands(doc, contentFileName, previousUnit, nextUnit));
 	}
 
 	if (previousGap.length > nextGap.length) {
@@ -1794,6 +1803,11 @@ function buildGapEditCommands(
 		return buildDeleteCommands(doc, previousGap);
 	}
 
+	const headingRewriteCommands = buildHeadingGapRewriteCommands(doc, contentFileName, previousGap, nextGap);
+	if (headingRewriteCommands) {
+		return headingRewriteCommands;
+	}
+
 	if (previousGap.length === nextGap.length) {
 		const replaceCommands = buildAlignedReplaceCommands(doc, contentFileName, previousGap, nextGap);
 		if (replaceCommands) {
@@ -1839,7 +1853,7 @@ function buildAlignedReplaceCommands(
 			continue;
 		}
 
-		commands.push(createReplaceCommand(doc, contentFileName, previousUnit.blockId, nextUnit));
+		commands.push(...createReplaceCommands(doc, contentFileName, previousUnit, nextUnit));
 	}
 
 	return commands;
@@ -1881,7 +1895,7 @@ function buildKindAnchoredGapCommands(
 		}
 
 		if (previousUnit.hash !== nextUnit.hash) {
-			commands.push(createReplaceCommand(doc, contentFileName, previousUnit.blockId, nextUnit));
+			commands.push(...createReplaceCommands(doc, contentFileName, previousUnit, nextUnit));
 		}
 
 		currentAnchorBlockId = previousUnit.blockId;
@@ -2017,6 +2031,33 @@ function countUnitKinds(units: Array<{ kind: string }>): Map<string, number> {
 
 function createContentUnitKey(unit: { kind: string; hash: string }): string {
 	return `${unit.kind}\0${unit.hash}`;
+}
+
+function buildHeadingGapRewriteCommands(
+	doc: string,
+	contentFileName: string,
+	previousGap: SyncUnitState[],
+	nextGap: MarkdownSyncUnit[]
+): LarkUpdateCommand[] | null {
+	const firstPreviousUnit = previousGap[0];
+	const firstNextUnit = nextGap[0];
+	if (firstPreviousUnit?.kind !== "heading" || firstNextUnit?.kind !== "heading" || !firstPreviousUnit.blockId) {
+		return null;
+	}
+
+	if (previousGap.length !== 1 || nextGap.length === 0) {
+		return null;
+	}
+
+	const content = createInsertedContent(nextGap);
+	return [{
+		doc,
+		command: "block_replace",
+		docFormat: content.docFormat,
+		blockId: firstPreviousUnit.blockId,
+		contentFileName,
+		content: content.content
+	}];
 }
 
 function buildDeleteCommands(doc: string, deletedUnits: SyncUnitState[]): LarkUpdateCommand[] | null {
@@ -2204,15 +2245,15 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 			if (index < lines.length) {
 				index += 1;
 			}
-		} else if (kind === "list") {
+	} else if (kind === "list") {
+		index += 1;
+		while (index < lines.length
+			&& (lines[index] || "").trim() !== ""
+			&& readMarkdownBlockKind(lines[index] || "") === "paragraph"
+			&& !isMarkdownParagraphLabelBoundary(lines[index] || "")) {
 			index += 1;
-			while (index < lines.length
-				&& (lines[index] || "").trim() !== ""
-				&& readMarkdownBlockKind(lines[index] || "") === "paragraph"
-				&& /^\s+/.test(lines[index] || "")) {
-				index += 1;
-			}
-		} else if (kind === "blockquote" || kind === "table") {
+		}
+	} else if (kind === "blockquote" || kind === "table") {
 			index += 1;
 			while (index < lines.length && readMarkdownBlockKind(lines[index] || "") === kind) {
 				index += 1;
@@ -2308,7 +2349,9 @@ function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
 			? normalizedKind
 			: tagName === "li" && blockId && shouldTreatRemoteListItemAsSyncUnit(stack)
 				? "list"
-				: "";
+				: tagName === "checkbox" && blockId && shouldTreatRemoteCheckboxAsSyncUnit(stack)
+					? "list"
+					: "";
 		if (isSelfClosing) {
 			if (kind) {
 				collectedUnits.push({
@@ -2356,6 +2399,26 @@ function shouldTreatRemoteListItemAsSyncUnit(
 	// under another <li> via an intermediate <ul>/<ol>.
 	return stack.every((frame) => {
 		return isRemoteDocumentContainer(frame.tagName) || frame.tagName === "li" || isRemoteListContainer(frame.tagName);
+	});
+}
+
+function shouldTreatRemoteCheckboxAsSyncUnit(
+	stack: Array<{ tagName: string; startIndex: number; kind?: string; blockId?: string }>
+): boolean {
+	if (stack.length === 0) {
+		return false;
+	}
+
+	const parentTagName = stack[stack.length - 1]?.tagName || "";
+	if (parentTagName !== "li" && !isRemoteListContainer(parentTagName)) {
+		return false;
+	}
+
+	return stack.every((frame) => {
+		return isRemoteDocumentContainer(frame.tagName)
+			|| frame.tagName === "li"
+			|| frame.tagName === "checkbox"
+			|| isRemoteListContainer(frame.tagName);
 	});
 }
 
@@ -2466,12 +2529,13 @@ function createMarkdownCodeFingerprint(content: string): string {
 }
 
 function createMarkdownListFingerprint(content: string): string {
-	return content.replace(/\r\n/g, "\n").split("\n")
+	const normalizedLines = content.replace(/\r\n/g, "\n").split("\n")
 		.map((line) => normalizeFingerprintText(line
 			.replace(/^\s*(?:[-+*]|\d+\.)\s+/, "")
 			.replace(/^\[(?: |x|X)\]\s+/, "")))
 		.filter((line) => line)
 		.join("\n");
+	return normalizeFingerprintText(normalizedLines);
 }
 
 function isMarkdownTableSeparatorLine(line: string): boolean {
@@ -2494,10 +2558,65 @@ function createXmlFingerprint(kind: string, content: string): string {
 		return normalizeFingerprintText(readXmlElementText(content));
 	}
 
+	if (kind === "list") {
+		return createXmlListFingerprint(content);
+	}
+
 	const text = content
 		.replace(/<br\s*\/?>/gi, "\n")
 		.replace(/<[^>]+>/g, "");
 	return normalizeFingerprintText(text);
+}
+
+function createXmlListFingerprint(content: string): string {
+	const innerContent = readXmlElementText(content);
+	if (!innerContent) {
+		return "";
+	}
+
+	const outerTagName = content.match(/^<([A-Za-z][A-Za-z0-9-]*)\b/i)?.[1]?.toLowerCase() || "";
+	let directText = "";
+	let cursor = 0;
+	let ignoredContainerDepth = 0;
+	const tagPattern = /<\/?([A-Za-z][A-Za-z0-9-]*)([^>]*)>/g;
+	let match: RegExpExecArray | null;
+	while ((match = tagPattern.exec(innerContent))) {
+		if (ignoredContainerDepth === 0) {
+			directText += innerContent.slice(cursor, match.index);
+		}
+
+		const rawTag = match[0] || "";
+		const tagName = (match[1] || "").toLowerCase();
+		const isClosing = rawTag.startsWith("</");
+		const isSelfClosing = rawTag.endsWith("/>");
+		if (ignoredContainerDepth === 0 && /^<br\s*\/?>$/i.test(rawTag)) {
+			directText += "\n";
+		}
+
+		if (shouldIgnoreNestedListFingerprintTag(outerTagName, tagName)) {
+			if (isClosing) {
+				ignoredContainerDepth = Math.max(0, ignoredContainerDepth - 1);
+			} else if (!isSelfClosing) {
+				ignoredContainerDepth += 1;
+			}
+		}
+
+		cursor = tagPattern.lastIndex;
+	}
+
+	if (ignoredContainerDepth === 0) {
+		directText += innerContent.slice(cursor);
+	}
+
+	return normalizeFingerprintText(directText);
+}
+
+function shouldIgnoreNestedListFingerprintTag(outerTagName: string, tagName: string): boolean {
+	if (isRemoteListContainer(tagName)) {
+		return true;
+	}
+
+	return outerTagName === "li" && tagName === "checkbox";
 }
 
 function createXmlTableFingerprint(content: string): string {
