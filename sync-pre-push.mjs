@@ -30,6 +30,7 @@ import {
 	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
 	readBindingFromMarkdown,
+	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
 	touchDocumentSyncState,
 	trimSyncStateCache
@@ -189,7 +190,8 @@ function resolveDocumentGroupKey(task, syncState) {
 async function syncMarkdownTask(task, settings, syncState) {
 	try {
 		const file = { basename: basename(task.filePath, ".md") };
-		const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(task.content), settings.titleSource);
+		const normalizedContent = removeBindingOnlyFrontmatterBeforeNextFrontmatter(task.content);
+		const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(normalizedContent), settings.titleSource);
 		const strategy = settings.syncStrategy || "auto";
 		let state = findDocumentState(syncState, task.stateKeys);
 		let syncDoc = state?.doc || task.doc;

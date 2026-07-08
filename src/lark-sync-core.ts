@@ -169,15 +169,7 @@ const MIN_REPLACE_RUN_LENGTH_TO_COMPACT = 3;
 
 export function prepareNoteContentForLark(file: NoteFile, content: string, titleSource: TitleSource): string {
 	const title = extractTitle(file, content, titleSource);
-	if (titleSource === "file-name") {
-		return withMarkdownTitle(content, title);
-	}
-
-	if (/^\s*#\s+/m.test(content)) {
-		return content;
-	}
-
-	return withMarkdownTitle(content, title);
+	return prependMarkdownTitle(content, title);
 }
 
 export function extractTitle(file: NoteFile, content: string, titleSource: TitleSource): string {
@@ -329,11 +321,6 @@ export function removeLarkBinding(content: string): string {
 
 	const quotedFrontmatter = createMetadataBlockquote(filteredFrontmatter);
 	const trimmedBody = body.replace(/^\s+/, "");
-	const bodyTitle = readMarkdownDocumentTitle(trimmedBody);
-	if (bodyTitle) {
-		return `# ${bodyTitle}\n\n${quotedFrontmatter}\n\n${stripMarkdownTitle(trimmedBody)}`;
-	}
-
 	return `${quotedFrontmatter}\n\n${trimmedBody}`;
 }
 
@@ -1270,7 +1257,7 @@ function areSameFingerprintUnit(
 }
 
 export async function createSyncContentSignature(markdown: string): Promise<SyncContentSignature> {
-	const contentHash = await createContentHash(markdown);
+	const contentHash = await createContentHash(normalizeMarkdownDocumentTitle(markdown));
 	const units = await createMarkdownSyncUnits(markdown);
 	return {
 		contentHash,
@@ -1476,11 +1463,7 @@ const SYNC_FAILURE_REASON_MESSAGES: Record<MessageLanguage, Record<SyncFailureRe
 	}
 };
 
-function withMarkdownTitle(content: string, title: string): string {
-	if (/^[ \t]*#[ \t]+/m.test(content)) {
-		return content.replace(/^[ \t]*#[ \t]+.+?[ \t#]*$/m, `# ${title}`);
-	}
-
+function prependMarkdownTitle(content: string, title: string): string {
 	return `# ${title}\n\n${content}`;
 }
 
@@ -1662,12 +1645,12 @@ function createReplaceCommands(
 }
 
 function createHeadingXmlContent(markdown: string): string {
-	const match = markdown.match(/^(#{2,6})\s+(.+)$/);
+	const match = markdown.match(/^(#{1,6})\s+(.+)$/);
 	if (!match) {
 		return `<p>${escapeXmlText(markdown)}</p>`;
 	}
 
-	const level = Math.min(9, Math.max(2, match[1]!.length));
+	const level = Math.min(9, match[1]!.length);
 	return `<h${level}>${escapeXmlText(match[2]!.trim())}</h${level}>`;
 }
 
@@ -2301,7 +2284,7 @@ async function createMarkdownSyncUnits(markdown: string): Promise<MarkdownSyncUn
 
 function stripMarkdownTitle(markdown: string): string {
 	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-	const titleIndex = lines.findIndex((line) => /^#\s+/.test(line || ""));
+	const titleIndex = lines.findIndex((line) => isMarkdownDocumentTitleLine(line || ""));
 	if (titleIndex < 0) {
 		return lines.join("\n");
 	}
@@ -2317,11 +2300,47 @@ function stripMarkdownTitle(markdown: string): string {
 	].join("\n");
 }
 
+export function stripPreparedMarkdownTitle(markdown: string): string {
+	return stripMarkdownTitle(markdown);
+}
+
 function readMarkdownDocumentTitle(markdown: string): string | undefined {
 	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-	const titleLine = lines.find((line) => /^#\s+/.test(line || ""));
-	const match = (titleLine || "").match(/^#\s+(.+?)[ \t#]*$/);
-	return match?.[1]?.trim();
+	const titleLine = lines.find((line) => isMarkdownDocumentTitleLine(line || ""));
+	return readMarkdownDocumentTitleLine(titleLine || "");
+}
+
+function normalizeMarkdownDocumentTitle(markdown: string): string {
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	const titleIndex = lines.findIndex((line) => isMarkdownDocumentTitleLine(line || ""));
+	if (titleIndex < 0) {
+		return lines.join("\n");
+	}
+
+	const title = readMarkdownDocumentTitleLine(lines[titleIndex] || "");
+	if (!title) {
+		return lines.join("\n");
+	}
+
+	return [
+		...lines.slice(0, titleIndex),
+		`# ${title}`,
+		...lines.slice(titleIndex + 1)
+	].join("\n");
+}
+
+function isMarkdownDocumentTitleLine(line: string): boolean {
+	return /^#\s+/.test(line) || /^<title(?:\s[^>]*)?>[\s\S]*<\/title>\s*$/i.test(line.trim());
+}
+
+function readMarkdownDocumentTitleLine(line: string): string | undefined {
+	const markdownMatch = line.match(/^#\s+(.+?)[ \t#]*$/);
+	if (markdownMatch?.[1]) {
+		return markdownMatch[1].trim();
+	}
+
+	const xmlMatch = line.trim().match(/^<title(?:\s[^>]*)?>([\s\S]*?)<\/title>\s*$/i);
+	return xmlMatch?.[1] ? normalizeFingerprintText(xmlMatch[1]) : undefined;
 }
 
 function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; content: string }> {
@@ -2406,7 +2425,7 @@ function isMarkdownParagraphLabelBoundary(line: string): boolean {
 }
 
 function readMarkdownBlockKind(line: string): string {
-	if (/^#{2,6}\s+/.test(line)) {
+	if (/^#{1,6}\s+/.test(line)) {
 		return "heading";
 	}
 
@@ -2595,7 +2614,7 @@ function createMarkdownFingerprint(kind: string, content: string): string {
 	const lines = content.replace(/\r\n/g, "\n").split("\n");
 	const normalizedLines = lines.map((line) => {
 		if (kind === "heading") {
-			return line.replace(/^#{2,6}\s+/, "");
+			return line.replace(/^#{1,6}\s+/, "");
 		}
 
 		if (kind === "blockquote") {

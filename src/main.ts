@@ -20,6 +20,7 @@ import {
 	createIncompleteDocumentSyncStateFromMarkdown,
 	createSyncContentSignature,
 	extractDocumentToken,
+	extractTitle,
 	formatSyncFailureMessage,
 	getDocumentStateKey,
 	getDocumentStateKeys,
@@ -34,6 +35,7 @@ import {
 	prepareNoteContentForLark,
 	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
+	stripPreparedMarkdownTitle,
 	SyncFailureReason,
 	SyncMode,
 	SyncPlan,
@@ -1370,7 +1372,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private async readNoteForLark(file: TFile): Promise<string> {
 		const rawContent = await this.app.vault.read(file);
-		const contentWithoutBinding = removeLarkBinding(rawContent);
+		const normalizedContent = removeBindingOnlyFrontmatterBeforeNextFrontmatter(rawContent);
+		const contentWithoutBinding = removeLarkBinding(normalizedContent);
 		return prepareNoteContentForLark(file, contentWithoutBinding, this.settings.titleSource);
 	}
 
@@ -1398,9 +1401,11 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private async createLarkDocument(file: TFile, content: string, parent?: RemoteParent): Promise<BoundLarkDocument> {
-		return await this.withTempMarkdown(file.basename, content, async (tempFile) => {
+		const title = extractTitle(file, content, "first-heading");
+		const bodyContent = stripPreparedMarkdownTitle(content);
+		return await this.withTempMarkdown(file.basename, bodyContent, async (tempFile) => {
 			const args = ["docs", "+create", "--api-version", "v2", "--as", "user", "--doc-format", "markdown",
-				"--content", `@${tempFile.fileName}`, "--json"];
+				"--title", title, "--content", `@${tempFile.fileName}`, "--json"];
 
 			const remoteParent = parent || await this.resolveRemoteRootParent();
 			if (remoteParent.token) {
@@ -2460,9 +2465,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private async createLarkDocumentLikePage(name: string, parent: RemoteParent): Promise<BoundLarkDocument> {
 		const content = `# ${name}\n`;
-		return await this.withTempMarkdown(name, content, async (tempFile) => {
+		const bodyContent = stripPreparedMarkdownTitle(content);
+		return await this.withTempMarkdown(name, bodyContent, async (tempFile) => {
 			const args = ["docs", "+create", "--api-version", "v2", "--as", "user", "--doc-format", "markdown",
-				"--content", `@${tempFile.fileName}`, "--json"];
+				"--title", name, "--content", `@${tempFile.fileName}`, "--json"];
 
 			if (parent.token) {
 				args.push("--parent-token", parent.token);

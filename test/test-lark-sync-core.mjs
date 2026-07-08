@@ -33,6 +33,7 @@ const {
 	readBindingFromMarkdown,
 	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
+	stripPreparedMarkdownTitle,
 	trimSyncStateCache
 } = await import("./.tmp-lark-sync-core-test.mjs");
 
@@ -104,9 +105,7 @@ tags:
 
 # FloatMark 测试文档
 
-Body`), `# FloatMark 测试文档
-
-> "111": "3333"
+Body`), `> "111": "3333"
 > cssclasses:
 > - "222"
 > tags:
@@ -118,6 +117,8 @@ tags:
   - Obsidian
   - 测试
 ---
+
+# FloatMark 测试文档
 
 Body`);
 
@@ -184,13 +185,13 @@ Demo:
 ---
 # Existing
 
-Body`), `# Existing
-
-> 需求: ITC-75612 牛商堂留货 - M3 回收单展示改造
+Body`), `> 需求: ITC-75612 牛商堂留货 - M3 回收单展示改造
 > PRD: https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d §8
 > Demo:
 > - 列表: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-list-demo.html
 > - 详情: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-detail-demo.html
+
+# Existing
 
 Body`);
 
@@ -200,10 +201,18 @@ assert.equal(
 );
 assert.equal(
 	prepareNoteContentForLark({ basename: "Note" }, "# Heading\n\nBody", "file-name"),
-	"# Note\n\nBody"
+	"# Note\n\n# Heading\n\nBody"
 );
 assert.equal(
 	prepareNoteContentForLark({ basename: "Note" }, "# Heading\n\nBody", "first-heading"),
+	"# Heading\n\n# Heading\n\nBody"
+);
+assert.equal(
+	stripPreparedMarkdownTitle("# Note\n\n# Heading\n\nBody"),
+	"# Heading\n\nBody"
+);
+assert.equal(
+	stripPreparedMarkdownTitle("<title>Note</title>\n\n# Heading\n\nBody"),
 	"# Heading\n\nBody"
 );
 
@@ -322,6 +331,9 @@ assert.notEqual(contentHash, await createContentHash("# Note\n\nChanged"));
 assert.equal(contentHash.length, 64);
 
 const formattedSignature = await createSyncContentSignature("# Note\n\n**Changed**");
+const localTitleSignature = await createSyncContentSignature("# Note\n\n# Heading\n\nBody");
+const exportedTitleSignature = await createSyncContentSignature("<title>Note</title>\n\n# Heading\n\nBody");
+assert.ok(isSyncContentSignatureEquivalent(exportedTitleSignature, localTitleSignature));
 const normalizedRemoteState = await createDocumentSyncStateFromRemote(
 	"doc-token",
 	"# Note\n\nChanged",
@@ -763,6 +775,33 @@ assert.equal(titleDeletePlan.mode, "precise");
 assert.equal(titleDeletePlan.commands.length, 1);
 assert.equal(titleDeletePlan.commands[0].blockId, "doc-token");
 assert.equal(titleDeletePlan.commands[0].content, "<title>Note</title>");
+
+const bodyHeadingRemoteXml = "<title id=\"doc-token\">Note</title><h1 id=\"blk-heading\">Body Title</h1><p id=\"blk-1\">Body</p>";
+const bodyHeadingState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n# Body Title\n\nBody",
+	bodyHeadingRemoteXml,
+	7
+);
+assert.deepEqual(bodyHeadingState.units.map((unit) => unit.kind), ["heading", "paragraph"]);
+assert.deepEqual(bodyHeadingState.units.map((unit) => unit.blockId), ["blk-heading", "blk-1"]);
+
+const bodyHeadingReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n# Body Title Updated\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: bodyHeadingState
+});
+assert.equal(bodyHeadingReplacePlan.mode, "precise");
+assert.deepEqual(bodyHeadingReplacePlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "xml",
+	blockId: "blk-heading",
+	contentFileName: "sync.md",
+	content: "<h1>Body Title Updated</h1>"
+}]);
 
 const exportedMarkdownState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\n## Exported", remoteXml, 7);
 assert.equal(exportedMarkdownState.contentHash, await createContentHash("# Note\n\n## Exported"));
