@@ -445,16 +445,22 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 	}
 
 	const units = await createMarkdownSyncUnits(input.markdown);
-	if (!input.state || input.state.units.length === 0) {
-		return createBlockedOrOverwriteSyncPlan(input, contentHash, "block-mapping-missing");
+	const normalizedInput = withNormalizedFrontmatterMetadataState(input, units);
+	if (!normalizedInput.state || normalizedInput.state.units.length === 0) {
+		return createBlockedOrOverwriteSyncPlan(normalizedInput, contentHash, "block-mapping-missing");
 	}
 
-	const titleChange = await createTitleSyncChange(input, contentHash, units);
+	const titleChange = await createTitleSyncChange(normalizedInput, contentHash, units);
 	const precisePlan = finalizeCandidateSyncPlan(
-		input,
+		normalizedInput,
 		optimizeSyncPlan(
-			input,
-			applyTitleSyncChange(input, await buildPreciseReplacePlan(input, contentHash, units), titleChange, contentHash),
+			normalizedInput,
+			applyTitleSyncChange(
+				normalizedInput,
+				await buildPreciseReplacePlan(normalizedInput, contentHash, units),
+				titleChange,
+				contentHash
+			),
 			units
 		)
 	);
@@ -463,10 +469,15 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 	}
 
 	const insertPlan = finalizeCandidateSyncPlan(
-		input,
+		normalizedInput,
 		optimizeSyncPlan(
-			input,
-			applyTitleSyncChange(input, await buildPreciseInsertPlan(input, contentHash, units), titleChange, contentHash),
+			normalizedInput,
+			applyTitleSyncChange(
+				normalizedInput,
+				await buildPreciseInsertPlan(normalizedInput, contentHash, units),
+				titleChange,
+				contentHash
+			),
 			units
 		)
 	);
@@ -475,10 +486,15 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 	}
 
 	const mixedInsertReplacePlan = finalizeCandidateSyncPlan(
-		input,
+		normalizedInput,
 		optimizeSyncPlan(
-			input,
-			applyTitleSyncChange(input, await buildPreciseMixedInsertReplacePlan(input, contentHash, units), titleChange, contentHash),
+			normalizedInput,
+			applyTitleSyncChange(
+				normalizedInput,
+				await buildPreciseMixedInsertReplacePlan(normalizedInput, contentHash, units),
+				titleChange,
+				contentHash
+			),
 			units
 		)
 	);
@@ -487,10 +503,15 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 	}
 
 	const deletePlan = finalizeCandidateSyncPlan(
-		input,
+		normalizedInput,
 		optimizeSyncPlan(
-			input,
-			applyTitleSyncChange(input, await buildPreciseDeletePlan(input, contentHash, units), titleChange, contentHash),
+			normalizedInput,
+			applyTitleSyncChange(
+				normalizedInput,
+				await buildPreciseDeletePlan(normalizedInput, contentHash, units),
+				titleChange,
+				contentHash
+			),
 			units
 		)
 	);
@@ -498,7 +519,65 @@ export async function buildSyncPlan(input: BuildSyncPlanInput): Promise<SyncPlan
 		return deletePlan;
 	}
 
-	return createBlockedOrOverwriteSyncPlan(input, contentHash, "diff-too-complex");
+	return createBlockedOrOverwriteSyncPlan(normalizedInput, contentHash, "diff-too-complex");
+}
+
+function withNormalizedFrontmatterMetadataState(
+	input: BuildSyncPlanInput,
+	units: MarkdownSyncUnit[]
+): BuildSyncPlanInput {
+	if (!input.state || !hasLeadingMetadataBlockquote(units)) {
+		return input;
+	}
+
+	const normalizedState = removeLeadingUnmappedResidueBeforeMetadataBlockquote(input.state, units);
+	if (normalizedState === input.state) {
+		return input;
+	}
+
+	return {
+		...input,
+		state: normalizedState
+	};
+}
+
+function hasLeadingMetadataBlockquote(units: MarkdownSyncUnit[]): boolean {
+	const firstUnit = units[0];
+	if (firstUnit?.kind !== "blockquote") {
+		return false;
+	}
+
+	return firstUnit.content.replace(/\r\n/g, "\n").split("\n").some((line) => {
+		const normalizedLine = line.replace(/^\s*>\s?/, "");
+		return /^["']?[^:\s][^:]*["']?:\s*/.test(normalizedLine);
+	});
+}
+
+function removeLeadingUnmappedResidueBeforeMetadataBlockquote(
+	state: DocumentSyncState,
+	units: MarkdownSyncUnit[]
+): DocumentSyncState {
+	const firstPreviousUnit = state.units[0];
+	const metadataUnit = state.units[1];
+	if (state.units.length !== units.length + 1
+		|| firstPreviousUnit?.blockId
+		|| metadataUnit?.kind !== "blockquote"
+		|| !metadataUnit.blockId) {
+		return state;
+	}
+
+	const normalizedUnits = renumberStableUnitIds(state.units.slice(1));
+	return {
+		...state,
+		units: normalizedUnits
+	};
+}
+
+function renumberStableUnitIds(units: SyncUnitState[]): SyncUnitState[] {
+	return units.map((unit, index) => ({
+		...unit,
+		stableId: `${index}:${unit.kind}`
+	}));
 }
 
 interface TitleSyncChange {
@@ -2222,30 +2301,26 @@ async function createMarkdownSyncUnits(markdown: string): Promise<MarkdownSyncUn
 
 function stripMarkdownTitle(markdown: string): string {
 	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-	let index = 0;
-	while (index < lines.length && (lines[index] || "").trim() === "") {
-		index += 1;
+	const titleIndex = lines.findIndex((line) => /^#\s+/.test(line || ""));
+	if (titleIndex < 0) {
+		return lines.join("\n");
 	}
 
-	if (/^#\s+/.test(lines[index] || "")) {
-		index += 1;
-		while (index < lines.length && (lines[index] || "").trim() === "") {
-			index += 1;
-		}
-		return lines.slice(index).join("\n");
+	let nextIndex = titleIndex + 1;
+	while (nextIndex < lines.length && (lines[nextIndex] || "").trim() === "") {
+		nextIndex += 1;
 	}
 
-	return lines.join("\n");
+	return [
+		...lines.slice(0, titleIndex),
+		...lines.slice(nextIndex)
+	].join("\n");
 }
 
 function readMarkdownDocumentTitle(markdown: string): string | undefined {
 	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-	let index = 0;
-	while (index < lines.length && (lines[index] || "").trim() === "") {
-		index += 1;
-	}
-
-	const match = (lines[index] || "").match(/^#\s+(.+?)[ \t#]*$/);
+	const titleLine = lines.find((line) => /^#\s+/.test(line || ""));
+	const match = (titleLine || "").match(/^#\s+(.+?)[ \t#]*$/);
 	return match?.[1]?.trim();
 }
 
@@ -2837,7 +2912,7 @@ function hasLeadingYamlFrontmatterBlock(content: string): boolean {
 }
 
 function readYamlString(frontmatter: string, key: string): string {
-	const pattern = new RegExp(`^${escapeRegExp(key)}:\\s*(.*)$`, "m");
+	const pattern = new RegExp(`^(?:"${escapeRegExp(key)}"|'${escapeRegExp(key)}'|${escapeRegExp(key)}):\\s*(.*)$`, "m");
 	const match = frontmatter.match(pattern);
 	if (!match?.[1]) {
 		return "";
@@ -2853,10 +2928,10 @@ function removeYamlObjects(lines: string[], keys: string[]): string[] {
 	let skipIndent = 0;
 
 	for (const line of lines) {
-		const keyMatch = line.match(/^(\s*)([A-Za-z0-9_-]+):/);
+		const keyMatch = matchYamlObjectKey(line);
 		if (keyMatch) {
-			const indent = keyMatch[1]?.length || 0;
-			const name = keyMatch[2];
+			const indent = keyMatch.indent;
+			const name = keyMatch.name;
 
 			if (skipping && indent <= skipIndent) {
 				skipping = false;
@@ -2880,11 +2955,21 @@ function removeYamlObjects(lines: string[], keys: string[]): string[] {
 function hasYamlObjectKey(lines: string[], keys?: string[]): boolean {
 	const keySet = keys ? new Set(keys) : null;
 	return lines.some((line) => {
-		const keyMatch = line.match(/^(\s*)([A-Za-z0-9_-]+):/);
-		const indent = keyMatch?.[1]?.length || 0;
-		const name = keyMatch?.[2];
-		return indent === 0 && !!name && (!keySet || keySet.has(name));
+		const keyMatch = matchYamlObjectKey(line);
+		return keyMatch?.indent === 0 && !!keyMatch.name && (!keySet || keySet.has(keyMatch.name));
 	});
+}
+
+function matchYamlObjectKey(line: string): { indent: number; name: string } | null {
+	const keyMatch = line.match(/^(\s*)(?:"([^"\n]+)"|'([^'\n]+)'|([A-Za-z0-9_-]+))\s*:/);
+	if (!keyMatch) {
+		return null;
+	}
+
+	return {
+		indent: keyMatch[1]?.length || 0,
+		name: keyMatch[2] || keyMatch[3] || keyMatch[4] || ""
+	};
 }
 
 function escapeRegExp(value: string): string {

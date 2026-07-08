@@ -86,6 +86,41 @@ tags:
 
 Body`);
 
+assert.equal(removeLarkBinding(`---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+"111": "3333"
+cssclasses:
+  - "222"
+tags:
+---
+
+---
+title: FloatMark 测试文档
+tags:
+  - FloatMark
+  - Obsidian
+  - 测试
+---
+
+# FloatMark 测试文档
+
+Body`), `# FloatMark 测试文档
+
+> "111": "3333"
+> cssclasses:
+> - "222"
+> tags:
+
+---
+title: FloatMark 测试文档
+tags:
+  - FloatMark
+  - Obsidian
+  - 测试
+---
+
+Body`);
+
 assert.equal(removeBindingOnlyFrontmatterBeforeNextFrontmatter(`---
 lark_doc_url: "https://example.feishu.cn/docx/abc"
 ---
@@ -365,6 +400,216 @@ const metadataQuoteState = await createDocumentSyncStateFromRemote(
 	].join("")
 );
 assert.deepEqual(metadataQuoteState.units.map((unit) => unit.blockId), ["blk-meta", "blk-heading", "blk-body"]);
+
+const staleMetadataQuoteState = {
+	...metadataQuoteState,
+	units: [
+		{
+			stableId: "0:paragraph",
+			kind: "paragraph",
+			hash: await createContentHash("stale frontmatter residue"),
+			blockId: ""
+		},
+		...metadataQuoteState.units
+	]
+};
+const frontmatterMetadataReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: [
+		"# Note",
+		"",
+		"> 需求: ITC-75612 牛商堂留货 - B 模块（留货直销单）",
+		"> PRD: https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d",
+		"> Demo:",
+		"> - 列表: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-list-demo.html",
+		"> - 详情: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-detail-demo.html",
+		"> 负责人: B",
+		"> 分支: feature/ITC-75612",
+		"> 状态: 设计中",
+		"> 依赖: A 侧 `holding_item` 建表完成（表结构见 [留货规则 Wiki](https://atrenew.feishu.cn/wiki/G6wVwAt9MiS4sdk8AwwcNEtenYb)）",
+		"",
+		"## 1. 背景",
+		"",
+		"正文"
+	].join("\n"),
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: staleMetadataQuoteState
+});
+assert.equal(frontmatterMetadataReplacePlan.mode, "precise");
+assert.deepEqual(frontmatterMetadataReplacePlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "markdown",
+	blockId: "blk-meta",
+	contentFileName: "sync.md",
+	content: [
+		"> 需求: ITC-75612 牛商堂留货 - B 模块（留货直销单）",
+		"> PRD: https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d",
+		"> Demo:",
+		"> - 列表: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-list-demo.html",
+		"> - 详情: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/recycle-order-detail-demo.html",
+		"> 负责人: B",
+		"> 分支: feature/ITC-75612",
+		"> 状态: 设计中",
+		"> 依赖: A 侧 `holding_item` 建表完成（表结构见 [留货规则 Wiki](https://atrenew.feishu.cn/wiki/G6wVwAt9MiS4sdk8AwwcNEtenYb)）"
+	].join("\n")
+}]);
+assert.equal(frontmatterMetadataReplacePlan.nextState.units.length, metadataQuoteState.units.length);
+assert.deepEqual(frontmatterMetadataReplacePlan.nextState.units.map((unit) => unit.blockId), [
+	"blk-meta",
+	"blk-heading",
+	"blk-body"
+]);
+
+const doubleFrontmatterState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"> tags:",
+		"",
+		"---",
+		"title: FloatMark 测试文档",
+		"tags:",
+		"  - FloatMark",
+		"  - Obsidian",
+		"  - 测试",
+		"---",
+		"",
+		"Body"
+	].join("\n"),
+	[
+		"<title id=\"title\">Note</title>",
+		"<blockquote id=\"blk-meta\"><p>tags:</p></blockquote>",
+		"<hr id=\"hr-open\"/>",
+		"<p id=\"blk-title\">title: FloatMark 测试文档</p>",
+		"<ul>",
+		"<li id=\"blk-tag-1\">FloatMark</li>",
+		"<li id=\"blk-tag-2\">Obsidian</li>",
+		"<li id=\"blk-tag-3\">测试</li>",
+		"</ul>",
+		"<hr id=\"hr-close\"/>",
+		"<p id=\"blk-body\">Body</p>"
+	].join(""),
+	12
+);
+const staleDoubleFrontmatterState = {
+	...doubleFrontmatterState,
+	units: [
+		{
+			stableId: "0:paragraph",
+			kind: "paragraph",
+			hash: await createContentHash("stale frontmatter residue"),
+			blockId: ""
+		},
+		...doubleFrontmatterState.units
+	]
+};
+const doubleFrontmatterMetadataReplacePlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: [
+		"# Note",
+		"",
+		"> \"111\": \"222\"",
+		"> tags:",
+		"",
+		"---",
+		"title: FloatMark 测试文档",
+		"tags:",
+		"  - FloatMark",
+		"  - Obsidian",
+		"  - 测试",
+		"---",
+		"",
+		"Body"
+	].join("\n"),
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: staleDoubleFrontmatterState
+});
+assert.equal(doubleFrontmatterMetadataReplacePlan.mode, "precise");
+assert.deepEqual(doubleFrontmatterMetadataReplacePlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "markdown",
+	blockId: "blk-meta",
+	contentFileName: "sync.md",
+	content: [
+		"> \"111\": \"222\"",
+		"> tags:"
+	].join("\n")
+}]);
+
+const bindingOnlyDoubleFrontmatterState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	[
+		"# Note",
+		"",
+		"---",
+		"title: FloatMark 测试文档",
+		"tags:",
+		"  - FloatMark",
+		"  - Obsidian",
+		"  - 测试",
+		"---",
+		"",
+		"Body"
+	].join("\n"),
+	[
+		"<title id=\"title\">Note</title>",
+		"<hr id=\"hr-open\"/>",
+		"<p id=\"blk-title\">title: FloatMark 测试文档</p>",
+		"<ul>",
+		"<li id=\"blk-tag-1\">FloatMark</li>",
+		"<li id=\"blk-tag-2\">Obsidian</li>",
+		"<li id=\"blk-tag-3\">测试</li>",
+		"</ul>",
+		"<hr id=\"hr-close\"/>",
+		"<p id=\"blk-body\">Body</p>"
+	].join(""),
+	13
+);
+const bindingOnlyDoubleFrontmatterWithTitleResidueState = {
+	...bindingOnlyDoubleFrontmatterState,
+	units: bindingOnlyDoubleFrontmatterState.units.map((unit, index) => {
+		return index === 6 ? { ...unit, blockId: "" } : unit;
+	})
+};
+const leadingMetadataInsertPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: [
+		"# Note",
+		"",
+		"> \"111\": \"222\"",
+		"> tags:",
+		"",
+		"---",
+		"title: FloatMark 测试文档",
+		"tags:",
+		"  - FloatMark",
+		"  - Obsidian",
+		"  - 测试",
+		"---",
+		"",
+		"Body"
+	].join("\n"),
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: bindingOnlyDoubleFrontmatterWithTitleResidueState
+});
+assert.equal(leadingMetadataInsertPlan.mode, "precise");
+assert.deepEqual(leadingMetadataInsertPlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "title",
+	contentFileName: "sync.md",
+	content: [
+		"> \"111\": \"222\"",
+		"> tags:"
+	].join("\n")
+}]);
 
 const localMetadataQuoteSignature = await createSyncContentSignature([
 	"# Note",
