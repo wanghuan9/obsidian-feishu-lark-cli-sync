@@ -32,6 +32,7 @@ import {
 	LarkSyncStateFile,
 	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
+	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
 	SyncFailureReason,
 	SyncMode,
@@ -3122,6 +3123,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		this.selfWrittenPaths.set(file.path, Date.now());
+		const rawContent = await this.app.vault.read(file);
+		const normalizedContent = removeBindingOnlyFrontmatterBeforeNextFrontmatter(rawContent);
+		if (normalizedContent !== rawContent) {
+			await this.app.vault.modify(file, normalizedContent);
+			this.selfWrittenPaths.set(file.path, Date.now());
+		}
+
 		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
 			delete frontmatter.lark_doc;
 			delete frontmatter[FRONTMATTER_TOKEN_KEY];

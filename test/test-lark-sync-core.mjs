@@ -26,10 +26,12 @@ const {
 	isDocumentStateBlockMappingAcceptable,
 	isDocumentStateContentEquivalent,
 	isRemoteXmlContentEquivalent,
+	isSyncContentSignatureEquivalent,
 	normalizeStateCacheRetainLimit,
 	normalizeStateCacheTrimThreshold,
 	prepareNoteContentForLark,
 	readBindingFromMarkdown,
+	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
 	trimSyncStateCache
 } = await import("./.tmp-lark-sync-core-test.mjs");
@@ -57,6 +59,86 @@ lark_doc_url: "https://example.feishu.cn/docx/abc"
 lark_doc_token: "abc"
 ---
 Body`), "Body");
+
+assert.equal(removeLarkBinding(`---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+---
+
+---
+title: FloatMark 测试文档
+tags:
+  - FloatMark
+  - Obsidian
+  - 测试
+---
+
+# FloatMark 测试文档
+
+Body`), `---
+title: FloatMark 测试文档
+tags:
+  - FloatMark
+  - Obsidian
+  - 测试
+---
+
+# FloatMark 测试文档
+
+Body`);
+
+assert.equal(removeBindingOnlyFrontmatterBeforeNextFrontmatter(`---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+---
+
+---
+title: FloatMark 测试文档
+tags:
+  - FloatMark
+---
+
+Body`), `---
+title: FloatMark 测试文档
+tags:
+  - FloatMark
+---
+
+Body`);
+
+assert.equal(removeBindingOnlyFrontmatterBeforeNextFrontmatter(`---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+tags:
+  - sync
+---
+
+---
+title: FloatMark 测试文档
+---
+
+Body`), `---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+tags:
+  - sync
+---
+
+---
+title: FloatMark 测试文档
+---
+
+Body`);
+
+assert.equal(removeBindingOnlyFrontmatterBeforeNextFrontmatter(`---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+---
+
+---
+
+Body`), `---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+---
+
+---
+
+Body`);
 
 assert.equal(removeLarkBinding(`---
 需求: ITC-75612 牛商堂留货 - M3 回收单展示改造
@@ -283,6 +365,77 @@ const metadataQuoteState = await createDocumentSyncStateFromRemote(
 	].join("")
 );
 assert.deepEqual(metadataQuoteState.units.map((unit) => unit.blockId), ["blk-meta", "blk-heading", "blk-body"]);
+
+const localMetadataQuoteSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"> 需求: ITC-75612 牛商堂留货 - B 部分（留货直销单）",
+	"> PRD: https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d",
+	"> Demo: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/holding-direct-sale-order-list-demo.html",
+	"> 负责人: B"
+].join("\n"));
+const exportedMetadataQuoteSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"> 需求: ITC-75612 牛商堂留货 - B 部分（留货直销单）  ",
+	"> PRD: [https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d](https://atrenew.feishu.cn/docx/N3lBdoxd3ow1HsxvYanc7ZCEn0d)  ",
+	"> Demo: [https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612](https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612)\\_牛商堂留货/holding-direct-sale-order-list-demo.html",
+	"> 负责人: B"
+].join("\n"));
+assert.ok(isSyncContentSignatureEquivalent(exportedMetadataQuoteSignature, localMetadataQuoteSignature));
+const paragraphUrlSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"Demo: https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612_牛商堂留货/holding-direct-sale-order-list-demo.html"
+].join("\n"));
+const exportedParagraphUrlSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"Demo: [https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612](https://sr.aihuishou.com/b2b/eagle/uULUSIM2/ITC-75612)\\_牛商堂留货/holding-direct-sale-order-list-demo.html"
+].join("\n"));
+assert.equal(isSyncContentSignatureEquivalent(exportedParagraphUrlSignature, paragraphUrlSignature), false);
+const localFormattedSpanSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"5. **逆向释放**：订单取消时**不改** `holding_item` 状态、**不释放**规则占用额度"
+].join("\n"));
+const exportedFormattedSpanSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"5. **逆向释放**：订单取消时**不改**`holding_item` 状态、**不释放**规则占用额度"
+].join("\n"));
+assert.ok(isSyncContentSignatureEquivalent(exportedFormattedSpanSignature, localFormattedSpanSignature));
+const localInternalLinkSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"> 字段明细见 [6. 接口设计](#6-接口设计)。"
+].join("\n"));
+const exportedInternalLinkSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"> 字段明细见 6. 接口设计。"
+].join("\n"));
+assert.ok(isSyncContentSignatureEquivalent(exportedInternalLinkSignature, localInternalLinkSignature));
+const localMermaidSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"```mermaid",
+	"flowchart TD",
+	"    A --> B[\"holding_item: 留货中 → 下单中\"]",
+	"    B --> C[\"推送履约消息<br/>串行确认上拍\"]",
+	"```"
+].join("\n"));
+const exportedMermaidSignature = await createSyncContentSignature([
+	"# Note",
+	"",
+	"```mermaid",
+	"flowchart TD",
+	"    A --> B[holding_item: 留货中 → 下单中]",
+	"    B --> C[\"推送履约消息",
+	"串行确认上拍\"]",
+	"```"
+].join("\n"));
+assert.ok(isSyncContentSignatureEquivalent(exportedMermaidSignature, localMermaidSignature));
 
 const overwritePlan = await buildSyncPlan({
 	doc: "doc-token",

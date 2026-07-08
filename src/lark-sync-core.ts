@@ -337,6 +337,33 @@ export function removeLarkBinding(content: string): string {
 	return `${quotedFrontmatter}\n\n${trimmedBody}`;
 }
 
+export function removeBindingOnlyFrontmatterBeforeNextFrontmatter(content: string): string {
+	if (!content.startsWith("---")) {
+		return content;
+	}
+
+	const endMatch = content.slice(3).match(/\n---\r?\n/);
+	if (!endMatch || endMatch.index === undefined) {
+		return content;
+	}
+
+	const frontmatterStart = 3;
+	const frontmatterEnd = frontmatterStart + endMatch.index;
+	const frontmatter = content.slice(frontmatterStart, frontmatterEnd);
+	if (!hasYamlObjectKey(frontmatter.split(/\r?\n/), FRONTMATTER_BINDING_KEYS)) {
+		return content;
+	}
+
+	const filteredLines = removeYamlObjects(frontmatter.split(/\r?\n/), FRONTMATTER_BINDING_KEYS);
+	if (filteredLines.join("\n").trim()) {
+		return content;
+	}
+
+	const body = content.slice(frontmatterEnd + endMatch[0].length);
+	const trimmedBody = body.replace(/^\s+/, "");
+	return hasLeadingYamlFrontmatterBlock(trimmedBody) ? trimmedBody : content;
+}
+
 function createMetadataBlockquote(frontmatter: string): string {
 	return frontmatter.split(/\r?\n/)
 		.map((line) => `> ${normalizeMetadataBlockquoteLine(line)}`.trimEnd())
@@ -2234,7 +2261,7 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 		}
 
 		const start = index;
-		const kind = readMarkdownBlockKind(line);
+		const kind = isMarkdownTableStart(lines, index) ? "table" : readMarkdownBlockKind(line);
 		if (kind === "heading" || kind === "hr") {
 			index += 1;
 		} else if (kind === "code") {
@@ -2245,17 +2272,22 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 			if (index < lines.length) {
 				index += 1;
 			}
-	} else if (kind === "list") {
-		index += 1;
-		while (index < lines.length
-			&& (lines[index] || "").trim() !== ""
-			&& readMarkdownBlockKind(lines[index] || "") === "paragraph"
-			&& !isMarkdownParagraphLabelBoundary(lines[index] || "")) {
+		} else if (kind === "list") {
 			index += 1;
-		}
-	} else if (kind === "blockquote" || kind === "table") {
+			while (index < lines.length
+				&& (lines[index] || "").trim() !== ""
+				&& readMarkdownBlockKind(lines[index] || "") === "paragraph"
+				&& !isMarkdownParagraphLabelBoundary(lines[index] || "")) {
+				index += 1;
+			}
+		} else if (kind === "blockquote") {
 			index += 1;
 			while (index < lines.length && readMarkdownBlockKind(lines[index] || "") === kind) {
+				index += 1;
+			}
+		} else if (kind === "table") {
+			index += 1;
+			while (index < lines.length && isMarkdownTableBlockLine(lines[index] || "")) {
 				index += 1;
 			}
 		} else {
@@ -2275,6 +2307,18 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 	}
 
 	return blocks;
+}
+
+function isMarkdownTableStart(lines: string[], index: number): boolean {
+	const line = lines[index] || "";
+	const nextLine = lines[index + 1] || "";
+	return isMarkdownTableBlockLine(line)
+		&& isMarkdownTableBlockLine(nextLine)
+		&& isMarkdownTableSeparatorLine(normalizeMarkdownTableRow(nextLine));
+}
+
+function isMarkdownTableBlockLine(line: string): boolean {
+	return line.trim() !== "" && line.includes("|");
 }
 
 function isMarkdownBlockBoundary(line: string): boolean {
@@ -2485,15 +2529,24 @@ function createMarkdownFingerprint(kind: string, content: string): string {
 
 		return line;
 	});
-	return normalizeFingerprintText(normalizedLines.join("\n"));
+	const comparisonContent = kind === "blockquote"
+		? normalizeBlockquoteUrlSelfLinks(normalizedLines.join("\n"))
+		: normalizedLines.join("\n");
+	return normalizeFingerprintText(comparisonContent);
 }
 
 function createMarkdownComparisonContent(kind: string, content: string): string {
 	if (kind === "code") {
-		return content.replace(/\r\n/g, "\n").trim();
+		return isMarkdownMermaidBlock(content)
+			? createMarkdownCodeFingerprint(content)
+			: content.replace(/\r\n/g, "\n").trim();
 	}
 
 	return createMarkdownFingerprint(kind, content);
+}
+
+function isMarkdownMermaidBlock(content: string): boolean {
+	return isMarkdownMermaidFence((content.replace(/\r\n/g, "\n").split("\n")[0] || ""));
 }
 
 function createMarkdownTableFingerprint(content: string): string {
@@ -2522,10 +2575,17 @@ function normalizeMarkdownTableRow(line: string): string {
 function createMarkdownCodeFingerprint(content: string): string {
 	const lines = content.replace(/\r\n/g, "\n").split("\n");
 	if (lines.length >= 2 && /^\s{0,3}```/.test(lines[0] || "") && /^\s{0,3}```\s*$/.test(lines[lines.length - 1] || "")) {
-		return normalizeFingerprintText(lines.slice(1, -1).join("\n"));
+		const codeContent = lines.slice(1, -1).join("\n");
+		return normalizeFingerprintText(isMarkdownMermaidFence(lines[0] || "")
+			? normalizeMermaidCodeRoundTrip(codeContent)
+			: codeContent);
 	}
 
 	return normalizeFingerprintText(content);
+}
+
+function isMarkdownMermaidFence(fenceLine: string): boolean {
+	return /^\s{0,3}```\s*mermaid\b/i.test(fenceLine);
 }
 
 function createMarkdownListFingerprint(content: string): string {
@@ -2633,7 +2693,7 @@ function createXmlTableFingerprint(content: string): string {
 }
 
 function normalizeFingerprintText(content: string): string {
-	return decodeXmlEntities(content)
+	return normalizeMarkdownRoundTripText(decodeXmlEntities(content))
 		.replace(/\\([~`*_{[\]}()#+\-.!|<>])/g, "$1")
 		.replace(/`([^`]+)`/g, "$1")
 		.replace(/\*\*([^*]+)\*\*/g, "$1")
@@ -2642,6 +2702,46 @@ function normalizeFingerprintText(content: string): string {
 		.replace(/_([^_]+)_/g, "$1")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function normalizeMarkdownRoundTripText(content: string): string {
+	return normalizeMarkdownInternalLinks(normalizeMarkdownFormattedSpanSpacing(content));
+}
+
+function normalizeMarkdownInternalLinks(content: string): string {
+	return content.replace(/\[((?:`[^`\n]*`|[^\]\n])*)\]\((?!https?:\/\/|mailto:)([^)\s]+)\)/g, "$1");
+}
+
+function normalizeMarkdownFormattedSpanSpacing(content: string): string {
+	let normalizedContent = content;
+	let previousContent = "";
+	while (normalizedContent !== previousContent) {
+		previousContent = normalizedContent;
+		normalizedContent = normalizedContent
+			.replace(/(\*\*[^*\n]+?\*\*)\s+(`[^`\n]+`|~~[^~\n]+?~~)/g, "$1$2")
+			.replace(/(`[^`\n]+`|~~[^~\n]+?~~)\s+(\*\*[^*\n]+?\*\*)/g, "$1$2")
+			.replace(/(`[^`\n]+`)\s+(`[^`\n]+`)/g, "$1$2");
+	}
+	return normalizedContent;
+}
+
+function normalizeMermaidCodeRoundTrip(content: string): string {
+	return content
+		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/\["([\s\S]*?)"\]/g, "[$1]");
+}
+
+function normalizeBlockquoteUrlSelfLinks(content: string): string {
+	return content.replace(
+		/\[((?:https?:\/\/|mailto:)[^\]\s]+)\]\(([^)\s]+)\)/g,
+		(match, label: string, href: string) => {
+			return normalizeMarkdownLinkTarget(label) === normalizeMarkdownLinkTarget(href) ? label : match;
+		}
+	);
+}
+
+function normalizeMarkdownLinkTarget(target: string): string {
+	return target.replace(/\\([~`*_{[\]}()#+\-.!|<>])/g, "$1");
 }
 
 function decodeXmlEntities(content: string): string {
@@ -2731,6 +2831,11 @@ function readFrontmatter(content: string): string {
 	return content.slice(3, 3 + endMatch.index);
 }
 
+function hasLeadingYamlFrontmatterBlock(content: string): boolean {
+	const frontmatter = readFrontmatter(content);
+	return !!frontmatter && hasYamlObjectKey(frontmatter.split(/\r?\n/));
+}
+
 function readYamlString(frontmatter: string, key: string): string {
 	const pattern = new RegExp(`^${escapeRegExp(key)}:\\s*(.*)$`, "m");
 	const match = frontmatter.match(pattern);
@@ -2770,6 +2875,16 @@ function removeYamlObjects(lines: string[], keys: string[]): string[] {
 	}
 
 	return result;
+}
+
+function hasYamlObjectKey(lines: string[], keys?: string[]): boolean {
+	const keySet = keys ? new Set(keys) : null;
+	return lines.some((line) => {
+		const keyMatch = line.match(/^(\s*)([A-Za-z0-9_-]+):/);
+		const indent = keyMatch?.[1]?.length || 0;
+		const name = keyMatch?.[2];
+		return indent === 0 && !!name && (!keySet || keySet.has(name));
+	});
 }
 
 function escapeRegExp(value: string): string {
