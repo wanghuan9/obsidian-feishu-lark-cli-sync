@@ -27,8 +27,10 @@ import {
 	getDocumentStateKeys,
 	formatSyncFailureMessage,
 	isSyncContentSignatureEquivalent,
+	mergeSyncStateFiles,
 	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
+	prepareOverwriteMarkdownContent,
 	readBindingFromMarkdown,
 	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
@@ -68,6 +70,8 @@ let checkedLarkCliVersionExecutable = "";
 let pendingLarkCliVersionExecutable = "";
 let pendingLarkCliVersionCheck = null;
 let settingsPath = "";
+const changedSyncStateKeys = new Set();
+const removedSyncStateKeys = new Set();
 
 async function main() {
 	const repoRoot = await git(["rev-parse", "--show-toplevel"]);
@@ -292,7 +296,9 @@ async function executeSyncPlanForTask(task, settings, syncState, doc, contentFor
 		let nextRevisionId = baseRevisionId;
 		for (let index = 0; index < plan.commands.length; index += 1) {
 			const command = plan.commands[index];
-			const contentFileName = "content" in command && command.content
+			const contentFileName = command.command === "overwrite"
+				? await writeTempMarkdown(tempFile.directory, `sync-${index}`, prepareOverwriteMarkdownContent(contentForLark))
+				: "content" in command && command.content
 				? await writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
 				: tempFile.fileName;
 			const commandRevisionId = plan.mode === "precise" ? nextRevisionId : undefined;
@@ -405,10 +411,10 @@ function savePlanState(syncState, docs, plan) {
 	}
 
 	const stateKey = getDocumentStateKey(plan.nextState.doc || docs[0] || "");
-	syncState.documents[stateKey] = {
+	setDocumentSyncState(syncState, stateKey, {
 		...touchDocumentSyncState(plan.nextState),
 		doc: stateKey
-	};
+	});
 	removeSyncStateKeys(syncState, docs, stateKey);
 }
 
@@ -445,10 +451,10 @@ async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedM
 	}
 
 	const stateKey = getDocumentStateKey(state.doc);
-	syncState.documents[stateKey] = {
+	setDocumentSyncState(syncState, stateKey, {
 		...touchDocumentSyncState(state),
 		doc: stateKey
-	};
+	});
 	removeSyncStateKeys(syncState, docs, stateKey);
 }
 
@@ -456,9 +462,21 @@ function removeSyncStateKeys(syncState, docs, keepDoc) {
 	const keepKey = getDocumentStateKey(keepDoc);
 	for (const key of getDocumentStateKeys(docs)) {
 		if (key !== keepKey) {
-			delete syncState.documents[key];
+			deleteDocumentSyncStateKey(syncState, key);
 		}
 	}
+}
+
+function setDocumentSyncState(syncState, stateKey, state) {
+	syncState.documents[stateKey] = state;
+	changedSyncStateKeys.add(stateKey);
+	removedSyncStateKeys.delete(stateKey);
+}
+
+function deleteDocumentSyncStateKey(syncState, stateKey) {
+	delete syncState.documents[stateKey];
+	changedSyncStateKeys.delete(stateKey);
+	removedSyncStateKeys.add(stateKey);
 }
 
 async function fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedMarkdown) {
@@ -550,10 +568,10 @@ async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs, expe
 	}
 
 	const stateKey = getDocumentStateKey(remoteDoc);
-	syncState.documents[stateKey] = {
+	setDocumentSyncState(syncState, stateKey, {
 		...touchDocumentSyncState(state),
 		doc: stateKey
-	};
+	});
 
 	return state;
 }
@@ -708,11 +726,18 @@ async function writeSyncState(repoRoot, syncState, settings) {
 	const tempPath = `${statePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
 	await mkdir(dirname(statePath), { recursive: true });
 	try {
-		const nextState = trimSyncStateCache(syncState, {
+		const persistedState = await readSyncState(repoRoot);
+		const mergedState = mergeSyncStateFiles(persistedState, syncState, {
+			changedKeys: changedSyncStateKeys,
+			removedKeys: removedSyncStateKeys
+		});
+		const nextState = trimSyncStateCache(mergedState, {
 			retainLimit: normalizeStateCacheRetainLimit(settings.stateCacheRetainLimit, DEFAULT_STATE_CACHE_RETAIN_LIMIT)
 		});
 		await writeFile(tempPath, JSON.stringify(nextState, null, 2), "utf8");
 		await rename(tempPath, statePath);
+		changedSyncStateKeys.clear();
+		removedSyncStateKeys.clear();
 	} catch (error) {
 		await rm(tempPath, { force: true });
 		throw error;

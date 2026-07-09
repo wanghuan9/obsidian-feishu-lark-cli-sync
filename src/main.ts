@@ -31,8 +31,10 @@ import {
 	isSyncContentSignatureEquivalent,
 	LEGACY_FRONTMATTER_SYNCED_AT_KEY,
 	LarkSyncStateFile,
+	mergeSyncStateFiles,
 	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
+	prepareOverwriteMarkdownContent,
 	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
 	stripPreparedMarkdownTitle,
@@ -455,6 +457,8 @@ export default class LarkCliSyncPlugin extends Plugin {
 	private larkCliActiveRequestCount = 0;
 	private lastLarkCliRequestAt = 0;
 	private syncState: LarkSyncStateFile = createEmptySyncStateFile();
+	private readonly syncStateChangedKeys = new Set<string>();
+	private readonly syncStateRemovedKeys = new Set<string>();
 
 	override async onload(): Promise<void> {
 		addIcon(LARK_RIBBON_ICON_ID, LARK_RIBBON_ICON_SVG);
@@ -956,15 +960,72 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}
 
 		const tempPath = `${statePath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+		const changedKeys = new Set(this.syncStateChangedKeys);
+		const removedKeys = new Set(this.syncStateRemovedKeys);
+		this.syncStateChangedKeys.clear();
+		this.syncStateRemovedKeys.clear();
 		await mkdir(dirname(statePath), { recursive: true });
 		try {
-			const nextState = this.trimSyncStateCacheIfNeeded(this.syncState);
+			const persistedState = await this.readPersistedLarkSyncState(statePath);
+			const mergedState = mergeSyncStateFiles(persistedState, this.syncState, {
+				changedKeys,
+				removedKeys
+			});
+			const nextState = this.trimSyncStateCacheIfNeeded(mergedState);
 			await writeFile(tempPath, JSON.stringify(nextState, null, 2), "utf8");
-			this.syncState = nextState;
 			await rename(tempPath, statePath);
+			this.syncState = mergeSyncStateFiles(nextState, this.syncState, {
+				changedKeys: this.syncStateChangedKeys,
+				removedKeys: this.syncStateRemovedKeys
+			});
 		} catch (error) {
+			this.restorePendingSyncStateKeys(changedKeys, removedKeys);
 			await rm(tempPath, { force: true });
 			throw error;
+		}
+	}
+
+	private async readPersistedLarkSyncState(statePath: string): Promise<LarkSyncStateFile | undefined> {
+		try {
+			const rawState = await readFile(statePath, "utf8");
+			const state: unknown = JSON.parse(rawState);
+			if (this.isValidLarkSyncStateFile(state)) {
+				return {
+					version: 1,
+					documents: state.documents
+				};
+			}
+		} catch (error) {
+			if (!this.isFileNotFoundError(error)) {
+				console.warn("[Feishu Lark CLI Sync] failed to read persisted sync state", error);
+			}
+		}
+
+		return undefined;
+	}
+
+	private setDocumentSyncState(stateKey: string, state: LarkSyncStateFile["documents"][string]): void {
+		this.syncState.documents[stateKey] = state;
+		this.syncStateChangedKeys.add(stateKey);
+		this.syncStateRemovedKeys.delete(stateKey);
+	}
+
+	private deleteDocumentSyncStateKey(stateKey: string): void {
+		delete this.syncState.documents[stateKey];
+		this.syncStateChangedKeys.delete(stateKey);
+		this.syncStateRemovedKeys.add(stateKey);
+	}
+
+	private restorePendingSyncStateKeys(changedKeys: Iterable<string>, removedKeys: Iterable<string>): void {
+		for (const key of changedKeys) {
+			if (!this.syncStateRemovedKeys.has(key)) {
+				this.syncStateChangedKeys.add(key);
+			}
+		}
+		for (const key of removedKeys) {
+			if (!this.syncStateChangedKeys.has(key)) {
+				this.syncStateRemovedKeys.add(key);
+			}
 		}
 	}
 
@@ -1531,7 +1592,9 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				await this.saveLarkSyncState();
 			}
 			for (const [index, command] of plan.commands.entries()) {
-				const contentFileName = "content" in command && command.content
+				const contentFileName = command.command === "overwrite"
+					? await this.writeTempMarkdown(tempFile.directory, `sync-${index}`, prepareOverwriteMarkdownContent(content))
+					: "content" in command && command.content
 					? await this.writeTempMarkdown(tempFile.directory, `sync-${index}`, command.content)
 					: tempFile.fileName;
 				const commandRevisionId = plan.mode === "precise" ? nextRevisionId : undefined;
@@ -1599,10 +1662,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		const stateKey = getDocumentStateKey(doc);
-		this.syncState.documents[stateKey] = {
+		this.setDocumentSyncState(stateKey, {
 			...touchDocumentSyncState(nextState),
 			doc: stateKey
-		};
+		});
 		await this.saveLarkSyncState();
 	}
 
@@ -1732,7 +1795,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const keepKey = getDocumentStateKey(keepDoc);
 		for (const key of getDocumentStateKeys(docs)) {
 			if (key !== keepKey) {
-				delete this.syncState.documents[key];
+				this.deleteDocumentSyncStateKey(key);
 			}
 		}
 	}
@@ -1986,10 +2049,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		aliases: string[]
 	): Promise<void> {
 		const stateKey = getDocumentStateKey(state.doc);
-		this.syncState.documents[stateKey] = {
+		this.setDocumentSyncState(stateKey, {
 			...touchDocumentSyncState(state),
 			doc: stateKey
-		};
+		});
 		this.removeSyncStateKeys(aliases, stateKey);
 		await this.saveLarkSyncState();
 	}
@@ -2220,7 +2283,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private removeSyncStateForDocuments(docs: string[]): void {
 		const keys = uniquePathEntries([...docs, ...getDocumentStateKeys(docs)]);
 		for (const key of keys) {
-			delete this.syncState.documents[key];
+			this.deleteDocumentSyncStateKey(key);
 		}
 	}
 
