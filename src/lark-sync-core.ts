@@ -31,6 +31,11 @@ export interface TrimSyncStateCacheOptions {
 	trimThreshold?: number;
 }
 
+export interface MergeSyncStateFilesOptions {
+	changedKeys?: Iterable<string>;
+	removedKeys?: Iterable<string>;
+}
+
 export interface DocumentSyncState {
 	doc: string;
 	revisionId?: number;
@@ -264,6 +269,34 @@ export function trimSyncStateCache(
 	};
 }
 
+export function mergeSyncStateFiles(
+	persistedState: LarkSyncStateFile | undefined,
+	nextState: LarkSyncStateFile,
+	options: MergeSyncStateFilesOptions = {}
+): LarkSyncStateFile {
+	const documents: Record<string, DocumentSyncState> = {
+		...(persistedState?.documents || {})
+	};
+	const changedKeys = options.changedKeys
+		? Array.from(new Set(options.changedKeys))
+		: Object.keys(nextState.documents);
+	for (const key of changedKeys) {
+		const documentState = nextState.documents[key];
+		if (documentState) {
+			documents[key] = documentState;
+		}
+	}
+
+	for (const key of options.removedKeys || []) {
+		delete documents[key];
+	}
+
+	return {
+		version: 1,
+		documents
+	};
+}
+
 export function normalizeStateCacheRetainLimit(value: unknown, fallback = 100): number {
 	const numericValue = typeof value === "number"
 		? value
@@ -368,6 +401,10 @@ export function buildUpdateDocumentArgs(doc: string, fileName: string): string[]
 		docFormat: "markdown",
 		contentFileName: fileName
 	});
+}
+
+export function prepareOverwriteMarkdownContent(markdown: string): string {
+	return stripPreparedMarkdownTitle(markdown);
 }
 
 export function buildUpdateCommandArgs(command: LarkUpdateCommand): string[] {
@@ -2267,7 +2304,8 @@ function areEquivalentContentUnits(
 }
 
 async function createMarkdownSyncUnits(markdown: string): Promise<MarkdownSyncUnit[]> {
-	const blocks = splitMarkdownTopLevelBlocks(stripMarkdownTitle(markdown));
+	const title = readMarkdownDocumentTitle(markdown);
+	const blocks = splitMarkdownTopLevelBlocks(stripRedundantBodyTitle(stripMarkdownTitle(markdown), title, false));
 	const units: MarkdownSyncUnit[] = [];
 	for (const [index, block] of blocks.entries()) {
 		units.push({
@@ -2322,15 +2360,52 @@ function normalizeMarkdownDocumentTitle(markdown: string): string {
 		return lines.join("\n");
 	}
 
-	return [
+	const normalizedMarkdown = [
 		...lines.slice(0, titleIndex),
 		`# ${title}`,
 		...lines.slice(titleIndex + 1)
 	].join("\n");
+	return stripRedundantBodyTitle(normalizedMarkdown, title, true);
 }
 
 function isMarkdownDocumentTitleLine(line: string): boolean {
 	return /^#\s+/.test(line) || /^<title(?:\s[^>]*)?>[\s\S]*<\/title>\s*$/i.test(line.trim());
+}
+
+function stripRedundantBodyTitle(markdown: string, title: string | undefined, hasDocumentTitle: boolean): string {
+	if (!title) {
+		return markdown;
+	}
+
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	const titleIndex = hasDocumentTitle ? lines.findIndex((line) => isMarkdownDocumentTitleLine(line || "")) : -1;
+	let bodyStartIndex = titleIndex >= 0 ? titleIndex + 1 : 0;
+	while (bodyStartIndex < lines.length && (lines[bodyStartIndex] || "").trim() === "") {
+		bodyStartIndex += 1;
+	}
+
+	for (let index = bodyStartIndex; index < lines.length; index += 1) {
+		const line = lines[index] || "";
+		if (!isMarkdownDocumentTitleLine(line)) {
+			continue;
+		}
+
+		const bodyTitle = readMarkdownDocumentTitleLine(line);
+		if (normalizeFingerprintText(bodyTitle || "") !== normalizeFingerprintText(title)) {
+			return markdown;
+		}
+
+		let nextIndex = index + 1;
+		while (nextIndex < lines.length && (lines[nextIndex] || "").trim() === "") {
+			nextIndex += 1;
+		}
+		return [
+			...lines.slice(0, index),
+			...lines.slice(nextIndex)
+		].join("\n");
+	}
+
+	return markdown;
 }
 
 function readMarkdownDocumentTitleLine(line: string): string | undefined {

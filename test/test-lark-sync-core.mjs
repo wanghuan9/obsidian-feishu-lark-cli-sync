@@ -27,9 +27,11 @@ const {
 	isDocumentStateContentEquivalent,
 	isRemoteXmlContentEquivalent,
 	isSyncContentSignatureEquivalent,
+	mergeSyncStateFiles,
 	normalizeStateCacheRetainLimit,
 	normalizeStateCacheTrimThreshold,
 	prepareNoteContentForLark,
+	prepareOverwriteMarkdownContent,
 	readBindingFromMarkdown,
 	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
@@ -215,6 +217,10 @@ assert.equal(
 	stripPreparedMarkdownTitle("<title>Note</title>\n\n# Heading\n\nBody"),
 	"# Heading\n\nBody"
 );
+assert.equal(
+	prepareOverwriteMarkdownContent("# Note\n\n# Heading\n\nBody"),
+	"# Heading\n\nBody"
+);
 
 assert.deepEqual(buildUpdateDocumentArgs("doc-token", "sync.md"), [
 	"docs",
@@ -325,6 +331,46 @@ const smallTrimmedState = trimSyncStateCache(oversizedState, {
 });
 assert.deepEqual(Object.keys(smallTrimmedState.documents), ["doc-148", "doc-149", "doc-150"]);
 
+const mergedState = mergeSyncStateFiles({
+	version: 1,
+	documents: {
+		"other-doc": {
+			doc: "other-doc",
+			contentHash: "other-hash",
+			units: [],
+			updatedAt: "2026-06-12T00:00:00.000Z"
+		},
+		"legacy-doc-url": {
+			doc: "legacy-doc-url",
+			contentHash: "legacy-hash",
+			units: [],
+			updatedAt: "2026-06-12T00:00:00.000Z"
+		},
+		"doc-token": {
+			doc: "doc-token",
+			contentHash: "old-hash",
+			units: [],
+			updatedAt: "2026-06-12T00:00:00.000Z"
+		}
+	}
+}, {
+	version: 1,
+	documents: {
+		"doc-token": {
+			doc: "doc-token",
+			contentHash: "new-hash",
+			units: [],
+			updatedAt: "2026-06-12T00:00:01.000Z"
+		}
+	}
+}, {
+	changedKeys: ["doc-token"],
+	removedKeys: ["legacy-doc-url"]
+});
+assert.equal(mergedState.documents["other-doc"].contentHash, "other-hash");
+assert.equal(mergedState.documents["doc-token"].contentHash, "new-hash");
+assert.equal(mergedState.documents["legacy-doc-url"], undefined);
+
 const contentHash = await createContentHash("# Note\n\nBody");
 assert.equal(contentHash, await createContentHash("# Note\n\nBody"));
 assert.notEqual(contentHash, await createContentHash("# Note\n\nChanged"));
@@ -334,6 +380,9 @@ const formattedSignature = await createSyncContentSignature("# Note\n\n**Changed
 const localTitleSignature = await createSyncContentSignature("# Note\n\n# Heading\n\nBody");
 const exportedTitleSignature = await createSyncContentSignature("<title>Note</title>\n\n# Heading\n\nBody");
 assert.ok(isSyncContentSignatureEquivalent(exportedTitleSignature, localTitleSignature));
+const localDuplicateTitleSignature = await createSyncContentSignature("# Note\n\nmetadata: true\n\n# Note\n\n## Body");
+const exportedDuplicateTitleSignature = await createSyncContentSignature("# Note\n\nmetadata: true\n\n## Body");
+assert.ok(isSyncContentSignatureEquivalent(exportedDuplicateTitleSignature, localDuplicateTitleSignature));
 const normalizedRemoteState = await createDocumentSyncStateFromRemote(
 	"doc-token",
 	"# Note\n\nChanged",
@@ -802,6 +851,17 @@ assert.deepEqual(bodyHeadingReplacePlan.commands, [{
 	contentFileName: "sync.md",
 	content: "<h1>Body Title Updated</h1>"
 }]);
+
+const duplicateBodyTitleState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\nmetadata: true\n\n# Note\n\n## Body",
+	"<title id=\"doc-token\">Note</title><p id=\"blk-meta\">metadata: true</p><h2 id=\"blk-body\">Body</h2>",
+	8
+);
+assert.equal(duplicateBodyTitleState.revisionId, 8);
+assert.equal(isDocumentStateBlockMappingAcceptable(duplicateBodyTitleState), true);
+assert.deepEqual(duplicateBodyTitleState.units.map((unit) => unit.kind), ["paragraph", "heading"]);
+assert.deepEqual(duplicateBodyTitleState.units.map((unit) => unit.blockId), ["blk-meta", "blk-body"]);
 
 const exportedMarkdownState = await createDocumentSyncStateFromRemote("doc-token", "# Note\n\n## Exported", remoteXml, 7);
 assert.equal(exportedMarkdownState.contentHash, await createContentHash("# Note\n\n## Exported"));
