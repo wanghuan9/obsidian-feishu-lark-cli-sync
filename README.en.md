@@ -1,6 +1,6 @@
 # Feishu Lark CLI Sync
 
-[简体中文](./README.md) | [English](./README.en.md)
+[简体中文](https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync/blob/main/README.md) | [English](https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync/blob/main/README.en.md)
 
 An Obsidian desktop plugin that publishes and syncs Markdown notes to Feishu/Lark Docs through the local `lark-cli`.
 

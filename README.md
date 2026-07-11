@@ -1,6 +1,6 @@
 # Feishu Lark CLI Sync
 
-[简体中文](./README.md) | [English](./README.en.md)
+[简体中文](https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync/blob/main/README.md) | [English](https://github.com/wanghuan9/obsidian-feishu-lark-cli-sync/blob/main/README.en.md)
 
 通过本机 `lark-cli` 将 Obsidian Markdown 笔记发布、同步到飞书 / Lark 云文档的桌面端插件。
 
