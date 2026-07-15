@@ -36,6 +36,21 @@ export interface CommandEnvironmentOptions {
 	loginShellPath?: string;
 }
 
+export interface LarkCliInvocation {
+	executable: string;
+	argsPrefix: string[];
+}
+
+export interface LarkCliInvocationHost {
+	pathExists(path: string): Promise<boolean>;
+	readTextFile(path: string): Promise<string>;
+}
+
+export interface LarkCliInvocationOptions {
+	platform?: NodeJS.Platform;
+	nodeCommand?: string;
+}
+
 export async function resolveLarkCliPathFromSetting(
 	configuredPath: string,
 	host: LarkCliPathHost
@@ -228,6 +243,47 @@ export function formatMissingLarkCli(language: "zh-CN" | "en" = "zh-CN"): string
 
 export function shouldUseCommandShell(executable: string): boolean {
 	return process.platform === "win32" && /\.(cmd|bat)$/i.test(executable);
+}
+
+export async function resolveLarkCliInvocation(
+	executable: string,
+	host: LarkCliInvocationHost,
+	options: LarkCliInvocationOptions = {}
+): Promise<LarkCliInvocation> {
+	const platform = options.platform || process.platform;
+	if (platform !== "win32" || !/\.(cmd|bat)$/i.test(executable)) {
+		return { executable, argsPrefix: [] };
+	}
+
+	const packageDirectory = win32.join(win32.dirname(executable), "node_modules", "@larksuite", "cli");
+	const packageJsonPath = win32.join(packageDirectory, "package.json");
+	let packageJson: { bin?: string | Record<string, string> };
+	try {
+		packageJson = JSON.parse(await host.readTextFile(packageJsonPath)) as typeof packageJson;
+	} catch {
+		throw new Error(`Unable to resolve the @larksuite/cli npm entry point from ${packageJsonPath}.`);
+	}
+
+	const binEntry = typeof packageJson.bin === "string"
+		? packageJson.bin
+		: packageJson.bin?.[LARK_CLI_COMMAND];
+	if (!binEntry) {
+		throw new Error(`The @larksuite/cli package does not declare a ${LARK_CLI_COMMAND} bin entry.`);
+	}
+
+	const entryPath = win32.resolve(packageDirectory, binEntry);
+	if (!await host.pathExists(entryPath)) {
+		throw new Error(`The @larksuite/cli npm entry point was not found: ${entryPath}`);
+	}
+
+	const adjacentNode = win32.join(win32.dirname(executable), "node.exe");
+	const nodeExecutable = await host.pathExists(adjacentNode)
+		? adjacentNode
+		: options.nodeCommand || "node";
+	return {
+		executable: nodeExecutable,
+		argsPrefix: [entryPath]
+	};
 }
 
 export function stripWrappingQuotes(value: string): string {

@@ -52,8 +52,8 @@ import {
 	formatUnsupportedLarkCliVersion,
 	isSupportedLarkCliVersion,
 	parseLarkCliVersion,
+	resolveLarkCliInvocation,
 	resolveLarkCliPathFromSetting,
-	shouldUseCommandShell,
 	uniquePathEntries,
 	withDocsApiVersion
 } from "./lark-cli-command";
@@ -2704,10 +2704,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const executable = await this.resolveLarkCliPath();
 		const env = await this.buildCommandEnvironment(executable);
 		await this.ensureSupportedLarkCliVersion(executable, env);
-		const { stdout } = await execFileAsync(executable, withDocsApiVersion(args), {
+		const invocation = await this.resolveLarkCliInvocation(executable);
+		const { stdout } = await execFileAsync(invocation.executable, [
+			...invocation.argsPrefix,
+			...withDocsApiVersion(args)
+		], {
 			cwd: options.cwd,
 			env,
-			shell: shouldUseCommandShell(executable),
 			maxBuffer: 20 * 1024 * 1024
 		});
 		const result = this.parseLarkCommandResult(stdout);
@@ -2771,11 +2774,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private async readLarkCliVersionOutput(executable: string, env: NodeJS.ProcessEnv): Promise<string> {
 		let lastError: unknown = null;
 		let onlyUnsupportedVersionCommands = true;
+		const invocation = await this.resolveLarkCliInvocation(executable);
 		for (const args of LARK_CLI_VERSION_ARGS) {
 			try {
-				const { stdout, stderr } = await execFileAsync(executable, args, {
+				const { stdout, stderr } = await execFileAsync(invocation.executable, [
+					...invocation.argsPrefix,
+					...args
+				], {
 					env,
-					shell: shouldUseCommandShell(executable),
 					maxBuffer: 1024 * 1024
 				});
 				return `${this.commandOutputToString(stdout)}\n${this.commandOutputToString(stderr)}`;
@@ -3045,6 +3051,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		} finally {
 			this.pendingLarkCliPath = null;
 		}
+	}
+
+	private async resolveLarkCliInvocation(executable: string): Promise<{ executable: string; argsPrefix: string[] }> {
+		return await resolveLarkCliInvocation(executable, {
+			pathExists: (path) => this.pathExists(path),
+			readTextFile: (path) => readFile(path, "utf8")
+		});
 	}
 
 	private async resolveLarkCliPathUncached(configuredPath: string): Promise<string> {
