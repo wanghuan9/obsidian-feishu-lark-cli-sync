@@ -19,6 +19,7 @@ await esbuild.build({
 
 const {
 	buildCommandEnvironment,
+	findWindowsLarkCliInDirectory,
 	formatUnsupportedLarkCliVersion,
 	getDefaultLarkCliCandidates,
 	getDefaultPathEntries,
@@ -95,6 +96,28 @@ assert.deepEqual(invocation, {
 	executable: "node",
 	argsPrefix: [newRunEntry]
 });
+
+await assert.rejects(() => resolveLarkCliInvocation("lark-cli.cmd", {
+	pathExists: async () => false,
+	readTextFile: async () => ""
+}, { platform: "win32" }), /must be absolute/);
+
+await assert.rejects(() => resolveLarkCliInvocation("C:\\Tools\\lark-cli.bat", {
+	pathExists: async () => false,
+	readTextFile: async () => ""
+}, { platform: "win32" }), /\.bat launchers are not supported/);
+
+await assert.rejects(() => resolveLarkCliInvocation("C:\\Tools\\lark-cli.cmd", {
+	pathExists: async () => false,
+	readTextFile: async () => {
+		throw new Error("missing package");
+	}
+}, { platform: "win32" }), /not an npm-installed @larksuite\/cli launcher/);
+
+const ignoredBat = await findWindowsLarkCliInDirectory("/tools", {
+	pathExists: async (path) => path.endsWith("lark-cli.bat")
+});
+assert.equal(ignoredBat, "");
 
 const unixInvocation = await resolveLarkCliInvocation("/usr/local/bin/lark-cli", {
 	pathExists: async () => false,

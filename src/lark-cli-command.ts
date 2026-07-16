@@ -105,7 +105,6 @@ export async function findWindowsLarkCliInDirectory(
 	const candidates = [
 		join(directory, "lark-cli.cmd"),
 		join(directory, "lark-cli.exe"),
-		join(directory, "lark-cli.bat"),
 		join(directory, "npm", "lark-cli.cmd"),
 		join(directory, "Roaming", "npm", "lark-cli.cmd"),
 		join(directory, "Local", "npm", "lark-cli.cmd"),
@@ -251,8 +250,17 @@ export async function resolveLarkCliInvocation(
 	options: LarkCliInvocationOptions = {}
 ): Promise<LarkCliInvocation> {
 	const platform = options.platform || process.platform;
-	if (platform !== "win32" || !/\.(cmd|bat)$/i.test(executable)) {
+	if (platform !== "win32") {
 		return { executable, argsPrefix: [] };
+	}
+	if (/\.bat$/i.test(executable)) {
+		throw new Error("Windows .bat launchers are not supported. Use the npm-generated lark-cli.cmd or native lark-cli.exe.");
+	}
+	if (!/\.cmd$/i.test(executable)) {
+		return { executable, argsPrefix: [] };
+	}
+	if (!win32.isAbsolute(executable)) {
+		throw new Error("The Windows lark-cli.cmd path must be absolute. Keep the default setting for auto-detection or select the npm-generated lark-cli.cmd.");
 	}
 
 	const packageDirectory = win32.join(win32.dirname(executable), "node_modules", "@larksuite", "cli");
@@ -261,7 +269,7 @@ export async function resolveLarkCliInvocation(
 	try {
 		packageJson = JSON.parse(await host.readTextFile(packageJsonPath)) as typeof packageJson;
 	} catch {
-		throw new Error(`Unable to resolve the @larksuite/cli npm entry point from ${packageJsonPath}.`);
+		throw new Error(`The configured lark-cli.cmd is not an npm-installed @larksuite/cli launcher: expected ${packageJsonPath}.`);
 	}
 
 	const binEntry = typeof packageJson.bin === "string"
