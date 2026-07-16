@@ -50,7 +50,7 @@ async function run() {
 		await testPreciseSkipPreservesRemoteInsertedHeading(workspace);
 		await testPreciseRefreshBeforeUpdateAvoidsDuplicateInsert(workspace);
 		await testOverwriteDoesNotPersistEmptyState(workspace);
-		await testOverwriteStripsDocumentTitleBeforeUpdate(workspace);
+		await testOverwritePreservesDocumentTitleBeforeUpdate(workspace);
 		await testOverwriteUpdates(workspace);
 		await testUnboundFilesDoNotBlock(workspace);
 		await testCanonicalStateKey(workspace);
@@ -910,7 +910,7 @@ async function testOverwriteDoesNotPersistEmptyState(workspace) {
 	assert.deepEqual(state.documents["doc-token"].units.map((unit) => unit.blockId), ["blk-1"]);
 }
 
-async function testOverwriteStripsDocumentTitleBeforeUpdate(workspace) {
+async function testOverwritePreservesDocumentTitleBeforeUpdate(workspace) {
 	await resetWorkspaceFiles(workspace);
 	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Changed"));
 	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
@@ -924,7 +924,7 @@ async function testOverwriteStripsDocumentTitleBeforeUpdate(workspace) {
 		}
 	});
 	const overwritten = await readFile(join(workspace, "lark-cli.log.overwrite-https___example_feishu_cn_docx_doc-token.md"), "utf8");
-	assert.equal(overwritten, "Changed");
+	assert.equal(overwritten, "# bound\n\nChanged");
 	const state = await readSyncState(workspace);
 	assert.deepEqual(state.documents["doc-token"].units.map((unit) => unit.blockId), ["blk-1"]);
 }

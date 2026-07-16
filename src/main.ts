@@ -1347,11 +1347,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 
 			const rewrittenContent = this.rewriteInternalLinks(entry.content, linkMap, entry.file);
-			const strategy = entry.isNewDocument ? "overwrite" : undefined;
-			if (entry.isNewDocument && rewrittenContent === entry.content) {
-				await this.saveCreatedDocumentStateFromBaseline(entry.binding, rewrittenContent);
-				continue;
+			if (entry.isNewDocument) {
+				await this.saveCreatedDocumentStateFromBaseline(entry.binding, entry.content);
+				if (rewrittenContent === entry.content) {
+					continue;
+				}
 			}
+			const strategy = entry.isNewDocument ? "precise" : undefined;
 
 			const nextBinding = await this.syncOrRecreateDocument(entry.file, entry.binding, rewrittenContent, entry.parent, {
 				allowRecreate: true,
