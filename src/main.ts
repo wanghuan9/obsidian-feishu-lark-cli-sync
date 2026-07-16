@@ -164,11 +164,6 @@ interface LarkCommandDocument {
 	content?: string;
 }
 
-interface LarkCommandFolder {
-	token?: string;
-	url?: string;
-}
-
 interface LarkCommandNode {
 	node_token?: string;
 	obj_token?: string;
@@ -179,10 +174,10 @@ interface LarkCommandResult {
 	ok: boolean;
 	data?: {
 		token?: string;
+		folder_token?: string;
 		comment_id?: string;
 		reply_id?: string;
 		"document"?: LarkCommandDocument;
-		folder?: LarkCommandFolder;
 		node?: LarkCommandNode;
 		node_token?: string;
 		obj_token?: string;
@@ -2480,8 +2475,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		if (parent.kind === "drive") {
 			const result = await this.runLarkCli(["drive", "+create-folder", "--as", "user",
 				"--folder-token", parent.token, "--name", name, "--json"]);
-			const token = result.data?.folder?.token || result.data?.token;
-			const url = result.data?.folder?.url || result.data?.url || "";
+			const token = result.data?.folder_token;
+			const url = result.data?.url || "";
 
 			if (!token) {
 				throw new Error(this.t("errorNoDocumentToken"));
@@ -2511,8 +2506,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		const result = await this.runLarkCli(args);
-		const token = result.data?.node_token || result.data?.node?.node_token;
-		const url = result.data?.url || result.data?.node?.url || "";
+		const token = result.data?.node_token;
+		const url = result.data?.url || "";
 
 		if (!token) {
 			throw new Error(this.t("errorNoDocumentToken"));
@@ -2924,13 +2919,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return this.isOptionalString(value.token)
+			&& this.isOptionalString(value.folder_token)
 			&& this.isOptionalString(value.comment_id)
 			&& this.isOptionalString(value.reply_id)
 			&& this.isOptionalString(value.node_token)
 			&& this.isOptionalString(value.obj_token)
 			&& this.isOptionalString(value.url)
 			&& this.isOptionalLarkCommandDocument(value["document"])
-			&& this.isOptionalLarkCommandFolder(value.folder)
 			&& this.isOptionalLarkCommandNode(value.node)
 			&& this.isOptionalLarkCommandNode(value.wiki_node);
 	}
@@ -2951,16 +2946,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			&& this.isOptionalString(value.url)
 			&& this.isOptionalNumber(value.revision_id)
 			&& this.isOptionalString(value.content);
-	}
-
-	private isOptionalLarkCommandFolder(value: unknown): value is LarkCommandFolder | undefined {
-		if (value === undefined) {
-			return true;
-		}
-
-		return this.isRecord(value)
-			&& this.isOptionalString(value.token)
-			&& this.isOptionalString(value.url);
 	}
 
 	private isOptionalLarkCommandNode(value: unknown): value is LarkCommandNode | undefined {
