@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
-import { win32 } from "node:path";
+import { execFile } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, win32 } from "node:path";
+import { promisify } from "node:util";
 import esbuild from "esbuild";
+
+const execFileAsync = promisify(execFile);
 
 await esbuild.build({
 	bundle: true,
@@ -13,11 +19,13 @@ await esbuild.build({
 
 const {
 	buildCommandEnvironment,
+	findWindowsLarkCliInDirectory,
 	formatUnsupportedLarkCliVersion,
 	getDefaultLarkCliCandidates,
 	getDefaultPathEntries,
 	isSupportedLarkCliVersion,
 	parseLarkCliVersion,
+	resolveLarkCliInvocation,
 	resolveLarkCliPathFromSetting,
 	shouldUseCommandShell,
 	stripWrappingQuotes,
@@ -50,19 +58,19 @@ assert.equal(stripWrappingQuotes('"C:\\nvm4w\\nodejs\\lark-cli.cmd"'), "C:\\nvm4
 assert.deepEqual(uniquePathEntries(["a", "", "a", "b"]), ["a", "b"]);
 
 const env = {
-	NVM_SYMLINK: "C:\\node",
+	NVM_SYMLINK: "C:\\Program Files\\nodejs",
 	APPDATA: "",
 	LOCALAPPDATA: "",
 	PATH: "C:\\Windows"
 };
-const windowsLarkCli = win32.join("C:\\node", "lark-cli.cmd");
+const windowsLarkCli = win32.join("C:\\Program Files\\nodejs", "lark-cli.cmd");
 const candidates = getDefaultLarkCliCandidates(env, "C:\\Users\\me");
-assert.equal(candidates[0].replace(/\//g, "\\"), "C:\\node\\lark-cli.cmd");
+assert.equal(candidates[0].replace(/\//g, "\\"), "C:\\Program Files\\nodejs\\lark-cli.cmd");
 assert.equal(candidates.includes("npm\\lark-cli.cmd"), false);
 assert.equal(candidates.at(-1), "lark-cli");
 
 const pathEntries = getDefaultPathEntries(env, "C:\\Users\\me");
-assert.equal(pathEntries.includes("C:\\node"), true);
+assert.equal(pathEntries.includes("C:\\Program Files\\nodejs"), true);
 assert.equal(pathEntries.includes(""), false);
 
 const resolvedDefault = await resolveLarkCliPathFromSetting("lark-cli", {
@@ -75,8 +83,53 @@ const resolvedDefault = await resolveLarkCliPathFromSetting("lark-cli", {
 });
 assert.equal(resolvedDefault, windowsLarkCli);
 
+const npmPackageJson = win32.join("C:\\Program Files\\nodejs", "node_modules", "@larksuite", "cli", "package.json");
+const newRunEntry = win32.join("C:\\Program Files\\nodejs", "node_modules", "@larksuite", "cli", "scripts", "new-run.js");
+const invocation = await resolveLarkCliInvocation(windowsLarkCli, {
+	pathExists: async (path) => path === newRunEntry,
+	readTextFile: async (path) => {
+		assert.equal(path, npmPackageJson);
+		return JSON.stringify({ bin: { "lark-cli": "scripts/new-run.js" } });
+	}
+}, { platform: "win32", nodeCommand: "node" });
+assert.deepEqual(invocation, {
+	executable: "node",
+	argsPrefix: [newRunEntry]
+});
+
+await assert.rejects(() => resolveLarkCliInvocation("lark-cli.cmd", {
+	pathExists: async () => false,
+	readTextFile: async () => ""
+}, { platform: "win32" }), /must be absolute/);
+
+await assert.rejects(() => resolveLarkCliInvocation("C:\\Tools\\lark-cli.bat", {
+	pathExists: async () => false,
+	readTextFile: async () => ""
+}, { platform: "win32" }), /\.bat launchers are not supported/);
+
+await assert.rejects(() => resolveLarkCliInvocation("C:\\Tools\\lark-cli.cmd", {
+	pathExists: async () => false,
+	readTextFile: async () => {
+		throw new Error("missing package");
+	}
+}, { platform: "win32" }), /not an npm-installed @larksuite\/cli launcher/);
+
+const ignoredBat = await findWindowsLarkCliInDirectory("/tools", {
+	pathExists: async (path) => path.endsWith("lark-cli.bat")
+});
+assert.equal(ignoredBat, "");
+
+const unixInvocation = await resolveLarkCliInvocation("/usr/local/bin/lark-cli", {
+	pathExists: async () => false,
+	readTextFile: async () => ""
+}, { platform: "linux" });
+assert.deepEqual(unixInvocation, {
+	executable: "/usr/local/bin/lark-cli",
+	argsPrefix: []
+});
+
 const commandEnv = buildCommandEnvironment("lark-cli", { env, homeDir: "C:\\Users\\me" });
-assert.match(commandEnv.PATH || "", /C:\\node/);
+assert.match(commandEnv.PATH || "", /C:\\Program Files\\nodejs/);
 assert.match(commandEnv.PATH || "", /C:\\Windows/);
 
 if (process.platform !== "win32") {
@@ -88,6 +141,40 @@ if (process.platform !== "win32") {
 if (process.platform === "win32") {
 	assert.equal(shouldUseCommandShell("C:\\node\\lark-cli.cmd"), true);
 	assert.equal(shouldUseCommandShell("C:\\node\\lark-cli.exe"), false);
+
+	const workspace = await mkdtemp(join(tmpdir(), "lark cli invocation-"));
+	try {
+		const shimPath = join(workspace, "lark-cli.cmd");
+		const packageDirectory = join(workspace, "node_modules", "@larksuite", "cli");
+		const entryDirectory = join(packageDirectory, "scripts");
+		const entryPath = join(entryDirectory, "new-run.js");
+		await mkdir(entryDirectory, { recursive: true });
+		await writeFile(shimPath, "@echo off\r\n", "utf8");
+		await writeFile(join(packageDirectory, "package.json"), JSON.stringify({
+			bin: { "lark-cli": "scripts/new-run.js" }
+		}), "utf8");
+		await writeFile(entryPath, "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n", "utf8");
+
+		const spacedInvocation = await resolveLarkCliInvocation(shimPath, {
+			pathExists: async (path) => {
+				try {
+					await access(path);
+					return true;
+				} catch {
+					return false;
+				}
+			},
+			readTextFile: (path) => readFile(path, "utf8")
+		}, { platform: "win32", nodeCommand: process.execPath });
+		const { stdout } = await execFileAsync(spacedInvocation.executable, [
+			...spacedInvocation.argsPrefix,
+			"--name",
+			"Folder With Spaces"
+		]);
+		assert.deepEqual(JSON.parse(stdout), ["--name", "Folder With Spaces"]);
+	} finally {
+		await rm(workspace, { force: true, recursive: true });
+	}
 } else {
 	assert.equal(shouldUseCommandShell("/usr/local/bin/lark-cli"), false);
 }

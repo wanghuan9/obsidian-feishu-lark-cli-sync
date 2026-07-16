@@ -11,6 +11,7 @@ import {
 	formatUnsupportedLarkCliVersion,
 	isSupportedLarkCliVersion,
 	parseLarkCliVersion,
+	resolveLarkCliInvocation,
 	resolveLarkCliPathFromSetting,
 	shouldUseCommandShell,
 	withDocsApiVersion
@@ -815,10 +816,10 @@ async function runLarkCliOnce(settings, args, cwd) {
 	const executable = await resolveLarkCliPath(settings);
 	const env = buildCommandEnvironment(executable);
 	await ensureSupportedLarkCliVersion(settings, executable, env);
-	const { stdout } = await execFileAsync(executable, args, {
+	const invocation = await resolveInvocation(executable);
+	const { stdout } = await execFileAsync(invocation.executable, [...invocation.argsPrefix, ...args], {
 		cwd,
 		env,
-		shell: shouldUseCommandShell(executable),
 		maxBuffer: 20 * 1024 * 1024
 	});
 	const result = parseLarkCommandResult(stdout);
@@ -881,11 +882,11 @@ async function checkLarkCliVersion(settings, executable, env) {
 async function readLarkCliVersionOutput(executable, env) {
 	let lastError = null;
 	let onlyUnsupportedVersionCommands = true;
+	const invocation = await resolveInvocation(executable);
 	for (const args of LARK_CLI_VERSION_ARGS) {
 		try {
-			const { stdout, stderr } = await execFileAsync(executable, args, {
+			const { stdout, stderr } = await execFileAsync(invocation.executable, [...invocation.argsPrefix, ...args], {
 				env,
-				shell: shouldUseCommandShell(executable),
 				maxBuffer: 1024 * 1024
 			});
 			return `${commandOutputToString(stdout)}\n${commandOutputToString(stderr)}`;
@@ -942,6 +943,13 @@ async function resolveLarkCliPath(settings) {
 		canExecute,
 		pathExists,
 		isDirectory
+	});
+}
+
+async function resolveInvocation(executable) {
+	return await resolveLarkCliInvocation(executable, {
+		pathExists,
+		readTextFile: (path) => readFile(path, "utf8")
 	});
 }
 
