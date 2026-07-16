@@ -320,7 +320,8 @@ async function executeSyncPlanForTask(task, settings, syncState, doc, contentFor
 				stateKeys,
 				contentForLark,
 				task.repoRelativePath,
-				latestRevisionId
+				latestRevisionId,
+				true
 			);
 		} else if (plan.mode === "overwrite") {
 			await saveRemoteDocumentState(
@@ -345,51 +346,23 @@ async function executeSkippedSyncPlanForTask(task, settings, syncState, doc, con
 		createSyncContentSignature(contentForLark)
 	]);
 	if (isSyncContentSignatureEquivalent(remoteSignature, expectedSignature)) {
-		savePlanState(syncState, stateKeys, plan);
+		const refreshedPlan = remoteMarkdown.revisionId === undefined
+			? plan
+			: { ...plan, nextState: { ...plan.nextState, revisionId: remoteMarkdown.revisionId } };
+		savePlanState(syncState, stateKeys, refreshedPlan);
 		return;
 	}
 
-	const remoteXml = await fetchLarkDocumentWithIds(settings, doc);
-	const remoteState = await createRemoteDocumentState(doc, remoteMarkdown, remoteXml);
-	const repairPlan = await buildSyncPlan({
-		doc: remoteState.doc,
-		markdown: contentForLark,
-		contentFileName: "sync.md",
-		strategy: "precise",
-		state: remoteState
-	});
-	if (repairPlan.mode === "skipped") {
-		savePlanState(syncState, stateKeys, repairPlan);
-		return;
-	}
-	if (repairPlan.mode === "precise") {
-		await executeSyncPlanForTask(
-			task,
-			settings,
-			syncState,
-			remoteState.doc,
-			contentForLark,
-			repairPlan,
-			stateKeys,
-			remoteState.revisionId
-		);
-		return;
-	}
-	if (repairPlan.mode === "blocked") {
-		throw new PrePushSyncError(formatSyncFailureMessage({
-			language: readLanguage(settings),
-			mode: "pre-push",
-			path: task.repoRelativePath,
-			reason: repairPlan.reason
-		}));
-	}
-
-	throw new PrePushSyncError(formatSyncFailureMessage({
-		language: readLanguage(settings),
-		mode: "pre-push",
-		path: task.repoRelativePath,
-		reason: "remote-content-mismatch"
-	}));
+	await saveRemoteDocumentState(
+		settings,
+		syncState,
+		doc,
+		stateKeys,
+		contentForLark,
+		task.repoRelativePath,
+		remoteMarkdown.revisionId,
+		true
+	);
 }
 
 class PrePushSyncError extends Error {
@@ -426,12 +399,27 @@ function isCompleteNextState(nextState) {
 		&& nextState.units.every((unit) => Boolean(unit.blockId));
 }
 
-async function saveRemoteDocumentState(settings, syncState, doc, docs, expectedMarkdown, path, expectedRevisionId) {
+async function saveRemoteDocumentState(
+	settings,
+	syncState,
+	doc,
+	docs,
+	expectedMarkdown,
+	path,
+	expectedRevisionId,
+	allowRemoteChanges = false
+) {
 	let state;
 	for (let attempt = 0; attempt < REMOTE_STATE_REFRESH_ATTEMPTS; attempt += 1) {
 		const remoteState = expectedRevisionId !== undefined
-			? await fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedMarkdown)
-			: await fetchRemoteDocumentState(settings, doc, expectedMarkdown);
+			? await fetchRemoteDocumentStateAfterExpectedRevision(
+				settings,
+				doc,
+				expectedRevisionId,
+				expectedMarkdown,
+				allowRemoteChanges
+			)
+			: await fetchRemoteDocumentState(settings, doc, expectedMarkdown, allowRemoteChanges);
 		if (remoteState && (!expectedMarkdown || isDocumentStateBlockMappingAcceptable(remoteState))) {
 			state = remoteState;
 			break;
@@ -480,10 +468,25 @@ function deleteDocumentSyncStateKey(syncState, stateKey) {
 	removedSyncStateKeys.add(stateKey);
 }
 
-async function fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expectedRevisionId, expectedMarkdown) {
+async function fetchRemoteDocumentStateAfterExpectedRevision(
+	settings,
+	doc,
+	expectedRevisionId,
+	expectedMarkdown,
+	allowRemoteChanges = false
+) {
 	const remoteXml = await fetchLarkDocumentWithIds(settings, doc);
 	if (remoteXml.revisionId === undefined || remoteXml.revisionId < expectedRevisionId) {
 		return undefined;
+	}
+	if (allowRemoteChanges && expectedMarkdown) {
+		const state = await createRemoteDocumentState(
+			doc,
+			{ doc: remoteXml.doc, content: expectedMarkdown, revisionId: remoteXml.revisionId },
+			remoteXml,
+			expectedMarkdown
+		);
+		return isDocumentStateBlockMappingAcceptable(state) ? state : undefined;
 	}
 
 	const remoteMarkdown = await fetchLarkDocumentMarkdown(settings, doc);
@@ -500,7 +503,18 @@ async function fetchRemoteDocumentStateAfterExpectedRevision(settings, doc, expe
 		: state;
 }
 
-async function fetchRemoteDocumentState(settings, doc, expectedMarkdown) {
+async function fetchRemoteDocumentState(settings, doc, expectedMarkdown, allowRemoteChanges = false) {
+	if (allowRemoteChanges && expectedMarkdown) {
+		const remoteXml = await fetchLarkDocumentWithIds(settings, doc);
+		const state = await createRemoteDocumentState(
+			doc,
+			{ doc: remoteXml.doc, content: expectedMarkdown, revisionId: remoteXml.revisionId },
+			remoteXml,
+			expectedMarkdown
+		);
+		return isDocumentStateBlockMappingAcceptable(state) ? state : undefined;
+	}
+
 	const [remoteMarkdown, remoteXml] = await Promise.all([
 		fetchLarkDocumentMarkdown(settings, doc),
 		fetchLarkDocumentWithIds(settings, doc)

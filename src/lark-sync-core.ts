@@ -404,7 +404,7 @@ export function buildUpdateDocumentArgs(doc: string, fileName: string): string[]
 }
 
 export function prepareOverwriteMarkdownContent(markdown: string): string {
-	return stripPreparedMarkdownTitle(markdown);
+	return normalizeMarkdownDocumentTitle(markdown);
 }
 
 export function buildUpdateCommandArgs(command: LarkUpdateCommand): string[] {

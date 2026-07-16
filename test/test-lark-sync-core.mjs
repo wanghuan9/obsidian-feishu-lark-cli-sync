@@ -219,7 +219,15 @@ assert.equal(
 );
 assert.equal(
 	prepareOverwriteMarkdownContent("# Note\n\n# Heading\n\nBody"),
+	"# Note\n\n# Heading\n\nBody"
+);
+assert.equal(
+	prepareOverwriteMarkdownContent("# Heading\n\n# Heading\n\nBody"),
 	"# Heading\n\nBody"
+);
+assert.equal(
+	prepareOverwriteMarkdownContent("<title>Note</title>\n\n# Heading\n\nBody"),
+	"# Note\n\n# Heading\n\nBody"
 );
 
 assert.deepEqual(buildUpdateDocumentArgs("doc-token", "sync.md"), [
@@ -850,6 +858,36 @@ assert.deepEqual(bodyHeadingReplacePlan.commands, [{
 	blockId: "blk-heading",
 	contentFileName: "sync.md",
 	content: "<h1>Body Title Updated</h1>"
+}]);
+
+const promotedBodyHeadingState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Body Title\n\nBody",
+	"<title id=\"doc-token\">Body Title</title><p id=\"blk-1\">Body</p>",
+	8
+);
+const promotedBodyHeadingRepairPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n# Body Title\n\nBody",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: promotedBodyHeadingState
+});
+assert.equal(promotedBodyHeadingRepairPlan.mode, "precise");
+assert.deepEqual(promotedBodyHeadingRepairPlan.commands, [{
+	doc: "doc-token",
+	command: "block_replace",
+	docFormat: "xml",
+	blockId: "doc-token",
+	contentFileName: "sync.md",
+	content: "<title>Note</title>"
+}, {
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "xml",
+	blockId: "doc-token",
+	contentFileName: "sync.md",
+	content: "<h1>Body Title</h1>"
 }]);
 
 const duplicateBodyTitleState = await createDocumentSyncStateFromRemote(
