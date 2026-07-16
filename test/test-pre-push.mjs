@@ -1228,7 +1228,19 @@ if (args.includes("+fetch")) {
 	const scriptPath = join(workspace, "bin", "lark-cli.js");
 	await writeFile(scriptPath, script, "utf8");
 	if (process.platform === "win32") {
-		await writeFile(join(workspace, "bin", "lark-cli.cmd"), "@echo off\r\nnode \"%~dp0\\lark-cli.js\" %*\r\n", "utf8");
+		const packageDirectory = join(workspace, "bin", "node_modules", "@larksuite", "cli");
+		const entryDirectory = join(packageDirectory, "scripts");
+		await mkdir(entryDirectory, { recursive: true });
+		await writeFile(join(packageDirectory, "package.json"), JSON.stringify({
+			name: "@larksuite/cli",
+			bin: { "lark-cli": "scripts/new-run.js" }
+		}), "utf8");
+		await writeFile(join(entryDirectory, "new-run.js"), script, "utf8");
+		await writeFile(
+			join(workspace, "bin", "lark-cli.cmd"),
+			"@echo off\r\nnode \"%~dp0\\node_modules\\@larksuite\\cli\\scripts\\new-run.js\" %*\r\n",
+			"utf8"
+		);
 		return;
 	}
 

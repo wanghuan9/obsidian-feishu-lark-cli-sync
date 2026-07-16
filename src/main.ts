@@ -52,8 +52,8 @@ import {
 	formatUnsupportedLarkCliVersion,
 	isSupportedLarkCliVersion,
 	parseLarkCliVersion,
+	resolveLarkCliInvocation,
 	resolveLarkCliPathFromSetting,
-	shouldUseCommandShell,
 	uniquePathEntries,
 	withDocsApiVersion
 } from "./lark-cli-command";
@@ -318,7 +318,7 @@ const MESSAGES = {
 		languageChinese: "中文",
 		languageEnglish: "English",
 		settingLarkCliPathName: "lark-cli 路径",
-		settingLarkCliPathDesc: "用于执行 lark-cli 的命令或绝对路径。保持默认值时会自动探测。",
+		settingLarkCliPathDesc: "保持默认值时会自动探测；手动配置请填写官方安装目录、npm 生成的 lark-cli.cmd 绝对路径或原生 lark-cli.exe。",
 		settingDefaultTargetName: "默认上传位置",
 		settingDefaultTargetDesc: "填写 Wiki URL、Wiki 节点 token、文件夹 token；留空则上传到个人文档库。",
 		settingTitleSourceName: "标题来源",
@@ -389,7 +389,7 @@ const MESSAGES = {
 		languageChinese: "中文",
 		languageEnglish: "English",
 		settingLarkCliPathName: "lark-cli path",
-		settingLarkCliPathDesc: "Command or absolute path used to run lark-cli. Keep the default for auto-detection.",
+		settingLarkCliPathDesc: "Keep the default for auto-detection, or select the official install directory, npm-generated lark-cli.cmd absolute path, or native lark-cli.exe.",
 		settingDefaultTargetName: "Default target",
 		settingDefaultTargetDesc: "Wiki URL, wiki node token, folder token, or blank for personal library.",
 		settingTitleSourceName: "Title source",
@@ -2718,10 +2718,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		const executable = await this.resolveLarkCliPath();
 		const env = await this.buildCommandEnvironment(executable);
 		await this.ensureSupportedLarkCliVersion(executable, env);
-		const { stdout } = await execFileAsync(executable, withDocsApiVersion(args), {
+		const invocation = await this.resolveLarkCliInvocation(executable);
+		const { stdout } = await execFileAsync(invocation.executable, [
+			...invocation.argsPrefix,
+			...withDocsApiVersion(args)
+		], {
 			cwd: options.cwd,
 			env,
-			shell: shouldUseCommandShell(executable),
 			maxBuffer: 20 * 1024 * 1024
 		});
 		const result = this.parseLarkCommandResult(stdout);
@@ -2785,11 +2788,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private async readLarkCliVersionOutput(executable: string, env: NodeJS.ProcessEnv): Promise<string> {
 		let lastError: unknown = null;
 		let onlyUnsupportedVersionCommands = true;
+		const invocation = await this.resolveLarkCliInvocation(executable);
 		for (const args of LARK_CLI_VERSION_ARGS) {
 			try {
-				const { stdout, stderr } = await execFileAsync(executable, args, {
+				const { stdout, stderr } = await execFileAsync(invocation.executable, [
+					...invocation.argsPrefix,
+					...args
+				], {
 					env,
-					shell: shouldUseCommandShell(executable),
 					maxBuffer: 1024 * 1024
 				});
 				return `${this.commandOutputToString(stdout)}\n${this.commandOutputToString(stderr)}`;
@@ -3049,6 +3055,13 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		} finally {
 			this.pendingLarkCliPath = null;
 		}
+	}
+
+	private async resolveLarkCliInvocation(executable: string): Promise<{ executable: string; argsPrefix: string[] }> {
+		return await resolveLarkCliInvocation(executable, {
+			pathExists: (path) => this.pathExists(path),
+			readTextFile: (path) => readFile(path, "utf8")
+		});
 	}
 
 	private async resolveLarkCliPathUncached(configuredPath: string): Promise<string> {
