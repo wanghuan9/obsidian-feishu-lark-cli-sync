@@ -8,6 +8,42 @@ export interface LinkTarget {
 	label: string;
 }
 
+export interface FolderLinkMapEntry {
+	file: LinkContextFile & {
+		name: string;
+		basename: string;
+	};
+	target: LinkTarget;
+}
+
+export function buildFolderLinkMap(folderPath: string, entries: FolderLinkMapEntry[]): Map<string, LinkTarget> {
+	const linkMap = new Map<string, LinkTarget>();
+	for (const entry of entries) {
+		const aliases = new Set<string>();
+		const normalizedPath = normalizeLinkPath(entry.file.path);
+		const relativeToFolder = normalizeLinkPath(entry.file.path.slice(folderPath.length).replace(/^\/+/, ""));
+
+		aliases.add(normalizedPath);
+		aliases.add(relativeToFolder);
+		aliases.add(entry.file.name);
+		aliases.add(entry.file.basename);
+		aliases.add(normalizeLinkPath(entry.file.path.replace(/\.md$/i, "")));
+		aliases.add(relativeToFolder.replace(/\.md$/i, ""));
+
+		for (const alias of aliases) {
+			if (alias) {
+				linkMap.set(alias, entry.target);
+			}
+		}
+	}
+
+	return linkMap;
+}
+
+export function mayContainInternalLinks(content: string): boolean {
+	return content.includes(".md") || content.includes("[[");
+}
+
 export function rewriteInternalLinks(content: string, linkMap: Map<string, LinkTarget>, currentFile: LinkContextFile): string {
 	const markdownRewritten = content.replace(/\[([^\]]+)]\(([^)]+\.md(?:#[^)]+)?)\)/g,
 		(match, _label: string, target: string) => {

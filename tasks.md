@@ -1,7 +1,7 @@
 # 实施任务清单
 
 > 由 spec.md 生成
-> 任务总数: 4
+> 任务总数: 5
 > 核心原则: 先建后迁后删，先统一同步入口与状态，再接入精确增量，最后迁移各入口并清理旧 overwrite 路径。
 
 ## 依赖关系总览
@@ -138,6 +138,28 @@ Task 4 (迁移 pre-push hook 与补测试)
 - 文件: `main.ts`（修改）, `lark-sync-core.mjs`（生成）
 - 说明: 目录发布与目录同步改为固定 3 并发，目录内同一远端文档保持串行，减少大目录的总耗时和同文档竞态风险；同时缓存 `lark-cli` 路径与 login shell PATH，避免每次调用重复探测。
 
+### 任务 5: [x] 保持已发布目录的单文件内部链接
+- 文件: `src/main.ts`（修改）, `src/link-rewrite.ts`（修改）, `test/test-link-rewrite.mjs`（修改）, `main.js`（生成）, `reviews/task5-review.md`（新增）
+- 依赖: Task 3
+- spec 映射: 本轮已确认的最小修复方案
+- 说明: 单文件手动或保存后同步时，仅读取所属已发布目录的现有文档绑定，复用目录发布的链接映射规则改写当前文件内部链接；不同步其他文件，不修改同步核心或状态结构。
+- context:
+  - `src/main.ts:syncFileInternal()` — 单文件手动/自动同步的统一入口
+  - `src/main.ts:buildFolderLinkMap()` — 目录发布的现有链接映射调用方
+  - `src/link-rewrite.ts:rewriteInternalLinks()` — 内部链接解析和飞书引用转换
+  - `src/lark-sync-core.ts:buildSyncPlan()` — 下游 block hash 和精确同步计划，本任务保持不变
+- 验收标准:
+  - [x] `npm test` 全部通过
+  - [x] `npm run build` 通过且无新的 TypeScript 错误
+  - [x] 已发布目录内单文件同步与目录发布使用同一链接映射函数
+  - [x] 只修改非链接段落时，内部链接转换结果保持一致
+  - [x] Code Review PASS
+- 子任务:
+  - [x] 5.1 抽取并复用目录链接映射构建逻辑
+  - [x] 5.2 在已绑定文件的单文件同步前改写内部链接
+  - [x] 5.3 补充非链接段落变更的回归测试
+  - [x] 5.4 通过完整测试、构建、代码评审与本地安装验证
+
 ## Spec 覆盖映射
 
 | Spec 章节 | 任务 | 说明 |
@@ -148,3 +170,4 @@ Task 4 (迁移 pre-push hook 与补测试)
 | 4.2.4 | Task 3, 4 | 限流并发与文档内串行 |
 | 4.2.5 | Task 1, 2, 3, 4 | 失败通知、回退与阻断策略 |
 | 4.3 | Task 4 | 性能与快速跳过路径 |
+| 本轮确认方案 | Task 5 | 已发布目录内单文件同步保持飞书内部链接 |

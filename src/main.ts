@@ -11,7 +11,16 @@ import {
 	getRemoteParentPath as getSelectedRemoteParentPath,
 	getSelectedFolderName as getSelectedRemoteRootName
 } from "./folder-path";
-import { LinkTarget, normalizeLinkPath, parentPath, resolveInternalLink, rewriteInternalLinks } from "./link-rewrite";
+import {
+	buildFolderLinkMap as createFolderLinkMap,
+	FolderLinkMapEntry,
+	LinkTarget,
+	mayContainInternalLinks,
+	normalizeLinkPath,
+	parentPath,
+	resolveInternalLink,
+	rewriteInternalLinks
+} from "./link-rewrite";
 import {
 	buildSyncPlan,
 	buildUpdateCommandArgs,
@@ -650,7 +659,8 @@ export default class LarkCliSyncPlugin extends Plugin {
 		}
 
 		const content = await this.readNoteForLark(file);
-		const nextBinding = await this.syncOrRecreateDocument(file, binding, content, undefined, {
+		const rewrittenContent = this.rewritePublishedFolderInternalLinks(file, content);
+		const nextBinding = await this.syncOrRecreateDocument(file, binding, rewrittenContent, undefined, {
 			allowRecreate: options.allowCreate,
 			showRemoteDeletedNotice: options.showRemoteDeletedNotice,
 			mode: options.mode,
@@ -1296,13 +1306,16 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	}
 
 	private buildFolderLinkMap(folderPath: string, entries: FolderPublishEntry[]): Map<string, LinkTarget> {
-		const linkMap = new Map<string, LinkTarget>();
+		const linkEntries: FolderLinkMapEntry[] = [];
 		for (const entry of entries) {
 			if (entry.binding) {
-				this.addLinkAliases(linkMap, folderPath, entry.file, entry.binding);
+				linkEntries.push({
+					file: entry.file,
+					target: this.toLinkTarget(entry.file, entry.binding)
+				});
 			}
 		}
-		return linkMap;
+		return createFolderLinkMap(folderPath, linkEntries);
 	}
 
 	private async syncFolderEntriesOnce(
@@ -2309,31 +2322,6 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		]);
 	}
 
-	private addLinkAliases(
-		linkMap: Map<string, LinkTarget>,
-		folderPath: string,
-		file: TFile,
-		binding: BoundLarkDocument
-	): void {
-		const aliases = new Set<string>();
-		const target = this.toLinkTarget(file, binding);
-		const normalizedPath = this.normalizeLinkPath(file.path);
-		const relativeToFolder = this.normalizeLinkPath(file.path.slice(folderPath.length).replace(/^\/+/, ""));
-
-		aliases.add(normalizedPath);
-		aliases.add(relativeToFolder);
-		aliases.add(file.name);
-		aliases.add(file.basename);
-		aliases.add(this.normalizeLinkPath(file.path.replace(/\.md$/i, "")));
-		aliases.add(relativeToFolder.replace(/\.md$/i, ""));
-
-		for (const alias of aliases) {
-			if (alias) {
-				linkMap.set(alias, target);
-			}
-		}
-	}
-
 	private toLinkTarget(file: TFile, binding: BoundLarkDocument): LinkTarget {
 		return {
 			token: binding.token,
@@ -2344,6 +2332,50 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private rewriteInternalLinks(content: string, linkMap: Map<string, LinkTarget>, currentFile: TFile): string {
 		return rewriteInternalLinks(content, linkMap, currentFile);
+	}
+
+	private rewritePublishedFolderInternalLinks(file: TFile, content: string): string {
+		if (!mayContainInternalLinks(content)) {
+			return content;
+		}
+
+		const publishedFolder = this.findExplicitPublishedFolderForFile(file);
+		if (!publishedFolder) {
+			return content;
+		}
+
+		const linkEntries: FolderLinkMapEntry[] = [];
+		for (const linkedFile of this.collectMarkdownFiles(publishedFolder.folderPath)) {
+			const binding = this.getBinding(linkedFile);
+			if (binding) {
+				linkEntries.push({
+					file: linkedFile,
+					target: this.toLinkTarget(linkedFile, binding)
+				});
+			}
+		}
+
+		const linkMap = createFolderLinkMap(publishedFolder.folderPath, linkEntries);
+		return this.rewriteInternalLinks(content, linkMap, file);
+	}
+
+	private findExplicitPublishedFolderForFile(file: TFile): PublishedFolderResolution | null {
+		let folderPath = this.parentPath(file.path);
+		while (folderPath) {
+			const normalizedFolderPath = this.normalizeLinkPath(folderPath);
+			const binding = this.settings.publishedFolders[normalizedFolderPath];
+			if (binding) {
+				return {
+					folderPath,
+					binding,
+					inferred: false
+				};
+			}
+
+			folderPath = this.parentPath(folderPath);
+		}
+
+		return null;
 	}
 
 	private resolveInternalLink(target: string, linkMap: Map<string, LinkTarget>, currentFile: TFile): LinkTarget | null {
