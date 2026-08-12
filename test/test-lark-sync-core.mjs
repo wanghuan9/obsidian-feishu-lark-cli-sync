@@ -697,6 +697,35 @@ const exportedMetadataQuoteSignature = await createSyncContentSignature([
 	"> 负责人: B"
 ].join("\n"));
 assert.ok(isSyncContentSignatureEquivalent(exportedMetadataQuoteSignature, localMetadataQuoteSignature));
+const localCiteQuoteSignature = await createSyncContentSignature([
+	"# tasks",
+	"",
+	'> 由 <cite type="doc" doc-id="JqgndydhqoWPBNx6u68cgLgUnHd"></cite> 生成  ',
+	"> 任务总数：10  ",
+	"> 核心原则：每个任务只对应一个可独立验证的交付物"
+].join("\n"));
+const exportedCiteQuoteSignature = await createSyncContentSignature([
+	"<title>tasks</title>",
+	"",
+	'<blockquote><p>由 <cite doc-id="JqgndydhqoWPBNx6u68cgLgUnHd" file-type="docx" title="spec" type="doc"></cite> 生成<br/>任务总数：10<br/>核心原则：每个任务只对应一个可独立验证的交付物</p></blockquote>'
+].join("\n"));
+assert.ok(isSyncContentSignatureEquivalent(exportedCiteQuoteSignature, localCiteQuoteSignature));
+const multilineExportedCiteQuoteSignature = await createSyncContentSignature([
+	"<title>tasks</title>",
+	"",
+	"<blockquote>",
+	'<p>由 <cite doc-id="JqgndydhqoWPBNx6u68cgLgUnHd" type="doc"></cite> 生成<br/>',
+	"任务总数：10<br/>",
+	"核心原则：每个任务只对应一个可独立验证的交付物</p>",
+	"</blockquote>"
+].join("\n"));
+assert.ok(isSyncContentSignatureEquivalent(multilineExportedCiteQuoteSignature, localCiteQuoteSignature));
+const differentCiteQuoteSignature = await createSyncContentSignature([
+	"<title>tasks</title>",
+	"",
+	'<blockquote><p>由 <cite doc-id="different-document" type="doc"></cite> 生成<br/>任务总数：10<br/>核心原则：每个任务只对应一个可独立验证的交付物</p></blockquote>'
+].join("\n"));
+assert.equal(isSyncContentSignatureEquivalent(differentCiteQuoteSignature, localCiteQuoteSignature), false);
 const paragraphUrlSignature = await createSyncContentSignature([
 	"# Note",
 	"",

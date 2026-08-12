@@ -2450,9 +2450,16 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 				index += 1;
 			}
 		} else if (kind === "blockquote") {
-			index += 1;
-			while (index < lines.length && readMarkdownBlockKind(lines[index] || "") === kind) {
+			if (isLarkHtmlBlockquoteStart(line)) {
 				index += 1;
+				while (index < lines.length && !isLarkHtmlBlockquoteEnd(lines[index - 1] || "")) {
+					index += 1;
+				}
+			} else {
+				index += 1;
+				while (index < lines.length && readMarkdownBlockKind(lines[index] || "") === kind) {
+					index += 1;
+				}
 			}
 		} else if (kind === "table") {
 			index += 1;
@@ -2508,7 +2515,7 @@ function readMarkdownBlockKind(line: string): string {
 		return "code";
 	}
 
-	if (/^\s*>/.test(line)) {
+	if (/^\s*>/.test(line) || isLarkHtmlBlockquoteStart(line)) {
 		return "blockquote";
 	}
 
@@ -2525,6 +2532,14 @@ function readMarkdownBlockKind(line: string): string {
 	}
 
 	return "paragraph";
+}
+
+function isLarkHtmlBlockquoteStart(line: string): boolean {
+	return /^\s*<blockquote(?:\s[^>]*)?>/i.test(line);
+}
+
+function isLarkHtmlBlockquoteEnd(line: string): boolean {
+	return /<\/blockquote>/i.test(line);
 }
 
 function readRemoteTopLevelUnits(xml: string): RemoteSyncUnit[] {
@@ -2699,7 +2714,7 @@ function createMarkdownFingerprint(kind: string, content: string): string {
 		return line;
 	});
 	const comparisonContent = kind === "blockquote"
-		? normalizeBlockquoteUrlSelfLinks(normalizedLines.join("\n"))
+		? normalizeMarkdownBlockquoteRoundTrip(normalizedLines.join("\n"))
 		: normalizedLines.join("\n");
 	return normalizeFingerprintText(comparisonContent);
 }
@@ -2907,6 +2922,21 @@ function normalizeBlockquoteUrlSelfLinks(content: string): string {
 			return normalizeMarkdownLinkTarget(label) === normalizeMarkdownLinkTarget(href) ? label : match;
 		}
 	);
+}
+
+function normalizeMarkdownBlockquoteRoundTrip(content: string): string {
+	const normalizedContent = content
+		.replace(/<cite\b([^>]*)>[\s\S]*?<\/cite>/gi, (match, attributes: string) => {
+			const docId = readXmlAttribute(attributes, "doc-id");
+			return docId ? `lark-doc:${docId}` : match;
+		})
+		.replace(/<cite\b([^>]*)\/>/gi, (match, attributes: string) => {
+			const docId = readXmlAttribute(attributes, "doc-id");
+			return docId ? `lark-doc:${docId}` : match;
+		})
+		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/<\/?(?:blockquote|p)\b[^>]*>/gi, "\n");
+	return normalizeBlockquoteUrlSelfLinks(normalizedContent);
 }
 
 function normalizeMarkdownLinkTarget(target: string): string {
