@@ -111,8 +111,8 @@ const LARK_RIBBON_ICON_SVG = `
 const AUTO_SYNC_WRITE_IGNORE_MS = 5000;
 const DEFAULT_AUTO_SYNC_DELAY_SECONDS = 15;
 const DEFAULT_STATE_CACHE_RETAIN_LIMIT = 100;
-const SAVE_REMOTE_STATE_REFRESH_ATTEMPTS = 5;
-const SAVE_REMOTE_STATE_REFRESH_DELAY_MS = 600;
+const SAVE_REMOTE_STATE_REFRESH_ATTEMPTS = 8;
+const SAVE_REMOTE_STATE_REFRESH_DELAY_MS = 1500;
 const STRICT_REMOTE_STATE_REFRESH_ATTEMPTS = 8;
 const STRICT_REMOTE_STATE_REFRESH_DELAY_MS = 1500;
 const FOLDER_SYNC_PARALLEL_LIMIT = 3;
@@ -275,6 +275,19 @@ interface RemoteStateRefreshPolicy {
 	allowTimeoutFallback: boolean;
 }
 
+type RemoteStateRefreshRejectReason =
+	| "revision-lag"
+	| "content-not-equivalent"
+	| "block-mapping-incomplete"
+	| "state-not-accepted";
+
+interface RemoteStateRefreshDiagnostic {
+	rejectReason: RemoteStateRefreshRejectReason;
+	observedRevisionId?: number;
+	unitCount?: number;
+	missingBlockIdCount?: number;
+}
+
 const SAVE_REMOTE_STATE_REFRESH_POLICY: RemoteStateRefreshPolicy = {
 	attempts: SAVE_REMOTE_STATE_REFRESH_ATTEMPTS,
 	delayMs: SAVE_REMOTE_STATE_REFRESH_DELAY_MS,
@@ -288,6 +301,15 @@ const STRICT_REMOTE_STATE_REFRESH_POLICY: RemoteStateRefreshPolicy = {
 };
 
 class LocalizedSyncError extends Error {
+}
+
+class RemoteStateRefreshError extends LocalizedSyncError {
+	readonly updateSubmitted: boolean;
+
+	constructor(message: string, updateSubmitted: boolean) {
+		super(message);
+		this.updateSubmitted = updateSubmitted;
+	}
 }
 
 const MESSAGES = {
@@ -315,6 +337,7 @@ const MESSAGES = {
 		noticeNoGitRepository: "当前 Obsidian 仓库不是 Git 仓库，未找到 .git 目录。",
 		noticeExistingGitHookBackedUp: "检测到已有 pre-push hook，已备份并在新 hook 中继续调用：{path}",
 		noticeAutoSyncFailed: "自动同步失败：{path}\n{message}",
+		noticeAutoSyncConfirmationTimedOut: "内容已提交，但远端状态确认超时：{path}\n请稍后检查飞书文档。",
 		errorNoDocumentToken: "lark-cli 没有返回文档 token 或 URL。",
 		errorInvalidDefaultTarget: "默认上传位置无效或当前飞书账号无权访问。\n请检查插件设置中的“默认上传位置”：{target}\n底层原因：{detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
@@ -386,6 +409,7 @@ const MESSAGES = {
 		noticeNoGitRepository: "The current Obsidian vault is not a Git repository. No .git directory was found.",
 		noticeExistingGitHookBackedUp: "Existing pre-push hook detected. It was backed up and will still be called by the new hook: {path}",
 		noticeAutoSyncFailed: "Auto sync failed: {path}\n{message}",
+		noticeAutoSyncConfirmationTimedOut: "Content was submitted, but remote confirmation timed out: {path}\nCheck the Lark document shortly.",
 		errorNoDocumentToken: "lark-cli did not return a document token or URL.",
 		errorInvalidDefaultTarget: "Default upload target is invalid or inaccessible.\nCheck the Default target setting: {target}\nCause: {detail}",
 		settingsTitle: "Feishu Lark CLI Sync",
@@ -730,9 +754,14 @@ export default class LarkCliSyncPlugin extends Plugin {
 				mode: "save"
 			});
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error);
-			new Notice(this.t("noticeAutoSyncFailed", { path: file.path, message: errorMessage }), 10000);
-			console.error("[Feishu Lark CLI Sync] auto sync failed", error);
+			if (error instanceof RemoteStateRefreshError && error.updateSubmitted) {
+				new Notice(this.t("noticeAutoSyncConfirmationTimedOut", { path: file.path }), 10000);
+				console.warn("[Feishu Lark CLI Sync] auto sync update submitted but confirmation timed out", error);
+			} else {
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				new Notice(this.t("noticeAutoSyncFailed", { path: file.path, message: errorMessage }), 10000);
+				console.error("[Feishu Lark CLI Sync] auto sync failed", error);
+			}
 		} finally {
 			this.autoSyncRunningPaths.delete(file.path);
 			if (this.autoSyncPendingPaths.delete(file.path)) {
@@ -1632,6 +1661,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					expectedMarkdown: content,
 					expectedRevisionId: latestDocument.revisionId,
 					allowRemoteChanges: true,
+					updateSubmitted: true,
 					context,
 					refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
 				});
@@ -1746,10 +1776,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	): Promise<void> {
 		const refreshPolicy = this.getRemoteStateRefreshPolicy(context.mode);
 		const expectedSignature = await createSyncContentSignature(baselineMarkdown);
+		let lastDiagnostic: RemoteStateRefreshDiagnostic | undefined;
 		for (let attempt = 0; attempt < refreshPolicy.attempts; attempt += 1) {
 			const remoteXml = await this.fetchLarkDocumentWithIds(doc);
 			if (expectedRevisionId !== undefined
 				&& (remoteXml.revisionId === undefined || remoteXml.revisionId < expectedRevisionId)) {
+				lastDiagnostic = {
+					rejectReason: "revision-lag",
+					observedRevisionId: remoteXml.revisionId
+				};
 				if (attempt < refreshPolicy.attempts - 1) {
 					await this.sleep(refreshPolicy.delayMs);
 				}
@@ -1758,6 +1793,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 			const actualRemoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
 			if (!await this.isRemoteMarkdownContentEquivalent(actualRemoteMarkdown.content, expectedSignature)) {
+				lastDiagnostic = {
+					rejectReason: "content-not-equivalent",
+					observedRevisionId: remoteXml.revisionId
+				};
 				if (attempt < refreshPolicy.attempts - 1) {
 					await this.sleep(refreshPolicy.delayMs);
 				}
@@ -1774,14 +1813,17 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				await this.persistDocumentState(state, [doc, ...stateKeys]);
 				return;
 			}
+			lastDiagnostic = this.createBlockMappingDiagnostic(state);
 
 			if (attempt < refreshPolicy.attempts - 1) {
 				await this.sleep(refreshPolicy.delayMs);
 			}
 		}
 
-		throw new LocalizedSyncError(
-			this.formatSyncFailure(context.mode, context.path, "remote-update-not-visible")
+		this.logRemoteStateRefreshTimeout(doc, refreshPolicy.attempts, expectedRevisionId, lastDiagnostic);
+		throw new RemoteStateRefreshError(
+			this.formatSyncFailure(context.mode, context.path, "remote-update-not-visible"),
+			true
 		);
 	}
 
@@ -1822,6 +1864,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			fallbackMarkdown?: string;
 			allowIncompleteFallback?: boolean;
 			allowRemoteChanges?: boolean;
+			updateSubmitted?: boolean;
 			refreshPolicy?: RemoteStateRefreshPolicy;
 			context?: { mode: SyncMode; path: string };
 		} = {}
@@ -1832,6 +1875,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			: undefined;
 		let state: LarkSyncStateFile["documents"][string] | undefined;
 		let latestState: LarkSyncStateFile["documents"][string] | undefined;
+		let lastDiagnostic: RemoteStateRefreshDiagnostic | undefined;
+		const captureDiagnostic = (diagnostic: RemoteStateRefreshDiagnostic): void => {
+			lastDiagnostic = diagnostic;
+		};
 		for (let attempt = 0; attempt < refreshPolicy.attempts; attempt += 1) {
 			const remoteState = options.expectedRevisionId !== undefined
 				? await this.fetchRemoteDocumentStateAfterExpectedRevision(
@@ -1839,7 +1886,8 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					options.expectedRevisionId,
 					expectedSignature,
 					options.expectedMarkdown,
-					options.allowRemoteChanges
+					options.allowRemoteChanges,
+					captureDiagnostic
 				)
 				: await this.fetchRemoteDocumentState(
 					doc,
@@ -1851,6 +1899,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				&& this.isRemoteDocumentStateRefreshAccepted(remoteState, expectedSignature, options.previousRevisionId)) {
 				state = remoteState;
 				break;
+			}
+			if (remoteState) {
+				lastDiagnostic = {
+					rejectReason: "content-not-equivalent",
+					observedRevisionId: remoteState.revisionId
+				};
+			} else if (options.expectedRevisionId === undefined) {
+				lastDiagnostic = { rejectReason: "state-not-accepted" };
 			}
 
 			if (attempt < refreshPolicy.attempts - 1) {
@@ -1877,8 +1933,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		if (!state) {
 			if (options.context) {
-				throw new LocalizedSyncError(
-					this.formatSyncFailure(options.context.mode, options.context.path, "remote-update-not-visible")
+				this.logRemoteStateRefreshTimeout(
+					doc,
+					refreshPolicy.attempts,
+					options.expectedRevisionId,
+					lastDiagnostic
+				);
+				throw new RemoteStateRefreshError(
+					this.formatSyncFailure(options.context.mode, options.context.path, "remote-update-not-visible"),
+					options.updateSubmitted === true
 				);
 			}
 			return;
@@ -1930,10 +1993,15 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		expectedRevisionId: number,
 		expectedSignature: Awaited<ReturnType<typeof createSyncContentSignature>> | undefined,
 		expectedMarkdown?: string,
-		allowRemoteChanges = false
+		allowRemoteChanges = false,
+		captureDiagnostic?: (diagnostic: RemoteStateRefreshDiagnostic) => void
 	): Promise<LarkSyncStateFile["documents"][string] | undefined> {
 		const remoteXml = await this.fetchLarkDocumentWithIds(doc);
 		if (remoteXml.revisionId === undefined || remoteXml.revisionId < expectedRevisionId) {
+			captureDiagnostic?.({
+				rejectReason: "revision-lag",
+				observedRevisionId: remoteXml.revisionId
+			});
 			return undefined;
 		}
 		if (allowRemoteChanges && expectedMarkdown) {
@@ -1943,11 +2011,19 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				remoteXml,
 				expectedMarkdown
 			);
-			return isDocumentStateBlockMappingAcceptable(state) ? state : undefined;
+			if (!isDocumentStateBlockMappingAcceptable(state)) {
+				captureDiagnostic?.(this.createBlockMappingDiagnostic(state));
+				return undefined;
+			}
+			return state;
 		}
 
 		const remoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
 		if (remoteMarkdown.revisionId !== undefined && remoteMarkdown.revisionId < expectedRevisionId) {
+			captureDiagnostic?.({
+				rejectReason: "revision-lag",
+				observedRevisionId: remoteMarkdown.revisionId
+			});
 			return undefined;
 		}
 
@@ -1957,12 +2033,17 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				expectedSignature
 			);
 			if (!isExpectedContentVisible) {
+				captureDiagnostic?.({
+					rejectReason: "content-not-equivalent",
+					observedRevisionId: remoteXml.revisionId
+				});
 				return undefined;
 			}
 		}
 
 		const state = await this.createRemoteDocumentState(doc, remoteMarkdown, remoteXml, expectedMarkdown);
 		if (expectedMarkdown && !isDocumentStateBlockMappingAcceptable(state)) {
+			captureDiagnostic?.(this.createBlockMappingDiagnostic(state));
 			return undefined;
 		}
 
@@ -2041,6 +2122,34 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		}
 
 		return true;
+	}
+
+	private createBlockMappingDiagnostic(
+		state: LarkSyncStateFile["documents"][string]
+	): RemoteStateRefreshDiagnostic {
+		return {
+			rejectReason: "block-mapping-incomplete",
+			observedRevisionId: state.revisionId,
+			unitCount: state.units.length,
+			missingBlockIdCount: state.units.filter((unit) => !unit.blockId).length
+		};
+	}
+
+	private logRemoteStateRefreshTimeout(
+		doc: string,
+		attempts: number,
+		expectedRevisionId: number | undefined,
+		diagnostic: RemoteStateRefreshDiagnostic | undefined
+	): void {
+		console.warn("[Feishu Lark CLI Sync] remote state confirmation timed out", {
+			doc: extractDocumentToken(doc) || doc,
+			attempts,
+			expectedRevisionId,
+			observedRevisionId: diagnostic?.observedRevisionId,
+			unitCount: diagnostic?.unitCount,
+			missingBlockIdCount: diagnostic?.missingBlockIdCount,
+			rejectReason: diagnostic?.rejectReason || "unknown"
+		});
 	}
 
 	private getPlanNextState(plan: SyncPlan): LarkSyncStateFile["documents"][string] | undefined {
