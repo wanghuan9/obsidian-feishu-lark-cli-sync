@@ -4,7 +4,13 @@ import { chmod, cp, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { createContentHash, createSyncContentSignature, getDocumentStateKey } from "../lark-sync-core.mjs";
+import {
+	createContentHash,
+	createDocumentSyncStateFromRemote,
+	createSyncContentSignature,
+	getDocumentStateKey,
+	prepareLocalImages
+} from "../lark-sync-core.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -54,6 +60,7 @@ async function run() {
 		await testOverwriteUpdates(workspace);
 		await testUnboundFilesDoNotBlock(workspace);
 		await testCanonicalStateKey(workspace);
+		await testWikiUrlReusesCanonicalImageState(workspace);
 		await testStateWritePreservesExternalDocuments(workspace);
 		await testStateCacheTrim(workspace);
 		await testSameDocumentAliasesRunSerially(workspace);
@@ -64,6 +71,7 @@ async function run() {
 		await testLarkCliVersionCheckPersistsAndSkips(workspace);
 		await testMacSystemNotificationOnFailure(workspace);
 		await testWindowsSystemNotificationOnFailure(workspace);
+		await testImageOnlyChangeSyncsReferencingDocument(workspace);
 	} finally {
 		await rm(workspace, { recursive: true, force: true });
 	}
@@ -229,7 +237,7 @@ async function testPreciseInsertRefreshesState(workspace) {
 		}
 	});
 	const log = await readLog(workspace);
-	assert.match(log, /docs \+update .*--command block_insert_after .*--block-id blk-1/);
+	assert.match(log, /docs \+update .*--command block_insert_after .*--block-id -1/);
 	assert.match(log, /docs \+fetch .*--detail with-ids/);
 	const state = await readSyncState(workspace);
 	assert.deepEqual(state.documents["doc-token"].units.map((unit) => unit.blockId), [
@@ -256,7 +264,7 @@ async function testPreciseHeadingInsertUsesXml(workspace) {
 		}
 	});
 	const log = await readLog(workspace);
-	assert.match(log, /docs \+update .*--command block_insert_after .*--doc-format xml .*--block-id blk-1/);
+	assert.match(log, /docs \+update .*--command block_insert_after .*--doc-format xml .*--block-id -1/);
 	await clearLog(workspace);
 }
 
@@ -653,6 +661,35 @@ async function testCanonicalStateKey(workspace) {
 	assert.ok(refreshedState.documents["doc-token"]);
 }
 
+async function testWikiUrlReusesCanonicalImageState(workspace) {
+	await resetWorkspaceFiles(workspace);
+	const wikiUrl = "https://example.feishu.cn/wiki/wiki-node";
+	await writeFile(join(workspace, "bound.md"), boundMarkdown(wikiUrl, "Body\n\n## Inserted"));
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "auto", language: "en" });
+	const previousState = await createDocumentSyncStateFromRemote(
+		"doc-token",
+		"# bound\n\nBody",
+		"<title id=\"doc-title\">bound</title><p id=\"blk-1\">Body</p>",
+		4
+	);
+	await writeSyncStateRaw(workspace, {
+		version: 1,
+		documents: { "doc-token": previousState }
+	});
+	await clearLog(workspace);
+	await runHook(workspace, {
+		env: {
+			LARK_CLI_RETURN_DOC_TOKEN_FOR_URL: "1",
+			LARK_CLI_FETCH_INSERTED_AFTER_UPDATE: "1",
+			LARK_CLI_UPDATE_REVISION_ID: "5"
+		}
+	});
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+update .*--doc doc-token .*--command block_insert_after/);
+	assert.doesNotMatch(log, /--command overwrite/);
+}
+
 async function testStateWritePreservesExternalDocuments(workspace) {
 	await resetWorkspaceFiles(workspace);
 	await writeFile(join(workspace, "bound.md"), boundMarkdown("https://example.feishu.cn/docx/doc-token", "Changed"));
@@ -940,6 +977,64 @@ async function testUnboundFilesDoNotBlock(workspace) {
 	assert.equal(await readLog(workspace), "");
 }
 
+async function testImageOnlyChangeSyncsReferencingDocument(workspace) {
+	await resetWorkspaceFiles(workspace);
+	const imagePath = join(workspace, "diagram.png");
+	const markdown = boundMarkdown("https://example.feishu.cn/docx/doc-token", "Body\n\n![[diagram.png|320]]");
+	await writeFile(imagePath, createPngBuffer(8, 4, 1));
+	await writeFile(join(workspace, "bound.md"), markdown);
+	await execFileAsync("git", ["add", "bound.md", "diagram.png"], { cwd: workspace });
+	await execFileAsync("git", ["commit", "-m", "image baseline"], { cwd: workspace });
+	const remoteHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+
+	const previousPrepared = await prepareLocalImages({
+		vaultRoot: workspace,
+		markdownPath: "bound.md",
+		content: "# bound\n\nBody\n\n![[diagram.png|320]]"
+	});
+	const previousImage = previousPrepared.images[0];
+	const previousRemoteXml = `<title id="doc-title">bound</title><p id="blk-1">Body</p><img id="blk-image"/>`;
+	const previousState = await createDocumentSyncStateFromRemote(
+		"doc-token",
+		previousPrepared.content,
+		previousRemoteXml,
+		4
+	);
+	await writeSyncStateRaw(workspace, {
+		version: 1,
+		documents: { "doc-token": previousState }
+	});
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await clearLog(workspace);
+	await writeFile(mediaStatePath(workspace), JSON.stringify({ content: previousRemoteXml, revisionId: 4 }));
+
+	await writeFile(imagePath, createPngBuffer(8, 4, 2));
+	await execFileAsync("git", ["add", "diagram.png"], { cwd: workspace });
+	await execFileAsync("git", ["commit", "-m", "image changed"], { cwd: workspace });
+	const localHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+	const refs = `refs/heads/main ${localHead} refs/heads/main ${remoteHead}\n`;
+	const result = await spawnHook(workspace, refs, {
+		LARK_CLI_MEDIA_FLOW: "1",
+		LARK_CLI_VALIDATE_MEDIA_FILE_PATH: "1"
+	});
+	assert.equal(result.exitCode, 0, result.stderr);
+
+	const log = await readLog(workspace);
+	assert.match(log, /docs \+update .*--command block_replace .*--block-id blk-image/);
+	assert.match(log, /docs \+media-insert .*--file .*diagram\.png/);
+	assert.doesNotMatch(log, /--selection-with-ellipsis/);
+	assert.match(log, /docs \+update .*--command block_move_after .*--block-id image-placeholder .*--src-block-ids uploaded-image/);
+	assert.match(log, /docs \+update .*--command block_delete .*--block-id image-placeholder/);
+	assert.notEqual(previousImage.contentHash, (await prepareLocalImages({
+		vaultRoot: workspace,
+		markdownPath: "bound.md",
+		content: "![[diagram.png]]"
+	})).images[0].contentHash);
+	const remoteState = JSON.parse(await readFile(mediaStatePath(workspace), "utf8"));
+	assert.match(remoteState.content, /<img id="uploaded-image"\/>/);
+	assert.doesNotMatch(remoteState.content, /FEISHU_LARK_LOCAL_IMAGE_/);
+}
+
 async function resetWorkspaceFiles(workspace) {
 	await unlink(join(workspace, "same-doc.md")).catch(() => {});
 	await unlink(join(workspace, "second.md")).catch(() => {});
@@ -1086,6 +1181,14 @@ const docIndex = args.indexOf("--doc");
 const doc = docIndex >= 0 ? args[docIndex + 1] : "";
 const safeDocKey = doc.replace(/[^A-Za-z0-9_-]/g, "_");
 const overwrittenMarkdownPath = process.env.LARK_CLI_LOG + ".overwrite-" + safeDocKey + ".md";
+const mediaStatePath = process.env.LARK_CLI_LOG + ".media-state-" + safeDocKey + ".json";
+if (process.env.LARK_CLI_VALIDATE_MEDIA_FILE_PATH && args.includes("+media-insert")) {
+  const file = args[args.indexOf("--file") + 1] || "";
+  if (!file.startsWith("./") || !fs.existsSync(file)) {
+    process.stdout.write(JSON.stringify({ ok: false, error: { message: "unsafe or missing media file path: " + file } }));
+    process.exit(0);
+  }
+}
 if (process.env.LARK_CLI_LOCK_DIR && args.includes("+update") && doc.includes("doc-token")) {
   const lockPath = process.env.LARK_CLI_LOCK_DIR + "/doc-token.lock";
   if (fs.existsSync(lockPath)) {
@@ -1104,7 +1207,8 @@ const changedAfterUpdatePath = process.env.LARK_CLI_LOG + ".changed-after-update
 const insertedAfterUpdatePath = process.env.LARK_CLI_LOG + ".inserted-after-update";
 const skippedRepairPath = process.env.LARK_CLI_LOG + ".skipped-repair-updated";
 const remoteHeadingUpdatePath = process.env.LARK_CLI_LOG + ".remote-heading-updated";
-const responseDoc = process.env.LARK_CLI_RETURN_DOC_TOKEN_FOR_URL && doc.includes("/docx/doc-token") ? "doc-token" : doc;
+const responseDoc = process.env.LARK_CLI_RETURN_DOC_TOKEN_FOR_URL
+  && (doc.includes("/docx/doc-token") || doc.includes("/wiki/wiki-node")) ? "doc-token" : doc;
 if (args.includes("+fetch")) {
   const isWithIds = args.includes("--detail") && args.includes("with-ids");
   const staleLimit = Number(process.env.LARK_CLI_STALE_MARKDOWN_FETCHES || "0");
@@ -1189,14 +1293,50 @@ if (args.includes("+fetch")) {
     && !shouldReturnStaleWithIds) {
     revisionId = Number(process.env.LARK_CLI_UPDATE_REVISION_ID);
   }
+  if (process.env.LARK_CLI_MEDIA_FLOW && isWithIds && fs.existsSync(mediaStatePath)) {
+    const mediaState = JSON.parse(fs.readFileSync(mediaStatePath, "utf8"));
+    content = mediaState.content;
+    revisionId = mediaState.revisionId;
+  }
   process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc, content, revision_id: revisionId } } }));
 } else {
+  let responseBlockId;
   const commandIndex = args.indexOf("--command");
   const command = commandIndex >= 0 ? args[commandIndex + 1] : "";
   const contentIndex = args.indexOf("--content");
   const contentArg = contentIndex >= 0 ? args[contentIndex + 1] : "";
   if (command === "overwrite" && contentArg.startsWith("@")) {
     fs.writeFileSync(overwrittenMarkdownPath, fs.readFileSync(contentArg.slice(1), "utf8"));
+  }
+  if (process.env.LARK_CLI_MEDIA_FLOW && fs.existsSync(mediaStatePath)) {
+    const mediaState = JSON.parse(fs.readFileSync(mediaStatePath, "utf8"));
+    if (command === "block_replace" && contentArg.startsWith("@")) {
+      const blockId = args[args.indexOf("--block-id") + 1];
+      const placeholder = fs.readFileSync(contentArg.slice(1), "utf8").trim();
+      mediaState.content = mediaState.content.replace(
+        new RegExp("<img id=[\\\"']" + blockId + "[\\\"']\\s*/>"),
+        "<p id=\\\"image-placeholder\\\">" + placeholder + "</p>"
+      );
+      mediaState.revisionId += 1;
+    } else if (args.includes("+media-insert")) {
+      responseBlockId = "uploaded-image";
+      mediaState.content += "<img id=\\\"uploaded-image\\\"/>";
+      mediaState.revisionId += 1;
+    } else if (command === "block_move_after") {
+      const targetBlockId = args[args.indexOf("--block-id") + 1];
+      const sourceBlockId = args[args.indexOf("--src-block-ids") + 1];
+      mediaState.content = mediaState.content.replace("<img id=\\\"" + sourceBlockId + "\\\"/>", "");
+      mediaState.content = mediaState.content.replace(
+        new RegExp("(<p id=[\\\\\\\"']" + targetBlockId + "[\\\\\\\"'][^>]*>[^<]+</p>)"),
+        "$1<img id=\\\"" + sourceBlockId + "\\\"/>"
+      );
+      mediaState.revisionId += 1;
+    } else if (command === "block_delete") {
+      const blockId = args[args.indexOf("--block-id") + 1];
+      mediaState.content = mediaState.content.replace(new RegExp("<p id=[\\\"']" + blockId + "[\\\"']>[^<]+</p>"), "");
+      mediaState.revisionId += 1;
+    }
+    fs.writeFileSync(mediaStatePath, JSON.stringify(mediaState), "utf8");
   }
   if (process.env.LARK_CLI_FETCH_CHANGED_AFTER_UPDATE && args.includes("+update")) {
     fs.writeFileSync(changedAfterUpdatePath, "1");
@@ -1222,7 +1362,7 @@ if (args.includes("+fetch")) {
     fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
   }
   const revisionId = process.env.LARK_CLI_UPDATE_REVISION_ID ? Number(process.env.LARK_CLI_UPDATE_REVISION_ID) : undefined;
-  process.stdout.write(JSON.stringify({ ok: true, data: { document: { document_id: responseDoc, url: doc, revision_id: revisionId } } }));
+  process.stdout.write(JSON.stringify({ ok: true, data: { block_id: responseBlockId, document: { document_id: responseDoc, url: doc, revision_id: revisionId } } }));
 }
 `;
 	const scriptPath = join(workspace, "bin", "lark-cli.js");
@@ -1283,6 +1423,19 @@ async function clearLog(workspace) {
 	await rm(`${logPath}.skipped-repair-updated`, { force: true });
 	await rm(`${logPath}.stale-markdown-count`, { force: true });
 	await rm(`${logPath}.stale-with-ids-count`, { force: true });
+}
+
+function mediaStatePath(workspace) {
+	return join(workspace, "lark-cli.log.media-state-doc-token.json");
+}
+
+function createPngBuffer(width, height, marker) {
+	const buffer = Buffer.alloc(25);
+	Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(buffer, 0);
+	buffer.writeUInt32BE(width, 16);
+	buffer.writeUInt32BE(height, 20);
+	buffer[24] = marker;
+	return buffer;
 }
 
 async function clearNotificationLog(workspace) {

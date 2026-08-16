@@ -19,18 +19,27 @@ import {
 import {
 	buildSyncPlan,
 	buildUpdateCommandArgs,
+	buildMediaInsertArgs,
+	buildMediaMoveArgs,
+	buildPlaceholderRemoveArgs,
+	containsLocalImagePlaceholders,
 	createDocumentSyncStateFromRemote,
 	createContentHash,
 	createEmptySyncStateFile,
 	createSyncContentSignature,
 	isDocumentStateBlockMappingAcceptable,
+	isRemoteXmlContentEquivalent,
 	getDocumentStateKey,
 	getDocumentStateKeys,
 	formatSyncFailureMessage,
+	findReferencingMarkdownFiles,
+	invalidateLocalImageSyncState,
 	isSyncContentSignatureEquivalent,
 	mergeSyncStateFiles,
+	materializeLocalImages,
 	normalizeStateCacheRetainLimit,
 	prepareNoteContentForLark,
+	prepareLocalImages,
 	prepareOverwriteMarkdownContent,
 	readBindingFromMarkdown,
 	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
@@ -76,38 +85,57 @@ const removedSyncStateKeys = new Set();
 
 async function main() {
 	const repoRoot = await git(["rev-parse", "--show-toplevel"]);
-	const settings = await readSettings(repoRoot.trim());
+	const normalizedRepoRoot = repoRoot.trim();
+	const settings = await readSettings(normalizedRepoRoot);
 	if (settings.autoSyncMode !== "pre-push") {
 		return;
 	}
 
-	const files = await collectMarkdownFiles();
+	const changedFiles = await collectChangedFiles();
+	const files = await collectSyncMarkdownFiles(normalizedRepoRoot, changedFiles);
 	if (files.length === 0) {
 		return;
 	}
 
-	const syncState = await readSyncState(repoRoot.trim());
-	const tasks = await collectSyncTasks(repoRoot.trim(), files);
+	const syncState = await readSyncState(normalizedRepoRoot);
+	const tasks = await collectSyncTasks(normalizedRepoRoot, files);
 	const failure = await runWithConcurrency(groupTasksByDoc(tasks, syncState), MAX_PARALLEL_SYNCS, async (taskGroup) => {
 		for (const task of taskGroup) {
 			await syncMarkdownTask(task, settings, syncState);
 		}
 	});
-	await writeSyncState(repoRoot.trim(), syncState, settings);
+	await writeSyncState(normalizedRepoRoot, syncState, settings);
 	if (failure) {
 		throw failure;
 	}
 }
 
-async function collectMarkdownFiles() {
+async function collectChangedFiles() {
 	const refs = await readStdin();
 	const fromRefs = await collectFilesFromPushRefs(refs);
 	if (fromRefs.length > 0) {
-		return uniqueMarkdownFiles(fromRefs);
+		return uniqueFiles(fromRefs);
 	}
 
 	const changed = await git(["diff", "--name-only", "HEAD"]);
-	return uniqueMarkdownFiles(changed.split(/\r?\n/));
+	return uniqueFiles(changed.split(/\r?\n/));
+}
+
+async function collectSyncMarkdownFiles(repoRoot, changedFiles) {
+	const markdownFiles = changedFiles.filter((file) => file.endsWith(".md"));
+	const imageFiles = changedFiles.filter((file) => isSupportedImageFile(file));
+	if (imageFiles.length === 0) {
+		return uniqueFiles(markdownFiles);
+	}
+
+	const trackedMarkdownOutput = await git(["ls-files", "*.md"]);
+	const trackedMarkdownFiles = uniqueFiles(trackedMarkdownOutput.split(/\r?\n/));
+	const referencingFiles = await findReferencingMarkdownFiles({
+		vaultRoot: repoRoot,
+		markdownPaths: trackedMarkdownFiles,
+		changedImagePaths: imageFiles
+	});
+	return uniqueFiles([...markdownFiles, ...referencingFiles]);
 }
 
 async function collectFilesFromPushRefs(refs) {
@@ -120,7 +148,7 @@ async function collectFilesFromPushRefs(refs) {
 		}
 
 		if (!remoteSha || remoteSha === ZERO_REF) {
-			const output = await git(["ls-files", "*.md"]);
+			const output = await git(["ls-files"]);
 			files.push(...output.split(/\r?\n/));
 			continue;
 		}
@@ -132,11 +160,11 @@ async function collectFilesFromPushRefs(refs) {
 	return files;
 }
 
-function uniqueMarkdownFiles(files) {
+function uniqueFiles(files) {
 	const seen = new Set();
 	const result = [];
 	for (const file of files) {
-		if (!file.endsWith(".md") || seen.has(file)) {
+		if (!file || seen.has(file)) {
 			continue;
 		}
 
@@ -145,6 +173,10 @@ function uniqueMarkdownFiles(files) {
 	}
 
 	return result;
+}
+
+function isSupportedImageFile(path) {
+	return /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(path);
 }
 
 async function collectSyncTasks(repoRoot, files) {
@@ -157,6 +189,7 @@ async function collectSyncTasks(repoRoot, files) {
 		}
 
 		return {
+			vaultRoot: repoRoot,
 			filePath,
 			repoRelativePath: file,
 			content,
@@ -196,7 +229,13 @@ async function syncMarkdownTask(task, settings, syncState) {
 	try {
 		const file = { basename: basename(task.filePath, ".md") };
 		const normalizedContent = removeBindingOnlyFrontmatterBeforeNextFrontmatter(task.content);
-		const contentForLark = prepareNoteContentForLark(file, removeLarkBinding(normalizedContent), settings.titleSource);
+		const markdownForLark = prepareNoteContentForLark(file, removeLarkBinding(normalizedContent), settings.titleSource);
+		const preparedContent = await prepareLocalImages({
+			vaultRoot: task.vaultRoot,
+			markdownPath: task.repoRelativePath,
+			content: markdownForLark
+		});
+		const contentForLark = preparedContent.content;
 		const strategy = settings.syncStrategy || "auto";
 		let state = findDocumentState(syncState, task.stateKeys);
 		let syncDoc = state?.doc || task.doc;
@@ -231,14 +270,25 @@ async function syncMarkdownTask(task, settings, syncState) {
 						contentForLark,
 						refreshedPlan,
 						stateKeys,
-						refreshedState.revisionId
+						refreshedState.revisionId,
+						preparedContent.images
 					);
 					return;
 				}
 			}
 		}
 
-		await executeSyncPlanForTask(task, settings, syncState, syncDoc, contentForLark, plan, stateKeys, state?.revisionId);
+		await executeSyncPlanForTask(
+			task,
+			settings,
+			syncState,
+			syncDoc,
+			contentForLark,
+			plan,
+			stateKeys,
+			state?.revisionId,
+			preparedContent.images
+		);
 	} catch (error) {
 		if (error instanceof PrePushSyncError) {
 			throw error;
@@ -277,8 +327,32 @@ function shouldRefreshPreciseSyncState(state) {
 	return !state || !isDocumentStateBlockMappingAcceptable(state);
 }
 
-async function executeSyncPlanForTask(task, settings, syncState, doc, contentForLark, plan, stateKeys, baseRevisionId) {
+async function executeSyncPlanForTask(
+	task,
+	settings,
+	syncState,
+	doc,
+	contentForLark,
+	plan,
+	stateKeys,
+	baseRevisionId,
+	images
+) {
 	if (plan.mode === "skipped") {
+		if (images.length > 0) {
+			const mediaSnapshot = await materializeImagesForTask(settings, doc, images);
+			await saveRemoteDocumentState(
+				settings,
+				syncState,
+				doc,
+				stateKeys,
+				contentForLark,
+				task.repoRelativePath,
+				mediaSnapshot?.revisionId,
+				true
+			);
+			return;
+		}
 		await executeSkippedSyncPlanForTask(task, settings, syncState, doc, contentForLark, plan, stateKeys);
 		return;
 	}
@@ -312,6 +386,8 @@ async function executeSyncPlanForTask(task, settings, syncState, doc, contentFor
 			nextRevisionId = result.data?.document?.revision_id;
 			latestRevisionId = nextRevisionId ?? latestRevisionId;
 		}
+		const mediaSnapshot = await materializeImagesForTask(settings, doc, images);
+		latestRevisionId = mediaSnapshot?.revisionId ?? latestRevisionId;
 		if (plan.mode === "precise") {
 			await saveRemoteDocumentState(
 				settings,
@@ -335,6 +411,43 @@ async function executeSyncPlanForTask(task, settings, syncState, doc, contentFor
 			);
 		} else {
 			savePlanState(syncState, stateKeys, plan);
+		}
+	});
+}
+
+async function materializeImagesForTask(settings, doc, images) {
+	return await materializeLocalImages(images, {
+		fetchRemoteWithIds: async () => {
+			const remote = await fetchLarkDocumentWithIds(settings, doc);
+			return { content: remote.content, revisionId: remote.revisionId };
+		},
+		insertImage: async (image) => {
+			const result = await runLarkCli(
+				settings,
+				buildMediaInsertArgs(doc, image),
+				dirname(image.absolutePath)
+			);
+			const blockId = result.data?.block_id || result.data?.document?.new_blocks?.[0]?.block_id;
+			if (!blockId) {
+				throw new Error(`图片上传后未返回 block id：${image.vaultPath}`);
+			}
+			return { blockId };
+		},
+		moveBlockAfter: async (blockId, targetBlockId) => {
+			await runLarkCli(settings, buildMediaMoveArgs(doc, blockId, targetBlockId));
+		},
+		deleteBlock: async (blockId, revisionId) => {
+			const args = buildUpdateCommandArgs({
+				doc,
+				command: "block_delete",
+				blockId,
+				revisionId
+			});
+			await runLarkCli(settings, args);
+		},
+		removePlaceholder: async (placeholder, revisionId) => {
+			const args = buildPlaceholderRemoveArgs(doc, placeholder, revisionId);
+			await runLarkCli(settings, args);
 		}
 	});
 }
@@ -493,7 +606,7 @@ async function fetchRemoteDocumentStateAfterExpectedRevision(
 	if (remoteMarkdown.revisionId !== undefined && remoteMarkdown.revisionId < expectedRevisionId) {
 		return undefined;
 	}
-	if (expectedMarkdown && !await isRemoteMarkdownContentExpected(remoteMarkdown.content, expectedMarkdown)) {
+	if (expectedMarkdown && !await isRemoteContentExpected(remoteMarkdown.content, remoteXml.content, expectedMarkdown)) {
 		return undefined;
 	}
 
@@ -519,7 +632,7 @@ async function fetchRemoteDocumentState(settings, doc, expectedMarkdown, allowRe
 		fetchLarkDocumentMarkdown(settings, doc),
 		fetchLarkDocumentWithIds(settings, doc)
 	]);
-	if (expectedMarkdown && !await isRemoteMarkdownContentExpected(remoteMarkdown.content, expectedMarkdown)) {
+	if (expectedMarkdown && !await isRemoteContentExpected(remoteMarkdown.content, remoteXml.content, expectedMarkdown)) {
 		return undefined;
 	}
 
@@ -543,6 +656,13 @@ async function isRemoteMarkdownContentExpected(remoteMarkdown, expectedMarkdown)
 		createSyncContentSignature(expectedMarkdown)
 	]);
 	return isSyncContentSignatureEquivalent(remoteSignature, expectedSignature);
+}
+
+async function isRemoteContentExpected(remoteMarkdown, remoteXml, expectedMarkdown) {
+	if (containsLocalImagePlaceholders(expectedMarkdown)) {
+		return await isRemoteXmlContentEquivalent(remoteXml, expectedMarkdown);
+	}
+	return await isRemoteMarkdownContentExpected(remoteMarkdown, expectedMarkdown);
 }
 
 async function sleep(ms) {
@@ -571,13 +691,25 @@ async function tryBootstrapPreciseSyncState(settings, syncState, doc, docs, expe
 		fetchLarkDocumentWithIds(settings, doc)
 	]);
 	const remoteDoc = remoteXml.doc || remoteMarkdown?.doc || doc;
-	const baselineMarkdown = remoteMarkdown?.content || expectedMarkdown || "";
-	const state = await createDocumentSyncStateFromRemote(
+	const existingState = findDocumentState(syncState, [remoteDoc, doc, ...docs]);
+	if (existingState
+		&& existingState.revisionId !== undefined
+		&& existingState.revisionId === remoteXml.revisionId
+		&& isDocumentStateBlockMappingAcceptable(existingState)) {
+		return existingState;
+	}
+	const baselineMarkdown = expectedMarkdown && containsLocalImagePlaceholders(expectedMarkdown)
+		? expectedMarkdown
+		: remoteMarkdown?.content || expectedMarkdown || "";
+	let state = await createDocumentSyncStateFromRemote(
 		remoteDoc,
 		baselineMarkdown,
 		remoteXml.content,
 		remoteXml.revisionId
 	);
+	if (expectedMarkdown && containsLocalImagePlaceholders(expectedMarkdown)) {
+		state = invalidateLocalImageSyncState(state);
+	}
 	if (!isDocumentStateBlockMappingAcceptable(state)) {
 		return undefined;
 	}

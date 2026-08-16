@@ -16,6 +16,7 @@ Feishu Lark CLI Sync publishes and synchronizes Obsidian Markdown notes to Feish
 - **全量覆盖同步**：需要完全以本地 Markdown 为准时，可清空并重写远端文档。
 - **自动同步策略**：默认使用自动策略；小改动按块增量同步，改动较大、结构复杂或无法安全增量时自动降级为全量覆盖。
 - **自动同步触发**：支持保存后同步，也支持 Git `pre-push` hook 在推送代码前同步已绑定文档。
+- **本地图片同步**：支持 Obsidian Wiki 图片和相对路径 Markdown 图片；图片文件单独变化时也会同步引用它的已绑定文档。
 - **内部链接改写**：上传到飞书 / Lark 的内容会把目录内 Markdown 链接、Obsidian Wiki 链接改写成远端文档引用。
 
 ## 安装
@@ -84,9 +85,23 @@ which lark-cli
 
 ```yaml
 ---
+lark_doc_token: "xxxx"
 lark_doc_url: "https://example.feishu.cn/docx/xxxx"
 ---
 ```
+
+### 本地图片
+
+支持以下本地图片写法：
+
+```md
+![[diagram.png]]
+![[diagram.png|600]]
+![[diagram.png|600x400]]
+![架构图](../assets/diagram.png)
+```
+
+支持 PNG、JPEG/JPG、GIF、WebP 和 BMP。图片必须位于当前 Obsidian vault 内；HTTP(S) 图片继续由 Markdown 导入处理。保存后同步和 Git pre-push 都会在图片二进制单独变化时反查并同步引用文档。
 
 ### 目录同步
 

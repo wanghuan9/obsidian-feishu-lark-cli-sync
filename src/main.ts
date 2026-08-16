@@ -37,6 +37,8 @@ import {
 	FRONTMATTER_URL_KEY,
 	isDocumentStateContentEquivalent,
 	isDocumentStateBlockMappingAcceptable,
+	invalidateLocalImageSyncState,
+	isRemoteXmlContentEquivalent,
 	isSyncContentSignatureEquivalent,
 	LEGACY_FRONTMATTER_SYNCED_AT_KEY,
 	LarkSyncStateFile,
@@ -71,6 +73,20 @@ import {
 	EMBEDDED_PRE_PUSH_CORE_SCRIPT,
 	EMBEDDED_PRE_PUSH_SCRIPT
 } from "./embedded-helpers";
+import {
+	containsLocalImagePlaceholders,
+	findReferencingMarkdownFiles,
+	isSupportedImagePath,
+	LocalImageResource,
+	prepareLocalImages,
+	scanLocalImageReferences
+} from "./local-image";
+import {
+	buildMediaInsertArgs,
+	buildMediaMoveArgs,
+	buildPlaceholderRemoveArgs,
+	materializeLocalImages as materializePreparedLocalImages
+} from "./media-sync-orchestrator";
 
 const execFileAsync = promisify(execFile);
 
@@ -171,6 +187,7 @@ interface LarkCommandDocument {
 	url?: string;
 	revision_id?: number;
 	content?: string;
+	new_blocks?: Array<{ block_id?: string }>;
 }
 
 interface LarkCommandNode {
@@ -186,6 +203,7 @@ interface LarkCommandResult {
 		folder_token?: string;
 		comment_id?: string;
 		reply_id?: string;
+		block_id?: string;
 		"document"?: LarkCommandDocument;
 		node?: LarkCommandNode;
 		node_token?: string;
@@ -206,9 +224,14 @@ interface LarkCommandOptions {
 	cwd?: string;
 }
 
+interface PreparedNoteContent {
+	content: string;
+	images: LocalImageResource[];
+}
+
 interface FolderPublishEntry {
 	file: TFile;
-	content: string;
+	preparedContent: PreparedNoteContent;
 	binding?: BoundLarkDocument;
 	parent: RemoteParent;
 	remoteParentPath: string;
@@ -217,7 +240,7 @@ interface FolderPublishEntry {
 
 interface FolderPreparedFile {
 	file: TFile;
-	content: string;
+	preparedContent: PreparedNoteContent;
 	binding: BoundLarkDocument | null;
 	remoteParentPath: string;
 }
@@ -263,6 +286,7 @@ interface SyncFileOptions {
 interface SyncOrRecreateOptions {
 	allowRecreate: boolean;
 	showRemoteDeletedNotice: boolean;
+	updateFrontmatter: boolean;
 	mode: SyncMode;
 	path: string;
 	strategy?: SyncStrategy;
@@ -588,12 +612,48 @@ export default class LarkCliSyncPlugin extends Plugin {
 				return;
 			}
 
-			if (!(file instanceof TFile) || file.extension !== "md") {
+			if (!(file instanceof TFile)) {
 				return;
 			}
-
-			this.queueSaveAutoSync(file);
+			if (file.extension === "md") {
+				this.queueSaveAutoSync(file);
+			} else if (isSupportedImagePath(file.path)) {
+				void this.queueImageReferenceAutoSync([file.path]);
+			}
 		}));
+		this.registerEvent(this.app.vault.on("create", (file) => {
+			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedImagePath(file.path)) {
+				void this.queueImageReferenceAutoSync([file.path]);
+			}
+		}));
+		this.registerEvent(this.app.vault.on("delete", (file) => {
+			if (this.settings.autoSyncMode === "save" && file instanceof TFile && isSupportedImagePath(file.path)) {
+				void this.queueImageReferenceAutoSync([file.path]);
+			}
+		}));
+		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+			if (this.settings.autoSyncMode === "save" && file instanceof TFile
+				&& (isSupportedImagePath(file.path) || isSupportedImagePath(oldPath))) {
+				void this.queueImageReferenceAutoSync([oldPath, file.path]);
+			}
+		}));
+	}
+
+	private async queueImageReferenceAutoSync(changedImagePaths: string[]): Promise<void> {
+		const markdownFiles = this.app.vault.getMarkdownFiles();
+		const markdownPaths = markdownFiles.map((file) => file.path);
+		const referencingPaths = await findReferencingMarkdownFiles({
+			vaultRoot: this.getVaultRoot(),
+			markdownPaths,
+			changedImagePaths
+		});
+		const filesByPath = new Map(markdownFiles.map((file) => [file.path, file]));
+		for (const markdownPath of referencingPaths) {
+			const file = filesByPath.get(markdownPath);
+			if (file && this.getBinding(file)) {
+				this.queueSaveAutoSync(file);
+			}
+		}
 	}
 
 	private async syncCurrentNote(): Promise<void> {
@@ -655,19 +715,24 @@ export default class LarkCliSyncPlugin extends Plugin {
 				return null;
 			}
 
-			const content = await this.readNoteForLark(file);
+			const preparedContent = await this.readNoteForLark(file);
 			const publishedFolder = await this.resolvePublishedFolderParentForFile(file);
+			const persistCreatedBinding = options.updateFrontmatter
+				? async (createdBinding: BoundLarkDocument): Promise<void> => {
+					await this.writeBinding(file, createdBinding);
+				}
+				: undefined;
 			const result = publishedFolder
 				? this.withRemoteParentMetadata(
-					await this.createLarkDocument(file, content, publishedFolder.parent),
+					await this.createLarkDocument(file, preparedContent, publishedFolder.parent, persistCreatedBinding),
 					publishedFolder.remoteRoot,
 					publishedFolder.remoteParentPath,
 					publishedFolder.parent
 				)
-				: await this.createLarkDocument(file, content);
-			await this.saveCreatedDocumentStateFromBaseline(result, content);
+				: await this.createLarkDocument(file, preparedContent, undefined, persistCreatedBinding);
+			await this.saveCreatedDocumentStateFromBaseline(result, preparedContent.content);
 
-			if (options.updateFrontmatter) {
+			if (options.updateFrontmatter && publishedFolder) {
 				await this.writeBinding(file, result);
 			}
 
@@ -682,11 +747,15 @@ export default class LarkCliSyncPlugin extends Plugin {
 			return result;
 		}
 
-		const content = await this.readNoteForLark(file);
-		const rewrittenContent = this.rewritePublishedFolderInternalLinks(file, content);
-		const nextBinding = await this.syncOrRecreateDocument(file, binding, rewrittenContent, undefined, {
+		const preparedContent = await this.readNoteForLark(file);
+		const rewrittenContent = this.rewritePublishedFolderInternalLinks(file, preparedContent.content);
+		const nextBinding = await this.syncOrRecreateDocument(file, binding, {
+			...preparedContent,
+			content: rewrittenContent
+		}, undefined, {
 			allowRecreate: options.allowCreate,
 			showRemoteDeletedNotice: options.showRemoteDeletedNotice,
+			updateFrontmatter: options.updateFrontmatter,
 			mode: options.mode,
 			path: file.path,
 			strategy: options.strategy,
@@ -1207,12 +1276,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				const folderRoot = this.getSelectedFolderName(folderPath);
 				const rootParent = await this.resolveRemoteRootParent();
 				const preparedFiles = await Promise.all(files.map(async (file) => {
-					const content = await this.readNoteForLark(file);
+					const preparedContent = await this.readNoteForLark(file);
 					const binding = this.getBinding(file);
 					const documentParentPath = this.getRemoteParentPath(folderPath, file, folderRoot);
 					return {
 						file,
-						content,
+						preparedContent,
 						binding,
 						remoteParentPath: documentParentPath
 					};
@@ -1294,10 +1363,19 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			? await this.resolveFolderBinding(
 				preparedFile.file,
 				preparedFile.binding,
-				preparedFile.content,
+				preparedFile.preparedContent,
 				documentParent
 			)
-			: await this.createLarkDocument(preparedFile.file, preparedFile.content, documentParent);
+			: await this.createLarkDocument(
+				preparedFile.file,
+				preparedFile.preparedContent,
+				documentParent,
+				this.settings.updateFrontmatter
+					? async (createdBinding) => {
+						await this.writeBinding(preparedFile.file, createdBinding);
+					}
+					: undefined
+			);
 		const nextBindingWithParent = this.withRemoteParentMetadata(
 			nextBinding,
 			folderRoot,
@@ -1307,7 +1385,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		entries[index] = {
 			file: preparedFile.file,
-			content: preparedFile.content,
+			preparedContent: preparedFile.preparedContent,
 			binding: nextBindingWithParent,
 			parent: documentParent,
 			remoteParentPath: preparedFile.remoteParentPath,
@@ -1388,18 +1466,22 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				continue;
 			}
 
-			const rewrittenContent = this.rewriteInternalLinks(entry.content, linkMap, entry.file);
+			const rewrittenContent = this.rewriteInternalLinks(entry.preparedContent.content, linkMap, entry.file);
 			if (entry.isNewDocument) {
-				await this.saveCreatedDocumentStateFromBaseline(entry.binding, entry.content);
-				if (rewrittenContent === entry.content) {
+				await this.saveCreatedDocumentStateFromBaseline(entry.binding, entry.preparedContent.content);
+				if (rewrittenContent === entry.preparedContent.content) {
 					continue;
 				}
 			}
 			const strategy = entry.isNewDocument ? "precise" : undefined;
 
-			const nextBinding = await this.syncOrRecreateDocument(entry.file, entry.binding, rewrittenContent, entry.parent, {
+			const nextBinding = await this.syncOrRecreateDocument(entry.file, entry.binding, {
+				...entry.preparedContent,
+				content: rewrittenContent
+			}, entry.parent, {
 				allowRecreate: true,
 				showRemoteDeletedNotice: false,
+				updateFrontmatter: this.settings.updateFrontmatter,
 				mode: "folder",
 				path: entry.file.path,
 				strategy,
@@ -1470,11 +1552,27 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			.sort((a, b) => a.path.localeCompare(b.path));
 	}
 
-	private async readNoteForLark(file: TFile): Promise<string> {
+	private async readNoteForLark(file: TFile): Promise<PreparedNoteContent> {
 		const rawContent = await this.app.vault.read(file);
 		const normalizedContent = removeBindingOnlyFrontmatterBeforeNextFrontmatter(rawContent);
 		const contentWithoutBinding = removeLarkBinding(normalizedContent);
-		return prepareNoteContentForLark(file, contentWithoutBinding, this.settings.titleSource);
+		const content = prepareNoteContentForLark(file, contentWithoutBinding, this.settings.titleSource);
+		if (scanLocalImageReferences(content).length === 0) {
+			return { content, images: [] };
+		}
+		return await prepareLocalImages({
+			vaultRoot: this.getVaultRoot(),
+			markdownPath: file.path,
+			content
+		});
+	}
+
+	private getVaultRoot(): string {
+		const adapter = this.app.vault.adapter;
+		if (!(adapter instanceof FileSystemAdapter)) {
+			throw new LocalizedSyncError("本地图片同步仅支持桌面端文件系统 vault。");
+		}
+		return adapter.getBasePath();
 	}
 
 	private getBinding(file: TFile): BoundLarkDocument | null {
@@ -1500,9 +1598,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 		return typeof value === "string" ? value : "";
 	}
 
-	private async createLarkDocument(file: TFile, content: string, parent?: RemoteParent): Promise<BoundLarkDocument> {
-		const title = extractTitle(file, content, "first-heading");
-		const bodyContent = stripPreparedMarkdownTitle(content);
+	private async createLarkDocument(
+		file: TFile,
+		preparedContent: PreparedNoteContent,
+		parent?: RemoteParent,
+		onCreated?: (binding: BoundLarkDocument) => Promise<void>
+	): Promise<BoundLarkDocument> {
+		const title = extractTitle(file, preparedContent.content, "first-heading");
+		const bodyContent = stripPreparedMarkdownTitle(preparedContent.content);
 		return await this.withTempMarkdown(file.basename, bodyContent, async (tempFile) => {
 			const args = ["docs", "+create", "--api-version", "v2", "--as", "user", "--doc-format", "markdown",
 				"--title", title, "--content", `@${tempFile.fileName}`, "--json"];
@@ -1523,18 +1626,22 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				throw new Error(this.t("errorNoDocumentToken"));
 			}
 
-			return {
+			const binding = {
 				token,
 				url
 			};
+			await onCreated?.(binding);
+			await this.materializeLocalImages(token, preparedContent.images);
+			return binding;
 		});
 	}
 
 	private async updateLarkDocument(
 		doc: string,
-		content: string,
+		preparedContent: PreparedNoteContent,
 		context: { mode: SyncMode; path: string; strategy?: SyncStrategy; stateKeys?: string[] }
 	): Promise<Partial<BoundLarkDocument>> {
+		const content = preparedContent.content;
 		const strategy = context.strategy || this.settings.syncStrategy;
 		let state = this.findDocumentState([doc, ...(context.stateKeys || [])]);
 		let syncDoc = state?.doc || doc;
@@ -1561,7 +1668,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					state: refreshedState
 				});
 				if (refreshedPlan.mode !== "blocked") {
-					return await this.executeSyncPlan(refreshedState.doc, content, refreshedPlan, {
+					return await this.executeSyncPlan(refreshedState.doc, preparedContent, refreshedPlan, {
 						...context,
 						previousRevisionId: refreshedState.revisionId
 					});
@@ -1569,7 +1676,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			}
 		}
 
-		return await this.executeSyncPlan(syncDoc, content, plan, {
+		return await this.executeSyncPlan(syncDoc, preparedContent, plan, {
 			...context,
 			previousRevisionId: state?.revisionId
 		});
@@ -1610,11 +1717,23 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 	private async executeSyncPlan(
 		doc: string,
-		content: string,
+		preparedContent: PreparedNoteContent,
 		plan: SyncPlan,
 		context: { mode: SyncMode; path: string; stateKeys?: string[]; previousRevisionId?: number }
 	): Promise<Partial<BoundLarkDocument>> {
+		const content = preparedContent.content;
 		if (plan.mode === "skipped") {
+			if (preparedContent.images.length > 0) {
+				const mediaSnapshot = await this.materializeLocalImages(doc, preparedContent.images);
+				await this.saveRemoteDocumentState(doc, context.stateKeys || [], {
+					expectedMarkdown: content,
+					expectedRevisionId: mediaSnapshot?.revisionId,
+					allowRemoteChanges: true,
+					context,
+					refreshPolicy: this.getRemoteStateRefreshPolicy(context.mode)
+				});
+				return {};
+			}
 			return await this.executeSkippedSyncPlan(doc, content, plan, context);
 		}
 
@@ -1654,6 +1773,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 					url: commandDocument?.url || latestDocument.url,
 					revisionId: commandDocument?.revision_id ?? latestDocument.revisionId
 				};
+			}
+
+			const mediaSnapshot = await this.materializeLocalImages(doc, preparedContent.images);
+			if (mediaSnapshot?.revisionId !== undefined) {
+				latestDocument.revisionId = mediaSnapshot.revisionId;
+				nextRevisionId = mediaSnapshot.revisionId;
 			}
 
 			if (plan.mode === "precise") {
@@ -1791,8 +1916,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				continue;
 			}
 
-			const actualRemoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
-			if (!await this.isRemoteMarkdownContentEquivalent(actualRemoteMarkdown.content, expectedSignature)) {
+			const hasLocalImages = expectedSignature.units.some((unit) => unit.kind === "img");
+			const isExpectedContentVisible = hasLocalImages
+				? await isRemoteXmlContentEquivalent(remoteXml.content, baselineMarkdown)
+				: await this.isRemoteMarkdownContentEquivalent(
+					(await this.fetchLarkDocumentMarkdown(doc)).content,
+					expectedSignature
+				);
+			if (!isExpectedContentVisible) {
 				lastDiagnostic = {
 					rejectReason: "content-not-equivalent",
 					observedRevisionId: remoteXml.revisionId
@@ -2215,13 +2346,26 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			this.fetchLarkDocumentWithIds(doc)
 		]);
 		const remoteDoc = remoteXml.doc || remoteMarkdown?.doc || doc;
-		const baselineMarkdown = remoteMarkdown?.content || expectedMarkdown || "";
-		const state = await createDocumentSyncStateFromRemote(
+		const existingState = this.findDocumentState([remoteDoc, doc, ...stateKeys]);
+		if (existingState
+			&& existingState.revisionId !== undefined
+			&& existingState.revisionId === remoteXml.revisionId
+			&& isDocumentStateBlockMappingAcceptable(existingState)) {
+			await this.persistDocumentState(existingState, [doc, remoteDoc, ...stateKeys]);
+			return existingState;
+		}
+		const baselineMarkdown = expectedMarkdown && containsLocalImagePlaceholders(expectedMarkdown)
+			? expectedMarkdown
+			: remoteMarkdown?.content || expectedMarkdown || "";
+		let state = await createDocumentSyncStateFromRemote(
 			remoteDoc,
 			baselineMarkdown,
 			remoteXml.content,
 			remoteXml.revisionId
 		);
+		if (expectedMarkdown && containsLocalImagePlaceholders(expectedMarkdown)) {
+			state = invalidateLocalImageSyncState(state);
+		}
 		if (isDocumentStateBlockMappingAcceptable(state)) {
 			await this.persistDocumentState(state, [doc, remoteDoc, ...stateKeys]);
 			return state;
@@ -2269,6 +2413,43 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			content: result.data?.["document"]?.content || "",
 			revisionId: result.data?.["document"]?.revision_id
 		};
+	}
+
+	private async materializeLocalImages(
+		doc: string,
+		images: LocalImageResource[]
+	): Promise<{ content: string; revisionId?: number } | undefined> {
+		return await materializePreparedLocalImages(images, {
+			fetchRemoteWithIds: async () => {
+				const remote = await this.fetchLarkDocumentWithIds(doc);
+				return { content: remote.content, revisionId: remote.revisionId };
+			},
+			insertImage: async (image) => {
+				const result = await this.runLarkCli(buildMediaInsertArgs(doc, image), {
+					cwd: dirname(image.absolutePath)
+				});
+				const blockId = result.data?.block_id || result.data?.document?.new_blocks?.[0]?.block_id;
+				if (!blockId) {
+					throw new Error(`图片上传后未返回 block id：${image.vaultPath}`);
+				}
+				return { blockId };
+			},
+			moveBlockAfter: async (blockId, targetBlockId) => {
+				await this.runLarkCli(buildMediaMoveArgs(doc, blockId, targetBlockId));
+			},
+			deleteBlock: async (blockId, revisionId) => {
+				const args = buildUpdateCommandArgs({
+					doc,
+					command: "block_delete",
+					blockId,
+					revisionId
+				});
+				await this.runLarkCli(args);
+			},
+			removePlaceholder: async (placeholder, revisionId) => {
+				await this.runLarkCli(buildPlaceholderRemoveArgs(doc, placeholder, revisionId));
+			}
+		});
 	}
 
 	private async fetchLarkDocumentRevisionId(doc: string): Promise<number | undefined> {
@@ -2331,12 +2512,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private async syncOrRecreateDocument(
 		file: TFile,
 		binding: BoundLarkDocument,
-		content: string,
+		preparedContent: PreparedNoteContent,
 		parent: RemoteParent | undefined,
 		options: SyncOrRecreateOptions
 	): Promise<BoundLarkDocument> {
 		try {
-			const result = await this.updateLarkDocument(binding.token || binding.url, content, {
+			const result = await this.updateLarkDocument(binding.token || binding.url, preparedContent, {
 				mode: options.mode,
 				path: options.path,
 				strategy: options.strategy,
@@ -2359,9 +2540,19 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			if (options.showRemoteDeletedNotice) {
 				new Notice(this.t("noticeRemoteDeletedRecreate"), 5000);
 			}
-			const recreatedBinding = await this.createLarkDocument(file, content, parent);
+			const persistRecreatedBinding = options.updateFrontmatter
+				? async (createdBinding: BoundLarkDocument): Promise<void> => {
+					await this.writeBinding(file, createdBinding);
+				}
+				: undefined;
+			const recreatedBinding = await this.createLarkDocument(
+				file,
+				preparedContent,
+				parent,
+				persistRecreatedBinding
+			);
 			this.removeSyncStateForBinding(binding);
-			await this.saveCreatedDocumentStateFromBaseline(recreatedBinding, content);
+			await this.saveCreatedDocumentStateFromBaseline(recreatedBinding, preparedContent.content);
 			return recreatedBinding;
 		}
 	}
@@ -2369,7 +2560,7 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	private async resolveFolderBinding(
 		file: TFile,
 		binding: BoundLarkDocument,
-		content: string,
+		preparedContent: PreparedNoteContent,
 		parent: RemoteParent
 	): Promise<BoundLarkDocument> {
 		try {
@@ -2380,9 +2571,19 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				throw error;
 			}
 
-			const recreatedBinding = await this.createLarkDocument(file, content, parent);
+			const persistRecreatedBinding = this.settings.updateFrontmatter
+				? async (createdBinding: BoundLarkDocument): Promise<void> => {
+					await this.writeBinding(file, createdBinding);
+				}
+				: undefined;
+			const recreatedBinding = await this.createLarkDocument(
+				file,
+				preparedContent,
+				parent,
+				persistRecreatedBinding
+			);
 			this.removeSyncStateForBinding(binding);
-			await this.saveCreatedDocumentStateFromBaseline(recreatedBinding, content);
+			await this.saveCreatedDocumentStateFromBaseline(recreatedBinding, preparedContent.content);
 			return recreatedBinding;
 		}
 	}
@@ -3359,10 +3560,14 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
 			delete frontmatter.lark_doc;
-			delete frontmatter[FRONTMATTER_TOKEN_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
 			delete frontmatter[LEGACY_FRONTMATTER_SYNCED_AT_KEY];
+			if (binding.token) {
+				frontmatter[FRONTMATTER_TOKEN_KEY] = binding.token;
+			} else {
+				delete frontmatter[FRONTMATTER_TOKEN_KEY];
+			}
 			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
 		});
 		this.selfWrittenPaths.set(file.path, Date.now());

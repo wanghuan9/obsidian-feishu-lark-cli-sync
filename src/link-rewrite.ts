@@ -51,7 +51,7 @@ export function rewriteInternalLinks(content: string, linkMap: Map<string, LinkT
 			return linkTarget ? formatLarkDocReference(linkTarget) : match;
 		});
 
-	const wikiRewritten = markdownRewritten.replace(/\[\[([^|\]#]+)(#[^|\]]+)?(?:\|([^\]]+))?\]\]/g,
+	const wikiRewritten = markdownRewritten.replace(/(?<!!)\[\[([^|\]#]+)(#[^|\]]+)?(?:\|([^\]]+))?\]\]/g,
 		(match, target: string) => {
 			const linkTarget = resolveInternalLink(target, linkMap, currentFile);
 			return linkTarget ? formatLarkDocReference(linkTarget) : match;

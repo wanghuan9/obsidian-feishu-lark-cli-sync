@@ -14,6 +14,7 @@ It is useful when Obsidian is your local source of truth and Feishu/Lark is wher
 - **Full overwrite sync**: clear and rewrite the remote document when the local Markdown file should be the complete source of truth.
 - **Automatic sync strategy**: use the automatic strategy by default; small changes are synced incrementally, while large or complex changes fall back to full overwrite when safe incremental sync is not possible.
 - **Auto sync triggers**: sync after save, or sync bound notes before `git push` through a Git `pre-push` hook.
+- **Local image sync**: support Obsidian wiki embeds and relative Markdown images; changing only an image file also syncs bound notes that reference it.
 - **Internal link rewriting**: uploaded content rewrites Markdown and Obsidian internal links into Feishu/Lark document references.
 
 ## Installation
@@ -80,9 +81,23 @@ Default binding example:
 
 ```yaml
 ---
+lark_doc_token: "xxxx"
 lark_doc_url: "https://example.feishu.cn/docx/xxxx"
 ---
 ```
+
+### Local Images
+
+The following local image forms are supported:
+
+```md
+![[diagram.png]]
+![[diagram.png|600]]
+![[diagram.png|600x400]]
+![Architecture](../assets/diagram.png)
+```
+
+PNG, JPEG/JPG, GIF, WebP, and BMP are supported. Images must stay inside the current Obsidian vault. HTTP(S) images continue through the existing Markdown import path. Save-after-sync and Git pre-push both find and sync referencing bound notes when only the image binary changes.
 
 ### Folder Sync
 

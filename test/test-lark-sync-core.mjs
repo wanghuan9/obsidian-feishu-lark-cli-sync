@@ -408,6 +408,20 @@ const partialMappedState = await createDocumentSyncStateFromRemote(
 assert.equal(isDocumentStateBlockMappingAcceptable(partialMappedState), false);
 assert.equal(partialMappedState.units.filter((unit) => !unit.blockId).length, 1);
 
+const reorderedRemoteState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n- Question\n- Conclusion\n- Note\n\n## Details\n\n1. First",
+	[
+		"<title id=\"title\">Note</title>",
+		"<ul><li id=\"question\">Question</li><li id=\"conclusion\">Conclusion</li></ul>",
+		"<h2 id=\"details\">Details</h2>",
+		"<ol><li id=\"first\">First</li></ol>",
+		"<ul><li id=\"note\">Note</li></ul>"
+	].join("")
+);
+assert.equal(isDocumentStateBlockMappingAcceptable(reorderedRemoteState), false);
+assert.equal(reorderedRemoteState.units.every((unit) => !unit.blockId), true);
+
 const partiallyMappedLargeState = {
 	doc: "doc-token",
 	contentHash: "hash",
@@ -1582,6 +1596,29 @@ assert.deepEqual(complexPlan.commands, [{
 	blockId: "blk-1",
 	contentFileName: "sync.md",
 	content: "Inserted"
+}]);
+
+const listTailState = await createDocumentSyncStateFromRemote(
+	"doc-token",
+	"# Note\n\n- Question\n- Conclusion\n- Note",
+	"<title id=\"doc-title\">Note</title><ul><li id=\"question\">Question</li><li id=\"conclusion\">Conclusion</li><li id=\"note\">Note</li></ul>",
+	11
+);
+const listTailInsertPlan = await buildSyncPlan({
+	doc: "doc-token",
+	markdown: "# Note\n\n- Question\n- Conclusion\n- Note\n\n## Details\n\n1. First\n2. Second",
+	contentFileName: "sync.md",
+	strategy: "precise",
+	state: listTailState
+});
+assert.equal(listTailInsertPlan.mode, "precise");
+assert.deepEqual(listTailInsertPlan.commands, [{
+	doc: "doc-token",
+	command: "block_insert_after",
+	docFormat: "markdown",
+	blockId: "-1",
+	contentFileName: "sync.md",
+	content: "## Details\n\n1. First\n2. Second"
 }]);
 
 const modifiedAroundInsertState = await createDocumentSyncStateFromRemote(

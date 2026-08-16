@@ -1,3 +1,20 @@
+import { isLocalImagePlaceholder } from "./local-image";
+
+export {
+	buildLocalImageFileIndex,
+	containsLocalImagePlaceholders,
+	findReferencingMarkdownFiles,
+	isSupportedImagePath,
+	prepareLocalImages,
+	scanLocalImageReferences
+} from "./local-image";
+export {
+	buildMediaInsertArgs,
+	buildMediaMoveArgs,
+	buildPlaceholderRemoveArgs,
+	materializeLocalImages
+} from "./media-sync-orchestrator";
+
 export type TitleSource = "first-heading" | "file-name";
 export type SyncStrategy = "auto" | "precise" | "overwrite";
 export type MessageLanguage = "zh-CN" | "en";
@@ -61,6 +78,17 @@ export interface SyncContentSignature {
 export interface SyncContentUnitSignature {
 	kind: string;
 	hash: string;
+}
+
+export function invalidateLocalImageSyncState(state: DocumentSyncState): DocumentSyncState {
+	if (!state.units.some((unit) => unit.kind === "img")) {
+		return state;
+	}
+	return {
+		...state,
+		contentHash: "",
+		units: state.units.map((unit) => unit.kind === "img" ? { ...unit, hash: "" } : unit)
+	};
 }
 
 export type LarkUpdateCommand =
@@ -171,6 +199,7 @@ const LARGE_CHANGE_COMMAND_LIMIT = 8;
 const LARGE_CHANGE_REPLACE_RATIO = 0.6;
 const LARGE_CHANGE_MIN_REPLACE_COUNT = 4;
 const MIN_REPLACE_RUN_LENGTH_TO_COMPACT = 3;
+const DOCUMENT_END_BLOCK_ID = "-1";
 
 export function prepareNoteContentForLark(file: NoteFile, content: string, titleSource: TitleSource): string {
 	const title = extractTitle(file, content, titleSource);
@@ -955,7 +984,8 @@ function createDocumentSyncStateFromParsedRemote(
 ): DocumentSyncState {
 	const remoteUnits = readRemoteTopLevelUnits(remoteXml);
 	const titleBlockId = readRemoteTitleBlockId(remoteXml);
-	if (markdownUnits.length !== remoteUnits.length) {
+	if (markdownUnits.length !== remoteUnits.length
+		|| haveSameUnitsInDifferentOrder(markdownUnits, remoteUnits)) {
 		return createDocumentSyncStateFromPartialMapping(
 			doc,
 			contentHash,
@@ -1052,7 +1082,64 @@ function mapRemoteUnitsToMarkdownUnits(
 	mapRemoteUnitsByIndex(markdownUnits, remoteUnits, mapping, usedRemoteIndexes);
 	mapRemoteUnitsByUniqueFingerprint(markdownUnits, remoteUnits, mapping, usedRemoteIndexes);
 	mapRemoteUnitsInAnchoredWindows(markdownUnits, remoteUnits, mapping, usedRemoteIndexes);
-	return mapping;
+	return isRemoteUnitMappingOrdered(mapping, remoteUnits)
+		? mapping
+		: new Array<RemoteSyncUnit | undefined>(markdownUnits.length);
+}
+
+function haveSameUnitsInDifferentOrder(
+	markdownUnits: MarkdownSyncUnit[],
+	remoteUnits: RemoteSyncUnit[]
+): boolean {
+	const markdownKeys = markdownUnits.map(createUnitFingerprintKey);
+	const remoteKeys = remoteUnits.map(createUnitFingerprintKey);
+	if (markdownKeys.every((key, index) => key === remoteKeys[index])) {
+		return false;
+	}
+
+	return haveSameValueCounts(markdownKeys, remoteKeys);
+}
+
+function haveSameValueCounts(left: string[], right: string[]): boolean {
+	if (left.length !== right.length) {
+		return false;
+	}
+
+	const counts = new Map<string, number>();
+	for (const value of left) {
+		counts.set(value, (counts.get(value) || 0) + 1);
+	}
+
+	for (const value of right) {
+		const count = counts.get(value) || 0;
+		if (count === 0) {
+			return false;
+		}
+		counts.set(value, count - 1);
+	}
+
+	return true;
+}
+
+function isRemoteUnitMappingOrdered(
+	mapping: Array<RemoteSyncUnit | undefined>,
+	remoteUnits: RemoteSyncUnit[]
+): boolean {
+	const remoteIndexes = new Map(remoteUnits.map((unit, index) => [unit, index]));
+	let previousRemoteIndex = -1;
+	for (const remoteUnit of mapping) {
+		if (!remoteUnit) {
+			continue;
+		}
+
+		const remoteIndex = remoteIndexes.get(remoteUnit);
+		if (remoteIndex === undefined || remoteIndex <= previousRemoteIndex) {
+			return false;
+		}
+		previousRemoteIndex = remoteIndex;
+	}
+
+	return true;
 }
 
 function mapRemoteUnitsByIndex(
@@ -1290,7 +1377,8 @@ function areSameFingerprintUnit(
 	markdownUnit: MarkdownSyncUnit,
 	remoteUnit: RemoteSyncUnit
 ): boolean {
-	return markdownUnit.kind === remoteUnit.kind && markdownUnit.fingerprint === remoteUnit.fingerprint;
+	return markdownUnit.kind === remoteUnit.kind
+		&& (markdownUnit.kind === "img" || markdownUnit.fingerprint === remoteUnit.fingerprint);
 }
 
 export async function createSyncContentSignature(markdown: string): Promise<SyncContentSignature> {
@@ -1361,7 +1449,7 @@ export async function isRemoteXmlContentEquivalent(remoteXml: string, markdown: 
 		}
 
 		return unit.kind === remoteUnit.kind
-		&& unit.fingerprint === remoteUnit.fingerprint;
+			&& (unit.kind === "img" || unit.fingerprint === remoteUnit.fingerprint);
 	});
 }
 
@@ -1614,9 +1702,12 @@ async function buildPreciseInsertPlan(
 		return null;
 	}
 
-	const anchorBlockId = prefixLength === 0
-		? input.state.titleBlockId
-		: previousUnits[prefixLength - 1]?.blockId;
+	const isDocumentTailInsertion = prefixLength === previousUnits.length && suffixLength === 0;
+	const anchorBlockId = isDocumentTailInsertion
+		? DOCUMENT_END_BLOCK_ID
+		: prefixLength === 0
+			? input.state.titleBlockId
+			: previousUnits[prefixLength - 1]?.blockId;
 	if (!anchorBlockId) {
 		return {
 			mode: "blocked",
@@ -2431,7 +2522,7 @@ function splitMarkdownTopLevelBlocks(markdown: string): Array<{ kind: string; co
 
 		const start = index;
 		const kind = isMarkdownTableStart(lines, index) ? "table" : readMarkdownBlockKind(line);
-		if (kind === "heading" || kind === "hr") {
+		if (kind === "heading" || kind === "hr" || kind === "img") {
 			index += 1;
 		} else if (kind === "code") {
 			index += 1;
@@ -2507,6 +2598,10 @@ function isMarkdownParagraphLabelBoundary(line: string): boolean {
 }
 
 function readMarkdownBlockKind(line: string): string {
+	if (isLocalImagePlaceholder(line)) {
+		return "img";
+	}
+
 	if (/^#{1,6}\s+/.test(line)) {
 		return "heading";
 	}
@@ -2685,7 +2780,7 @@ function createUnitFingerprintKey(unit: { kind: string; fingerprint: string }): 
 }
 
 function createMarkdownFingerprint(kind: string, content: string): string {
-	if (kind === "hr") {
+	if (kind === "hr" || kind === "img") {
 		return "";
 	}
 
@@ -2720,6 +2815,10 @@ function createMarkdownFingerprint(kind: string, content: string): string {
 }
 
 function createMarkdownComparisonContent(kind: string, content: string): string {
+	if (kind === "img") {
+		return content.trim();
+	}
+
 	if (kind === "code") {
 		return isMarkdownMermaidBlock(content)
 			? createMarkdownCodeFingerprint(content)
