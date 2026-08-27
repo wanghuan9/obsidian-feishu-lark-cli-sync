@@ -386,6 +386,30 @@ export function removeLarkBinding(content: string): string {
 	return `${quotedFrontmatter}\n\n${trimmedBody}`;
 }
 
+export function removeLarkBindingFrontmatter(content: string): string {
+	if (!content.startsWith("---")) {
+		return content;
+	}
+
+	const endMatch = content.slice(3).match(/\n---\r?\n/);
+	if (!endMatch || endMatch.index === undefined) {
+		return content;
+	}
+
+	const frontmatterStart = 3;
+	const frontmatterEnd = frontmatterStart + endMatch.index;
+	const frontmatter = content.slice(frontmatterStart, frontmatterEnd);
+	const filteredLines = removeYamlObjects(frontmatter.split(/\r?\n/), FRONTMATTER_BINDING_KEYS);
+	const lineEnding = content.includes("\r\n") ? "\r\n" : "\n";
+	const filteredFrontmatter = filteredLines.join(lineEnding).trim();
+	const body = content.slice(frontmatterEnd + endMatch[0].length);
+	if (!filteredFrontmatter) {
+		return body.replace(/^(?:\r?\n)+/, "");
+	}
+
+	return `---${lineEnding}${filteredFrontmatter}${lineEnding}---${lineEnding}${body}`;
+}
+
 export function removeBindingOnlyFrontmatterBeforeNextFrontmatter(content: string): string {
 	if (!content.startsWith("---")) {
 		return content;

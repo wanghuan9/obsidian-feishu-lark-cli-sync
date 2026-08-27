@@ -44,6 +44,7 @@ import {
 	readBindingFromMarkdown,
 	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
+	removeLarkBindingFrontmatter,
 	touchDocumentSyncState,
 	trimSyncStateCache
 } from "./lark-sync-core.mjs";
@@ -182,7 +183,15 @@ function isSupportedImageFile(path) {
 async function collectSyncTasks(repoRoot, files) {
 	const tasks = await Promise.all(files.map(async (file) => {
 		const filePath = resolve(repoRoot, file);
-		const content = await readFile(filePath, "utf8");
+		let content;
+		try {
+			content = await readFile(filePath, "utf8");
+		} catch (error) {
+			if (isFileNotFoundError(error)) {
+				return null;
+			}
+			throw error;
+		}
 		const binding = readBindingFromMarkdown(content);
 		if (!binding) {
 			return null;
@@ -293,6 +302,10 @@ async function syncMarkdownTask(task, settings, syncState) {
 		if (error instanceof PrePushSyncError) {
 			throw error;
 		}
+		if (isRemoteDocumentDeletedApiError(error)) {
+			await unbindDeletedRemoteDocument(task, syncState);
+			throw new PrePushSyncError(formatDeletedRemoteUnboundMessage(settings, task.repoRelativePath));
+		}
 
 		const detail = error instanceof Error ? error.message : String(error);
 		throw new Error(formatSyncFailureMessage({
@@ -303,6 +316,22 @@ async function syncMarkdownTask(task, settings, syncState) {
 			detail
 		}));
 	}
+}
+
+async function unbindDeletedRemoteDocument(task, syncState) {
+	const unboundContent = removeLarkBindingFrontmatter(task.content);
+	await writeFile(task.filePath, unboundContent, "utf8");
+	for (const key of getDocumentStateKeys(task.stateKeys)) {
+		deleteDocumentSyncStateKey(syncState, key);
+	}
+}
+
+function formatDeletedRemoteUnboundMessage(settings, path) {
+	if (readLanguage(settings) === "en") {
+		return `[Feishu Lark CLI Sync] remote Feishu/Lark document was deleted: ${path}\nBinding was removed automatically. Commit the change and push again.`;
+	}
+
+	return `[Feishu Lark CLI Sync] 飞书文档远端已删除：${path}\n已自动解绑，请提交变更后重新 push。`;
 }
 
 function shouldRetryPlanWithRefreshedState(plan) {
@@ -1057,6 +1086,16 @@ function isExecutableLaunchError(error) {
 	return error.code === "ENOENT" || error.code === "EACCES";
 }
 
+function isRemoteDocumentDeletedApiError(error) {
+	const message = error instanceof Error ? error.message : String(error);
+	return message.includes("3380003")
+		|| message.toLowerCase().includes("document page has been deleted");
+}
+
+function isFileNotFoundError(error) {
+	return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
 function isUnsupportedVersionCommandError(error) {
 	const message = [
 		error instanceof Error ? error.message : String(error),
@@ -1223,7 +1262,7 @@ function buildSystemNotificationCommand(message) {
 			executable: process.env[MAC_NOTIFICATION_EXECUTABLE_ENV] || "osascript",
 			args: [
 				"-e",
-				`display notification "${escapeAppleScriptString(body)}" with title "${escapeAppleScriptString(SYSTEM_NOTIFICATION_TITLE)}"`
+				`display notification "${escapeAppleScriptString(body)}" with title "${escapeAppleScriptString(SYSTEM_NOTIFICATION_TITLE)}" sound name "Basso"`
 			]
 		};
 	}

@@ -59,6 +59,8 @@ async function run() {
 		await testOverwritePreservesDocumentTitleBeforeUpdate(workspace);
 		await testOverwriteUpdates(workspace);
 		await testUnboundFilesDoNotBlock(workspace);
+		await testDeletedMarkdownDoesNotBlock(workspace);
+		await testDeletedRemoteDocumentUnbindsAndBlocks(workspace);
 		await testCanonicalStateKey(workspace);
 		await testWikiUrlReusesCanonicalImageState(workspace);
 		await testStateWritePreservesExternalDocuments(workspace);
@@ -892,6 +894,7 @@ async function testMacSystemNotificationOnFailure(workspace) {
 	assert.match(notificationLog, /pre-push sync failed: bound\.md/);
 	if (process.platform !== "win32") {
 		assert.match(notificationLog, /with title "Feishu Lark CLI Sync"/);
+		assert.match(notificationLog, /sound name "Basso"/);
 	}
 }
 
@@ -975,6 +978,55 @@ async function testUnboundFilesDoNotBlock(workspace) {
 	await clearLog(workspace);
 	await runHook(workspace);
 	assert.equal(await readLog(workspace), "");
+}
+
+async function testDeletedMarkdownDoesNotBlock(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "en" });
+	await writeSyncStateRaw(workspace, { version: 1, documents: {} });
+	await clearLog(workspace);
+	const remoteHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+
+	await unlink(join(workspace, "bound.md"));
+	await execFileAsync("git", ["add", "--all"], { cwd: workspace });
+	await execFileAsync("git", ["commit", "-m", "delete bound note"], { cwd: workspace });
+	const localHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+	const refs = `refs/heads/main ${localHead} refs/heads/main ${remoteHead}\n`;
+	const result = await spawnHook(workspace, refs, {});
+
+	assert.equal(result.exitCode, 0, result.stderr);
+	assert.equal(result.stderr, "");
+	assert.equal(await readLog(workspace), "");
+}
+
+async function testDeletedRemoteDocumentUnbindsAndBlocks(workspace) {
+	await resetWorkspaceFiles(workspace);
+	await writeFile(join(workspace, "bound.md"), `---
+lark_doc_url: https://example.feishu.cn/docx/doc-token
+tags:
+  - sync
+---
+Body`);
+	await execFileAsync("git", ["add", "bound.md"], { cwd: workspace });
+	await writeSettings(workspace, { autoSyncMode: "pre-push", syncStrategy: "precise", language: "zh-CN" });
+	await writeSyncState(workspace, "https://example.feishu.cn/docx/doc-token", "# bound\n\nBody");
+	await clearLog(workspace);
+
+	const result = await runHook(workspace, {
+		reject: false,
+		env: { LARK_CLI_DELETED_DOC: "doc-token" }
+	});
+
+	assert.equal(result.exitCode, 1);
+	assert.match(result.stderr, /飞书文档远端已删除：bound\.md/);
+	assert.match(result.stderr, /已自动解绑，请提交变更后重新 push/);
+	assert.equal(await readFile(join(workspace, "bound.md"), "utf8"), `---
+tags:
+  - sync
+---
+Body`);
+	const state = await readSyncState(workspace);
+	assert.equal(state.documents["doc-token"], undefined);
 }
 
 async function testImageOnlyChangeSyncsReferencingDocument(workspace) {
@@ -1201,6 +1253,13 @@ if (process.env.LARK_CLI_LOCK_DIR && args.includes("+update") && doc.includes("d
 }
 if (process.env.LARK_CLI_FAIL_DOC && doc.includes(process.env.LARK_CLI_FAIL_DOC)) {
   process.stdout.write(JSON.stringify({ ok: false, error: { message: "forced failure" } }));
+  process.exit(0);
+}
+if (process.env.LARK_CLI_DELETED_DOC && doc.includes(process.env.LARK_CLI_DELETED_DOC)) {
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    error: { code: 3380003, message: "Document page has been deleted. This page can no longer be edited" }
+  }));
   process.exit(0);
 }
 const changedAfterUpdatePath = process.env.LARK_CLI_LOG + ".changed-after-update";

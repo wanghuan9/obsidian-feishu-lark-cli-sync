@@ -35,6 +35,7 @@ const {
 	readBindingFromMarkdown,
 	removeBindingOnlyFrontmatterBeforeNextFrontmatter,
 	removeLarkBinding,
+	removeLarkBindingFrontmatter,
 	stripPreparedMarkdownTitle,
 	trimSyncStateCache
 } = await import("./.tmp-lark-sync-core-test.mjs");
@@ -56,6 +57,18 @@ assert.equal(removeLarkBinding(markdown), `> tags:
 > - sync
 
 Body`);
+
+assert.equal(removeLarkBindingFrontmatter(markdown), `---
+tags:
+  - sync
+---
+Body`);
+
+assert.equal(removeLarkBindingFrontmatter(`---
+lark_doc_url: "https://example.feishu.cn/docx/abc"
+lark_doc_token: "abc"
+---
+Body`), "Body");
 
 assert.equal(removeLarkBinding(`---
 lark_doc_url: "https://example.feishu.cn/docx/abc"

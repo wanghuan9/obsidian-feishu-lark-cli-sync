@@ -357,4 +357,116 @@ assert.deepEqual(globalThis.__obsidianNotices, [{
 }]);
 delete globalThis.__obsidianNotices;
 
+const deletedRemotePlugin = createPlugin();
+deletedRemotePlugin.autoSyncRunningPaths = new Set();
+deletedRemotePlugin.autoSyncPendingPaths = new Set();
+deletedRemotePlugin.selfWrittenPaths = new Map();
+deletedRemotePlugin.syncStateChangedKeys = new Set();
+deletedRemotePlugin.syncStateRemovedKeys = new Set();
+deletedRemotePlugin.syncState = {
+	version: 1,
+	documents: {
+		"deleted-token": {
+			doc: "deleted-token",
+			contentHash: "hash",
+			units: [],
+			updatedAt: "2026-08-27T00:00:00.000Z"
+		}
+	}
+};
+const deletedRemoteBinding = {
+	token: "deleted-token",
+	url: "https://example.feishu.cn/docx/deleted-token"
+};
+deletedRemotePlugin.getBinding = () => deletedRemoteBinding;
+deletedRemotePlugin.syncFileInternal = async () => {
+	throw new Error('{"code":3380003,"message":"Document page has been deleted"}');
+};
+const deletedRemoteFrontmatter = {
+	lark_doc: "legacy",
+	lark_doc_url: deletedRemoteBinding.url,
+	lark_doc_token: deletedRemoteBinding.token,
+	lark_doc_synced_at: "2026-08-27",
+	remoteRoot: "root",
+	remoteParentPath: "path",
+	tags: ["sync"]
+};
+deletedRemotePlugin.app = {
+	vault: {
+		getAbstractFileByPath: () => ({ path: "docs/deleted-remote.md" })
+	},
+	fileManager: {
+		processFrontMatter: async (_file, update) => update(deletedRemoteFrontmatter)
+	}
+};
+let deletedRemoteStateSaved = false;
+deletedRemotePlugin.saveLarkSyncState = async () => {
+	deletedRemoteStateSaved = true;
+};
+const deletedRemoteWarnings = [];
+globalThis.__obsidianNotices = [];
+console.warn = (...args) => {
+	deletedRemoteWarnings.push(args);
+};
+try {
+	await deletedRemotePlugin.runSaveAutoSync({ path: "docs/deleted-remote.md" });
+} finally {
+	console.warn = originalWarn;
+}
+assert.deepEqual(deletedRemoteFrontmatter, { tags: ["sync"] });
+assert.equal(deletedRemotePlugin.syncState.documents["deleted-token"], undefined);
+assert.equal(deletedRemoteStateSaved, true);
+assert.equal(deletedRemoteWarnings.length, 1);
+assert.deepEqual(globalThis.__obsidianNotices, [{
+	message: "飞书文档远端已删除，已自动解绑：docs/deleted-remote.md\n如需重新发布，请再次执行“同步到飞书”。",
+	timeout: 10000
+}]);
+delete globalThis.__obsidianNotices;
+
+const deletedNotePlugin = createPlugin();
+deletedNotePlugin.autoSyncRunningPaths = new Set();
+deletedNotePlugin.autoSyncPendingPaths = new Set();
+deletedNotePlugin.app = {
+	vault: {
+		getAbstractFileByPath: () => null
+	}
+};
+deletedNotePlugin.syncFileInternal = async () => {
+	const error = new Error("ENOENT: no such file or directory");
+	error.code = "ENOENT";
+	throw error;
+};
+const autoSyncErrors = [];
+const originalError = console.error;
+globalThis.__obsidianNotices = [];
+console.error = (...args) => {
+	autoSyncErrors.push(args);
+};
+try {
+	await deletedNotePlugin.runSaveAutoSync({ path: "docs/deleted.md" });
+} finally {
+	console.error = originalError;
+}
+assert.deepEqual(globalThis.__obsidianNotices, []);
+assert.deepEqual(autoSyncErrors, []);
+delete globalThis.__obsidianNotices;
+
+deletedNotePlugin.app.vault.getAbstractFileByPath = () => ({ path: "docs/existing.md" });
+const existingNoteErrors = [];
+globalThis.__obsidianNotices = [];
+console.error = (...args) => {
+	existingNoteErrors.push(args);
+};
+try {
+	await deletedNotePlugin.runSaveAutoSync({ path: "docs/existing.md" });
+} finally {
+	console.error = originalError;
+}
+assert.deepEqual(globalThis.__obsidianNotices, [{
+	message: "自动同步失败：docs/existing.md\nENOENT: no such file or directory",
+	timeout: 10000
+}]);
+assert.equal(existingNoteErrors.length, 1);
+delete globalThis.__obsidianNotices;
+
 console.log("main plugin tests passed");

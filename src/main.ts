@@ -355,6 +355,7 @@ const MESSAGES = {
 		noticePublishedFolderToLark: "已发布 {count} 篇笔记到飞书。",
 		noticeSyncFailed: "飞书同步失败：{message}",
 		noticeRemoteDeletedRecreate: "远端文档已删除，正在重新创建...",
+		noticeRemoteDeletedUnbound: "飞书文档远端已删除，已自动解绑：{path}\n如需重新发布，请再次执行“同步到飞书”。",
 		noticeGitHookInstalled: "已安装 pre-push hook。选择 pre-push 模式后，git push 前会同步已绑定文档。",
 		noticeGitHookInstallFailed: "安装 pre-push hook 失败：{message}",
 		noticeNoDesktopVaultPath: "当前环境无法获取本地仓库路径，不能安装 Git hook。",
@@ -427,6 +428,7 @@ const MESSAGES = {
 		noticePublishedFolderToLark: "Published {count} notes to Feishu/Lark.",
 		noticeSyncFailed: "Feishu/Lark sync failed: {message}",
 		noticeRemoteDeletedRecreate: "Remote document was deleted. Creating a new document...",
+		noticeRemoteDeletedUnbound: "The remote Feishu/Lark document was deleted and has been unbound: {path}\nRun Sync to Lark again to publish a new document.",
 		noticeGitHookInstalled: "Installed the pre-push hook. When pre-push mode is selected, bound notes sync before git push.",
 		noticeGitHookInstallFailed: "Failed to install pre-push hook: {message}",
 		noticeNoDesktopVaultPath: "Cannot resolve the local vault path in this environment, so Git hook cannot be installed.",
@@ -823,13 +825,34 @@ export default class LarkCliSyncPlugin extends Plugin {
 				mode: "save"
 			});
 		} catch (error) {
-			if (error instanceof RemoteStateRefreshError && error.updateSubmitted) {
+			if (this.isFileNotFoundError(error)
+				&& !this.app.vault.getAbstractFileByPath(file.path)) {
+				return;
+			}
+			let effectiveError = error;
+			if (this.isRemoteDocumentDeletedApiError(error)) {
+				const binding = this.getBinding(file);
+				try {
+					if (binding) {
+						await this.unbindDeletedRemoteDocument(file, binding);
+						new Notice(this.t("noticeRemoteDeletedUnbound", { path: file.path }), 10000);
+						console.warn("[Feishu Lark CLI Sync] remote document deleted; binding removed", {
+							path: file.path,
+							doc: getDocumentStateKey(binding.token || binding.url)
+						});
+						return;
+					}
+				} catch (unbindError) {
+					effectiveError = unbindError;
+				}
+			}
+			if (effectiveError instanceof RemoteStateRefreshError && effectiveError.updateSubmitted) {
 				new Notice(this.t("noticeAutoSyncConfirmationTimedOut", { path: file.path }), 10000);
-				console.warn("[Feishu Lark CLI Sync] auto sync update submitted but confirmation timed out", error);
+				console.warn("[Feishu Lark CLI Sync] auto sync update submitted but confirmation timed out", effectiveError);
 			} else {
-				const errorMessage = error instanceof Error ? error.message : String(error);
+				const errorMessage = effectiveError instanceof Error ? effectiveError.message : String(effectiveError);
 				new Notice(this.t("noticeAutoSyncFailed", { path: file.path, message: errorMessage }), 10000);
-				console.error("[Feishu Lark CLI Sync] auto sync failed", error);
+				console.error("[Feishu Lark CLI Sync] auto sync failed", effectiveError);
 			}
 		} finally {
 			this.autoSyncRunningPaths.delete(file.path);
@@ -3364,6 +3387,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			|| message.toLowerCase().includes("not found");
 	}
 
+	private isRemoteDocumentDeletedApiError(error: unknown): boolean {
+		const message = error instanceof Error ? error.message : String(error);
+		return message.includes("3380003")
+			|| message.toLowerCase().includes("document page has been deleted");
+	}
+
 	private async buildCommandEnvironment(executable: string): Promise<NodeJS.ProcessEnv> {
 		const shellPath = await this.getLoginShellPath();
 		if (this.cachedCommandEnvironment
@@ -3571,6 +3600,21 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
 		});
 		this.selfWrittenPaths.set(file.path, Date.now());
+	}
+
+	private async unbindDeletedRemoteDocument(file: TFile, binding: BoundLarkDocument): Promise<void> {
+		this.selfWrittenPaths.set(file.path, Date.now());
+		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+			delete frontmatter.lark_doc;
+			delete frontmatter[FRONTMATTER_URL_KEY];
+			delete frontmatter[FRONTMATTER_TOKEN_KEY];
+			delete frontmatter[LEGACY_FRONTMATTER_SYNCED_AT_KEY];
+			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
+			delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
+		});
+		this.selfWrittenPaths.set(file.path, Date.now());
+		this.removeSyncStateForBinding(binding);
+		await this.saveLarkSyncState();
 	}
 
 	private async runWithNotice(message: string, callback: () => Promise<void>): Promise<void> {
