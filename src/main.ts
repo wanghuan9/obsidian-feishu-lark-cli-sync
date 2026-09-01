@@ -27,6 +27,7 @@ import {
 	createDocumentSyncStateFromRemote,
 	createEmptySyncStateFile,
 	createIncompleteDocumentSyncStateFromMarkdown,
+	createStagedMarkdownPublishPlan,
 	createSyncContentSignature,
 	extractDocumentToken,
 	extractTitle,
@@ -137,6 +138,11 @@ const LARK_CLI_REQUEST_INTERVAL_MS = 350;
 const LARK_CLI_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
 const LARK_CLI_VERSION_ARGS = [["-version"], ["-v"]];
 const FALLBACK_LOGIN_SHELLS = ["/bin/zsh", "/bin/bash", "/bin/sh"];
+const STAGED_PUBLISH_THRESHOLD_BYTES = 100 * 1024;
+const STAGED_PUBLISH_THRESHOLD_UNITS = 400;
+const STAGED_PUBLISH_MAX_BATCH_BYTES = 60 * 1024;
+const STAGED_PUBLISH_MAX_BATCH_UNITS = 100;
+const DOCUMENT_END_BLOCK_ID = "-1";
 
 type Language = "zh-CN" | "en";
 type AutoSyncMode = "manual" | "save" | "pre-push";
@@ -1629,7 +1635,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	): Promise<BoundLarkDocument> {
 		const title = extractTitle(file, preparedContent.content, "first-heading");
 		const bodyContent = stripPreparedMarkdownTitle(preparedContent.content);
-		return await this.withTempMarkdown(file.basename, bodyContent, async (tempFile) => {
+		const publishPlan = createStagedMarkdownPublishPlan(
+			preparedContent.content,
+			this.getStagedPublishOptions()
+		);
+		const initialBodyContent = publishPlan.staged ? "" : bodyContent;
+		return await this.withTempMarkdown(file.basename, initialBodyContent, async (tempFile) => {
 			const args = ["docs", "+create", "--api-version", "v2", "--as", "user", "--doc-format", "markdown",
 				"--title", title, "--content", `@${tempFile.fileName}`, "--json"];
 
@@ -1654,8 +1665,47 @@ exec "${nodePath}" "${scriptPath}" "$@"
 				url
 			};
 			await onCreated?.(binding);
+			if (publishPlan.staged) {
+				await this.appendStagedDocumentBatches(token || url, publishPlan.batches);
+			}
 			await this.materializeLocalImages(token, preparedContent.images);
 			return binding;
+		});
+	}
+
+	private getStagedPublishOptions() {
+		return {
+			thresholdBytes: STAGED_PUBLISH_THRESHOLD_BYTES,
+			thresholdUnits: STAGED_PUBLISH_THRESHOLD_UNITS,
+			maxBatchBytes: STAGED_PUBLISH_MAX_BATCH_BYTES,
+			maxBatchUnits: STAGED_PUBLISH_MAX_BATCH_UNITS
+		};
+	}
+
+	private async appendStagedDocumentBatches(doc: string, batches: string[]): Promise<number | undefined> {
+		if (batches.length === 0) {
+			return undefined;
+		}
+
+		return await this.withTempMarkdown("staged-publish", "", async (tempFile) => {
+			let revisionId: number | undefined;
+			for (const [index, batch] of batches.entries()) {
+				const contentFileName = await this.writeTempMarkdown(
+					tempFile.directory,
+					`staged-publish-${index}`,
+					batch
+				);
+				const result = await this.runLarkCli(buildUpdateCommandArgs({
+					doc,
+					command: "block_insert_after",
+					docFormat: "markdown",
+					blockId: DOCUMENT_END_BLOCK_ID,
+					contentFileName,
+					revisionId
+				}), { cwd: tempFile.directory });
+				revisionId = result.data?.["document"]?.revision_id;
+			}
+			return revisionId;
 		});
 	}
 
@@ -1666,6 +1716,12 @@ exec "${nodePath}" "${scriptPath}" "$@"
 	): Promise<Partial<BoundLarkDocument>> {
 		const content = preparedContent.content;
 		const strategy = context.strategy || this.settings.syncStrategy;
+		if (strategy !== "overwrite") {
+			const resumedDocument = await this.tryResumeStagedDocumentPublish(doc, preparedContent, context);
+			if (resumedDocument) {
+				return resumedDocument;
+			}
+		}
 		let state = this.findDocumentState([doc, ...(context.stateKeys || [])]);
 		let syncDoc = state?.doc || doc;
 		if (strategy !== "overwrite" && this.shouldRefreshPreciseSyncState(state)) {
@@ -1703,6 +1759,50 @@ exec "${nodePath}" "${scriptPath}" "$@"
 			...context,
 			previousRevisionId: state?.revisionId
 		});
+	}
+
+	private async tryResumeStagedDocumentPublish(
+		doc: string,
+		preparedContent: PreparedNoteContent,
+		context: { mode: SyncMode; path: string; stateKeys?: string[] }
+	): Promise<LarkDocumentUpdateResult | null> {
+		const state = this.findDocumentState([doc, ...(context.stateKeys || [])]);
+		if (state && isDocumentStateBlockMappingAcceptable(state)) {
+			return null;
+		}
+
+		const initialPlan = createStagedMarkdownPublishPlan(
+			preparedContent.content,
+			this.getStagedPublishOptions()
+		);
+		if (!initialPlan.staged) {
+			return null;
+		}
+
+		const remoteMarkdown = await this.fetchLarkDocumentMarkdown(doc);
+		const resumePlan = createStagedMarkdownPublishPlan(
+			preparedContent.content,
+			this.getStagedPublishOptions(),
+			remoteMarkdown.content
+		);
+		if (!resumePlan.resumable) {
+			return null;
+		}
+
+		let revisionId = remoteMarkdown.revisionId;
+		if (resumePlan.batches.length > 0) {
+			revisionId = await this.appendStagedDocumentBatches(doc, resumePlan.batches) ?? revisionId;
+		}
+		const mediaSnapshot = await this.materializeLocalImages(doc, preparedContent.images);
+		revisionId = mediaSnapshot?.revisionId ?? revisionId;
+		await this.saveRemoteDocumentStateFromBaselineAfterExpectedRevision(
+			doc,
+			context.stateKeys || [],
+			preparedContent.content,
+			revisionId,
+			context
+		);
+		return { revisionId };
 	}
 
 	private shouldRetryPlanWithRefreshedState(plan: SyncPlan): boolean {
@@ -3589,14 +3689,10 @@ exec "${nodePath}" "${scriptPath}" "$@"
 
 		await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
 			delete frontmatter.lark_doc;
+			delete frontmatter[FRONTMATTER_TOKEN_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_ROOT_KEY];
 			delete frontmatter[FRONTMATTER_REMOTE_PARENT_PATH_KEY];
 			delete frontmatter[LEGACY_FRONTMATTER_SYNCED_AT_KEY];
-			if (binding.token) {
-				frontmatter[FRONTMATTER_TOKEN_KEY] = binding.token;
-			} else {
-				delete frontmatter[FRONTMATTER_TOKEN_KEY];
-			}
 			frontmatter[FRONTMATTER_URL_KEY] = binding.url;
 		});
 		this.selfWrittenPaths.set(file.path, Date.now());

@@ -80,6 +80,22 @@ export interface SyncContentUnitSignature {
 	hash: string;
 }
 
+export interface StagedMarkdownPublishOptions {
+	thresholdBytes: number;
+	thresholdUnits: number;
+	maxBatchBytes: number;
+	maxBatchUnits: number;
+}
+
+export interface StagedMarkdownPublishPlan {
+	staged: boolean;
+	resumable: boolean;
+	totalBytes: number;
+	unitCount: number;
+	completedUnitCount: number;
+	batches: string[];
+}
+
 export function invalidateLocalImageSyncState(state: DocumentSyncState): DocumentSyncState {
 	if (!state.units.some((unit) => unit.kind === "img")) {
 		return state;
@@ -1417,6 +1433,100 @@ export async function createSyncContentSignature(markdown: string): Promise<Sync
 	};
 }
 
+export function createStagedMarkdownPublishPlan(
+	markdown: string,
+	options: StagedMarkdownPublishOptions,
+	completedMarkdown?: string
+): StagedMarkdownPublishPlan {
+	const units = createMarkdownPublishUnits(markdown);
+	const totalBytes = getUtf8ByteLength(markdown);
+	const staged = totalBytes >= normalizePositiveInteger(options.thresholdBytes)
+		|| units.length >= normalizePositiveInteger(options.thresholdUnits);
+	if (!staged) {
+		return {
+			staged: false,
+			resumable: false,
+			totalBytes,
+			unitCount: units.length,
+			completedUnitCount: 0,
+			batches: []
+		};
+	}
+
+	const completedUnits = completedMarkdown === undefined
+		? []
+		: createMarkdownPublishUnits(completedMarkdown);
+	const resumable = completedUnits.length <= units.length
+		&& completedUnits.every((unit, index) => {
+			const expectedUnit = units[index];
+			return Boolean(expectedUnit)
+				&& unit.kind === expectedUnit?.kind
+				&& unit.comparisonContent === expectedUnit.comparisonContent;
+		});
+	const completedUnitCount = resumable ? completedUnits.length : 0;
+	return {
+		staged: true,
+		resumable,
+		totalBytes,
+		unitCount: units.length,
+		completedUnitCount,
+		batches: resumable
+			? createMarkdownPublishBatches(units.slice(completedUnitCount), options)
+			: []
+	};
+}
+
+interface MarkdownPublishUnit {
+	kind: string;
+	content: string;
+	comparisonContent: string;
+}
+
+function createMarkdownPublishUnits(markdown: string): MarkdownPublishUnit[] {
+	const title = readMarkdownDocumentTitle(markdown);
+	return splitMarkdownTopLevelBlocks(stripRedundantBodyTitle(stripMarkdownTitle(markdown), title, false))
+		.map((block) => ({
+			...block,
+			comparisonContent: createMarkdownComparisonContent(block.kind, block.content)
+		}));
+}
+
+function createMarkdownPublishBatches(
+	units: MarkdownPublishUnit[],
+	options: StagedMarkdownPublishOptions
+): string[] {
+	const maxBatchBytes = normalizePositiveInteger(options.maxBatchBytes);
+	const maxBatchUnits = normalizePositiveInteger(options.maxBatchUnits);
+	const batches: string[] = [];
+	let batchUnits: MarkdownPublishUnit[] = [];
+
+	for (const unit of units) {
+		const candidateUnits = [...batchUnits, unit];
+		const candidateContent = joinInsertedUnitContent(candidateUnits);
+		if (batchUnits.length > 0
+			&& (candidateUnits.length > maxBatchUnits || getUtf8ByteLength(candidateContent) > maxBatchBytes)) {
+			batches.push(joinInsertedUnitContent(batchUnits));
+			batchUnits = [unit];
+			continue;
+		}
+
+		batchUnits = candidateUnits;
+	}
+
+	if (batchUnits.length > 0) {
+		batches.push(joinInsertedUnitContent(batchUnits));
+	}
+	return batches;
+}
+
+function normalizePositiveInteger(value: number): number {
+	return Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1;
+}
+
+function getUtf8ByteLength(content: string): number {
+	return new TextEncoder().encode(content).byteLength;
+}
+
 export async function createIncompleteDocumentSyncStateFromMarkdown(
 	doc: string,
 	markdown: string,
@@ -1810,7 +1920,7 @@ function createTitleXmlContent(title: string): string {
 	return `<title>${escapeXmlText(title)}</title>`;
 }
 
-function joinInsertedUnitContent(units: MarkdownSyncUnit[]): string {
+function joinInsertedUnitContent(units: Array<{ kind: string; content: string }>): string {
 	return units.reduce((content, unit, index) => {
 		if (index === 0) {
 			return unit.content;

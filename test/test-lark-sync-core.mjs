@@ -18,6 +18,7 @@ const {
 	createContentHash,
 	createEmptySyncStateFile,
 	createIncompleteDocumentSyncStateFromMarkdown,
+	createStagedMarkdownPublishPlan,
 	createSyncContentSignature,
 	extractDocumentToken,
 	formatSyncFailureMessage,
@@ -39,6 +40,57 @@ const {
 	stripPreparedMarkdownTitle,
 	trimSyncStateCache
 } = await import("./.tmp-lark-sync-core-test.mjs");
+
+const stagedOptions = {
+	thresholdBytes: 1000,
+	thresholdUnits: 4,
+	maxBatchBytes: 1000,
+	maxBatchUnits: 2
+};
+const smallPublishPlan = createStagedMarkdownPublishPlan("# Small\n\nBody", stagedOptions);
+assert.equal(smallPublishPlan.staged, false);
+assert.deepEqual(smallPublishPlan.batches, []);
+
+const stagedMarkdown = "# Large\n\n## A\n\nA body\n\n## B\n\nB body";
+const stagedPublishPlan = createStagedMarkdownPublishPlan(stagedMarkdown, stagedOptions);
+assert.equal(stagedPublishPlan.staged, true);
+assert.equal(stagedPublishPlan.unitCount, 4);
+assert.deepEqual(stagedPublishPlan.batches, ["## A\n\nA body", "## B\n\nB body"]);
+
+const resumedPublishPlan = createStagedMarkdownPublishPlan(
+	stagedMarkdown,
+	stagedOptions,
+	"# Large\n\n## A\n\nA body"
+);
+assert.equal(resumedPublishPlan.resumable, true);
+assert.equal(resumedPublishPlan.completedUnitCount, 2);
+assert.deepEqual(resumedPublishPlan.batches, ["## B\n\nB body"]);
+
+const divergedPublishPlan = createStagedMarkdownPublishPlan(
+	stagedMarkdown,
+	stagedOptions,
+	"# Large\n\n## Changed"
+);
+assert.equal(divergedPublishPlan.resumable, false);
+assert.deepEqual(divergedPublishPlan.batches, []);
+
+const oversizedTable = [
+	"# Table",
+	"",
+	"| A | B |",
+	"| --- | --- |",
+	"| " + "x".repeat(80) + " | y |"
+].join("\n");
+const tablePublishPlan = createStagedMarkdownPublishPlan(oversizedTable, {
+	thresholdBytes: 1,
+	thresholdUnits: 100,
+	maxBatchBytes: 20,
+	maxBatchUnits: 1
+});
+assert.equal(tablePublishPlan.staged, true);
+assert.equal(tablePublishPlan.unitCount, 1);
+assert.equal(tablePublishPlan.batches.length, 1);
+assert.match(tablePublishPlan.batches[0], /^\| A \| B \|/);
 
 const markdown = `---
 lark_doc_url: "https://example.feishu.cn/docx/abc"

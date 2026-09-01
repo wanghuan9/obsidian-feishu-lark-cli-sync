@@ -206,8 +206,84 @@ assert.deepEqual(provisionalBinding, {
 	url: "https://example.com/docx/created-token"
 });
 
+const stagedCreatePlugin = createPlugin();
+const stagedCreateEvents = [];
+const stagedTempContents = [];
+const stagedBatchContents = [];
+stagedCreatePlugin.withTempMarkdown = async (_baseName, content, callback) => {
+	stagedTempContents.push(content);
+	return await callback({ directory: "/tmp", fileName: "note.md" });
+};
+stagedCreatePlugin.writeTempMarkdown = async (_directory, _baseName, content) => {
+	stagedBatchContents.push(content);
+	return `batch-${stagedBatchContents.length}.md`;
+};
+stagedCreatePlugin.resolveRemoteRootParent = async () => ({ token: "parent-token" });
+stagedCreatePlugin.runLarkCli = async (args) => {
+	if (args[1] === "+create") {
+		stagedCreateEvents.push("create");
+		return {
+			ok: true,
+			data: { document: { document_id: "large-token", url: "https://example.com/docx/large-token" } }
+		};
+	}
+	stagedCreateEvents.push("append");
+	return {
+		ok: true,
+		data: { document: { revision_id: stagedCreateEvents.length } }
+	};
+};
+stagedCreatePlugin.materializeLocalImages = async () => {};
+const largeBodyUnits = Array.from({ length: 401 }, (_, index) => `Paragraph ${index}`).join("\n\n");
+await stagedCreatePlugin.createLarkDocument(
+	{ basename: "Large" },
+	{ content: `# Large\n\n${largeBodyUnits}`, images: [] },
+	undefined,
+	async () => {
+		stagedCreateEvents.push("bind");
+	}
+);
+assert.equal(stagedTempContents[0], "");
+assert.deepEqual(stagedCreateEvents.slice(0, 3), ["create", "bind", "append"]);
+assert.equal(stagedBatchContents.length, 5);
+
+const stagedResumePlugin = createPlugin();
+stagedResumePlugin.findDocumentState = () => undefined;
+stagedResumePlugin.fetchLarkDocumentMarkdown = async () => ({
+	content: `# Large\n\n${Array.from({ length: 100 }, (_, index) => `Paragraph ${index}`).join("\n\n")}`,
+	revisionId: 10
+});
+let resumedBatches;
+stagedResumePlugin.appendStagedDocumentBatches = async (_doc, batches) => {
+	resumedBatches = batches;
+	return 20;
+};
+stagedResumePlugin.materializeLocalImages = async () => undefined;
+let resumedBaseline;
+stagedResumePlugin.saveRemoteDocumentStateFromBaselineAfterExpectedRevision = async (
+	_doc,
+	_stateKeys,
+	baselineMarkdown,
+	expectedRevisionId
+) => {
+	resumedBaseline = { baselineMarkdown, expectedRevisionId };
+};
+const resumedDocument = await stagedResumePlugin.tryResumeStagedDocumentPublish(
+	"large-token",
+	{ content: `# Large\n\n${largeBodyUnits}`, images: [] },
+	{ mode: "manual", path: "large.md", stateKeys: [] }
+);
+assert.equal(resumedDocument.revisionId, 20);
+assert.equal(resumedBatches.length, 4);
+assert.deepEqual(resumedBaseline, {
+	baselineMarkdown: `# Large\n\n${largeBodyUnits}`,
+	expectedRevisionId: 20
+});
+
 const bindingWriterPlugin = createPlugin();
-const writtenFrontmatter = {};
+const writtenFrontmatter = {
+	lark_doc_token: "legacy-token"
+};
 bindingWriterPlugin.selfWrittenPaths = new Map();
 bindingWriterPlugin.getBinding = () => null;
 bindingWriterPlugin.app = {
@@ -224,7 +300,6 @@ await bindingWriterPlugin.writeBinding({ path: "note.md" }, {
 	url: "https://example.com/wiki/wiki-node"
 });
 assert.deepEqual(writtenFrontmatter, {
-	lark_doc_token: "created-token",
 	lark_doc_url: "https://example.com/wiki/wiki-node"
 });
 

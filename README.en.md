@@ -81,7 +81,6 @@ Default binding example:
 
 ```yaml
 ---
-lark_doc_token: "xxxx"
 lark_doc_url: "https://example.feishu.cn/docx/xxxx"
 ---
 ```
